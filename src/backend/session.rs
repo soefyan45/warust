@@ -387,6 +387,23 @@ impl Running {
         state.update(id, |v| v.queue += 1);
         let _ = self.queue.send(Outgoing { local_id, chat, body });
     }
+
+    /// Puts a message that failed back in the send queue, under its own id,
+    /// the way queued messages go out again after a restart.
+    pub fn retry(&self, id: &str, msg_id: &str, state: &Updater, store: &Mutex<Store>) {
+        let Some(book) = state.book(id) else { return };
+        let found = book.chats.iter().find_map(|c| c.messages.iter().find(|m| m.id == msg_id).map(|m| (c.jid.clone(), m)));
+        let Some((chat, m)) = found.filter(|(_, m)| m.from_me && matches!(m.status, Delivery::Failed(_))) else {
+            return log::warn!("session {id}: retry: no failed message {msg_id}");
+        };
+        let Some(body) = queued_body(&book, m) else {
+            let why = tr("Cannot be resent: the file or the original status is gone", "Tidak bisa dikirim ulang: file atau status aslinya sudah tidak ada");
+            return state.record(id, store, &[store::status_record(msg_id, &Delivery::Failed(why.to_owned()))]);
+        };
+        state.record(id, store, &[store::status_record(msg_id, &Delivery::Queued)]);
+        state.update(id, |v| v.queue += 1);
+        let _ = self.queue.send(Outgoing { local_id: msg_id.to_owned(), chat, body });
+    }
 }
 
 fn unix_nanos() -> u128 {

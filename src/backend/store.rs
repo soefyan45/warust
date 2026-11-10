@@ -552,8 +552,10 @@ impl Book {
                     let status = Delivery::parse(&code);
                     for chat in &mut self.chats {
                         if let Some(m) = chat.messages.iter_mut().find(|m| m.id == id) {
-                            // Failures may replace "queued"; receipts only move forward.
-                            if status.rank() > m.status.rank() || matches!(status, Delivery::Failed(_)) {
+                            // Failures may replace "queued", and a retry puts a failed
+                            // message back in the queue; receipts only move forward.
+                            let retry = matches!(status, Delivery::Queued) && matches!(m.status, Delivery::Failed(_));
+                            if status.rank() > m.status.rank() || matches!(status, Delivery::Failed(_)) || retry {
                                 m.status = status;
                             }
                             return;
@@ -1206,6 +1208,22 @@ mod tests {
         ]);
         assert_eq!(b.chats[0].messages.len(), 1);
         assert_eq!(b.chats[0].messages[0].id, "a");
+    }
+
+    #[test]
+    fn a_retry_puts_a_failed_message_back_in_the_queue() {
+        let b = book(&[
+            msg_record("1@s.whatsapp.net", "local-1", true, "", "t", 1, &Delivery::Queued, false),
+            status_record("local-1", &Delivery::Failed("offline".into())),
+            status_record("local-1", &Delivery::Queued),
+        ]);
+        assert_eq!(b.chats[0].messages[0].status, Delivery::Queued);
+        // A sent message never goes back to queued.
+        let b = book(&[
+            msg_record("1@s.whatsapp.net", "x", true, "", "t", 1, &Delivery::Sent, false),
+            status_record("x", &Delivery::Queued),
+        ]);
+        assert_eq!(b.chats[0].messages[0].status, Delivery::Sent);
     }
 
     #[test]
