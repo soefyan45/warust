@@ -419,6 +419,19 @@ impl Updater {
         self.ctx.request_repaint();
     }
 
+    /// Stores a group's members for the mention picker.
+    pub(crate) fn set_members(&self, session: &str, group: &str, members: Vec<Member>) {
+        let key = {
+            let book = self.book(session);
+            let jid = book.map(|b| b.normalize(group)).unwrap_or_else(|| store::bare(group));
+            Typing::key(session, &jid)
+        };
+        if let Ok(mut shared) = self.shared.lock() {
+            Arc::make_mut(&mut shared.members).insert(key, members);
+        }
+        self.ctx.request_repaint();
+    }
+
     pub(crate) fn viewing(&self) -> Option<(String, String)> {
         self.shared.lock().ok()?.viewing.clone()
     }
@@ -577,8 +590,11 @@ async fn run(
                 let _ = std::fs::remove_file(Store::path(&data_dir, &id));
                 state.remove(&id);
             }
-            Command::Send { id, chat, text, mentions: _ } => match (running.get(&id), stores.get(&id)) {
-                (Some(r), Some(store)) => r.enqueue(&id, chat, Body::Text(text), &state, store),
+            Command::Send { id, chat, text, mentions } => match (running.get(&id), stores.get(&id)) {
+                (Some(r), Some(store)) => {
+                    let body = if mentions.is_empty() { Body::Text(text) } else { Body::Mention { text, mentions } };
+                    r.enqueue(&id, chat, body, &state, store)
+                }
                 _ => log::warn!("send: session {id} is not running"),
             },
             Command::SendFile { id, chat, path, caption } => match (running.get(&id), stores.get(&id)) {
@@ -618,7 +634,11 @@ async fn run(
                 }
                 state.ctx.request_repaint();
             }
-            Command::GroupMembers { id: _, chat: _ } => {} // TODO(#16): backend slice
+            Command::GroupMembers { id, chat } => {
+                if let (Some(r), Some(store)) = (running.get(&id), stores.get(&id)) {
+                    r.group_members(&id, &chat, &state, store.clone());
+                }
+            }
             Command::TestWebhook => {
                 let _ = state.hooks.send(webhook::Event {
                     session: "test".to_owned(),

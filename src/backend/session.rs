@@ -45,6 +45,9 @@ pub enum Body {
     /// A comment or reaction on a contact's status, quoting it (sent to the
     /// poster's chat, as WhatsApp does).
     StatusReply { text: String, status: store::StatusPost },
+    /// Text that mentions group members (`mentions` are their JIDs, the text
+    /// holds `@<user part>` for each).
+    Mention { text: String, mentions: Vec<String> },
 }
 
 pub struct Running {
@@ -150,6 +153,49 @@ impl Running {
         });
     }
 
+    /// Fetches a group's members into `Shared::members` and teaches the book
+    /// the LID <-> phone mappings it learns on the way, so `@lid` mentions
+    /// resolve to names. Runs in the background; failures only log.
+    pub fn group_members(&self, id: &str, chat: &str, state: &Updater, store: Arc<Mutex<Store>>) {
+        let Ok(group) = chat.parse::<Jid>() else {
+            return;
+        };
+        let (client, id, state) = (self.client.clone(), id.to_owned(), state.clone());
+        tokio::spawn(async move {
+            let mut meta = match client.groups().fetch_metadata(&group).await {
+                Ok(meta) => meta,
+                Err(e) => {
+                    log::warn!("session {id}: group members failed: {e:?}");
+                    return;
+                }
+            };
+            client.groups().resolve_participant_addresses(&mut meta).await;
+            let own = own_users(&client);
+            let book = state.book(&id);
+            let mut members = Vec::new();
+            let mut records = Vec::new();
+            for p in &meta.participants {
+                let phone = p.phone_number.clone().or_else(|| (!p.jid.is_lid()).then(|| p.jid.clone()));
+                let lid = p.lid.clone().or_else(|| p.jid.is_lid().then(|| p.jid.clone()));
+                let is_own = [Some(&p.jid), phone.as_ref(), lid.as_ref()].into_iter().flatten().any(|j| own.iter().any(|o| o == user_part(&j.to_string())));
+                if is_own {
+                    continue;
+                }
+                let (jid, phone) = (store::bare(&p.jid.to_string()), phone.map(|j| store::bare(&j.to_string())));
+                if let (Some(lid), Some(pn)) = (&lid, &phone) {
+                    let lid = store::bare(&lid.to_string());
+                    // Only what the book does not know yet.
+                    if book.as_ref().is_some_and(|b| b.normalize(&lid) == lid) {
+                        records.push(store::lid_record(&lid, pn));
+                    }
+                }
+                members.push(super::Member { jid, phone });
+            }
+            state.record(&id, &store, &records);
+            state.set_members(&id, &group.to_string(), members);
+        });
+    }
+
     pub fn request_avatar(&self, jid: String) {
         let _ = self.avatars.send(jid);
     }
@@ -165,15 +211,18 @@ impl Running {
             Body::Text(text) => text.clone(),
             Body::File { path, caption } => media::label(path, caption),
             Body::Sticker(_) => "[Stiker]".to_owned(),
-            Body::StatusReply { text, .. } => text.clone(),
+            Body::StatusReply { text, .. } | Body::Mention { text, .. } => text.clone(),
         };
         let media = match &body {
-            Body::Text(_) | Body::StatusReply { .. } => None,
+            Body::Text(_) | Body::StatusReply { .. } | Body::Mention { .. } => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
         };
         let record = store::msg_record(&chat, &local_id, true, "", &shown, unix_secs(), &Delivery::Queued, false);
         let mut record = store::with_media(record, media);
+        if let Body::Mention { mentions, .. } = &body {
+            record = store::with_mentions(record, mentions, false);
+        }
         if let Body::StatusReply { status, .. } = &body {
             let text = if status.media.is_some() && status.caption().is_empty() { status.text.clone() } else { status.caption() };
             record = store::with_quote(record, &store::Quote { id: status.id.clone(), text, status: true });
@@ -237,13 +286,16 @@ fn restore_queue(id: &str, queue: &UnboundedSender<Outgoing>, state: &Updater, s
     }
 }
 
-/// What a stored queued message sends: its text, file, sticker or status reply.
+/// What a stored queued message sends: its text (with mentions), file, sticker or status reply.
 fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
     if let Some(quote) = m.quote.as_ref().filter(|q| q.status) {
         let status = book.statuses.iter().find(|s| s.id == quote.id)?.clone();
         return Some(Body::StatusReply { text: m.text.clone(), status });
     }
     let Some(media) = &m.media else {
+        if !m.mentions.is_empty() {
+            return Some(Body::Mention { text: m.text.clone(), mentions: m.mentions.clone() });
+        }
         return Some(Body::Text(m.text.clone()));
     };
     let path = media.file.clone().filter(|p| p.is_file())?;
@@ -351,6 +403,29 @@ fn body(message: &wa::Message) -> Option<String> {
     None
 }
 
+/// JIDs the message mentions, from the first `ContextInfo` it carries
+/// (extended text, or an image, video or document caption).
+fn mentions_of(message: &wa::Message) -> Vec<String> {
+    message.context_info().map(|c| c.mentioned_jid.clone()).unwrap_or_default()
+}
+
+/// User part of a JID, without device and server: `123:5@lid` -> `123`.
+fn user_part(jid: &str) -> &str {
+    let user = jid.split('@').next().unwrap_or(jid);
+    user.split(':').next().unwrap_or(user)
+}
+
+/// This number's user parts: phone number and LID (either may be unknown).
+/// Read from the device each time, so it is right before `Connected` too.
+fn own_users(client: &Client) -> Vec<String> {
+    [client.pn(), client.lid()].into_iter().flatten().map(|j| user_part(&j.to_string()).to_owned()).collect()
+}
+
+/// An incoming group message that mentions one of `own` (user parts).
+fn mentions_me(group: bool, from_me: bool, mentions: &[String], own: &[String]) -> bool {
+    group && !from_me && mentions.iter().any(|m| own.iter().any(|o| !o.is_empty() && o == user_part(m)))
+}
+
 /// Background and text colour of a text status.
 fn status_colors(message: &wa::Message) -> (Option<u32>, Option<u32>) {
     match message.get_base_message().extended_text_message.as_option() {
@@ -454,6 +529,9 @@ fn on_message(
     let summary = media.as_ref().map(|m| {
         json!({ "kind": m.get("k"), "name": m.get("name"), "mime": m.get("mime"), "size": m.get("size") })
     });
+    let mentions = mentions_of(&ctx.message);
+    let mentioned = mentions_me(source.is_group, source.is_from_me, &mentions, &own_users(&ctx.client));
+    let record = store::with_mentions(record, &mentions, mentioned);
     records.push(store::with_media(record, media));
     state.record(id, chats, &records);
     if !source.is_from_me {
@@ -493,7 +571,7 @@ fn on_message(
             timestamp: ctx.info.timestamp.timestamp(),
         });
         if let Some(book) = &book {
-            super::notify::incoming(state, id, book, &chat, &store::bare(&source.sender.to_string()), &push_name, &text, source.is_group);
+            super::notify::incoming(state, id, book, &chat, &store::bare(&source.sender.to_string()), &push_name, &text, source.is_group, mentioned);
         }
     }
     if !source.is_from_me {
@@ -603,7 +681,8 @@ async fn on_event(
             let compressed = lazy.compressed_bytes().clone();
             // Decompressing and decoding can take a while; keep it off the event loop.
             let media_dir = media::dir(&state.data_dir, id);
-            let records = tokio::task::spawn_blocking(move || history_records(&compressed, &media_dir)).await;
+            let own = own_users(client);
+            let records = tokio::task::spawn_blocking(move || history_records(&compressed, &media_dir, &own)).await;
             match records {
                 Ok(Ok(records)) => {
                     log::info!("session {id}: stored {} history records", records.len());
@@ -651,7 +730,7 @@ fn fetch_group_name(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client
 
 /// Turns one history-sync chunk into chat records: LID mappings, push names,
 /// then conversations (their own names win over push names).
-fn history_records(compressed: &[u8], media_dir: &Path) -> Result<Vec<Value>, String> {
+fn history_records(compressed: &[u8], media_dir: &Path, own: &[String]) -> Result<Vec<Value>, String> {
     let mut stream = HistorySyncStream::new(compressed, MAX_DECOMPRESSED);
     let mut conversations = Vec::new();
     while let Some(conversation) = stream.next_conversation().map_err(|e| e.to_string())? {
@@ -692,6 +771,8 @@ fn history_records(compressed: &[u8], media_dir: &Path) -> Result<Vec<Value>, St
             let status = if from_me { Delivery::Sent } else { Delivery::Received };
             let ts = info.message_timestamp.unwrap_or(0) as i64;
             let record = store::msg_record(&chat, msg_id, from_me, &sender, &text, ts, &status, false);
+            let mentions = mentions_of(message);
+            let record = store::with_mentions(record, &mentions, mentions_me(chat.ends_with("@g.us"), from_me, &mentions, own));
             let record = store::with_media(record, media::describe(message, media_dir, msg_id));
             let (background, color) = status_colors(message);
             records.push(store::with_colors(record, background, color));
@@ -766,6 +847,11 @@ async fn send_worker(
 async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message, String> {
     match body {
         Body::Text(text) => Ok(wa::Message::text(text)),
+        Body::Mention { text, mentions } => {
+            let mut context = wa::ContextInfo::default();
+            context.mentioned_jid = mentions;
+            Ok(wa::Message::text_with_context(text, context))
+        }
         Body::File { path, caption } => media::message(client, &path, &caption).await,
         Body::Sticker(path) => media::sticker_message(client, &path).await,
         Body::StatusReply { text, status } => {
@@ -842,7 +928,7 @@ pub fn mask_phone(jid: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, mask_phone, queued_body};
+    use super::{Body, mask_phone, mentions_me, queued_body};
     use crate::backend::store::{self, Delivery, Quote, Store};
 
     /// A stored queued message comes back as what it was: text, file with
@@ -873,6 +959,33 @@ mod tests {
         assert!(body("c").is_none());
         assert!(matches!(body("d"), Some(Body::StatusReply { text, status }) if text == "👍" && status.id == "ST1"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn queued_mention_comes_back_as_mention() {
+        let dir = std::env::temp_dir().join(format!("warust-mention-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let chat = "123@g.us";
+        let men = vec!["99@lid".to_owned(), "628111@s.whatsapp.net".to_owned()];
+        let rec = store::with_mentions(store::msg_record(chat, "m", true, "", "@99 @628111 halo", 100, &Delivery::Queued, false), &men, false);
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, format!("{rec}\n")).unwrap();
+        let (_, book) = Store::open(&path);
+        let msg = &book.chats[0].messages[0];
+        assert!(matches!(queued_body(&book, msg), Some(Body::Mention { text, mentions }) if text == "@99 @628111 halo" && mentions == men));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mentions_me_matches_number_or_lid_ignoring_device() {
+        let own = vec!["628111".to_owned(), "99".to_owned()];
+        let m = |j: &str| vec![j.to_owned()];
+        assert!(mentions_me(true, false, &m("628111@s.whatsapp.net"), &own));
+        assert!(mentions_me(true, false, &m("99:3@lid"), &own));
+        assert!(!mentions_me(true, false, &m("55@lid"), &own));
+        assert!(!mentions_me(false, false, &m("99@lid"), &own), "not a group");
+        assert!(!mentions_me(true, true, &m("99@lid"), &own), "from us");
+        assert!(!mentions_me(true, false, &m("@lid"), &["".to_owned()]));
     }
 
     #[test]

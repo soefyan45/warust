@@ -5,6 +5,7 @@ mod compact;
 mod emoji;
 mod fonts;
 mod icons;
+mod mention;
 mod markup;
 mod pdf;
 mod qr;
@@ -58,6 +59,18 @@ pub struct State {
     /// already asked for this run.
     pub typing_now: std::sync::Arc<std::collections::HashMap<String, backend::Typing>>,
     pub presence_watched: std::collections::HashSet<(String, String)>,
+    /// Group members by `session|group` (from the backend), and the groups
+    /// whose members were already asked for this run.
+    pub members_now: std::sync::Arc<std::collections::HashMap<String, Vec<backend::Member>>>,
+    pub members_asked: std::collections::HashSet<(String, String)>,
+    /// `@Name` picked in the composer with the member's JID, the chat they
+    /// belong to (`session|chat`), the highlighted picker row, the `@` of a
+    /// picker closed with Esc, and the query the highlight belongs to.
+    pub mention_picks: Vec<(String, String)>,
+    pub mention_chat: String,
+    pub mention_sel: usize,
+    pub mention_dismissed: Option<usize>,
+    pub mention_query: String,
     /// File waiting in the composer, sent with the text as its caption.
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
@@ -604,6 +617,7 @@ impl eframe::App for App {
         self.state.settings = self.settings.clone();
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
+        self.state.members_now = snapshot.members;
         if self.state.typing_now.values().any(backend::Typing::fresh) {
             // So a stale "mengetik…" disappears even when nothing else repaints.
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));

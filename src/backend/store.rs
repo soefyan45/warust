@@ -154,13 +154,21 @@ impl Chat {
     /// A private chat whose last message is from the contact and that is not
     /// marked done ("Perlu balas"); a group only while `mention_pending`.
     pub fn needs_reply(&self) -> bool {
-        !self.is_group() && self.messages.last().is_some_and(|m| !m.from_me) && !self.is_done()
+        if self.is_group() {
+            return self.mention_pending();
+        }
+        self.messages.last().is_some_and(|m| !m.from_me) && !self.is_done()
     }
 
     /// A group message mentioning this number came after our last message in
     /// the chat and after it was marked done (the `@` badge).
     pub fn mention_pending(&self) -> bool {
-        false // TODO(#16): backend slice
+        if !self.is_group() {
+            return false;
+        }
+        let mine = self.messages.iter().rev().find(|m| m.from_me).map(|m| m.ts).unwrap_or(0);
+        let floor = mine.max(self.done_at.unwrap_or(0));
+        self.messages.iter().any(|m| !m.from_me && m.mentions_me && m.ts > floor)
     }
 
     pub fn last_ts(&self) -> i64 {
@@ -344,8 +352,12 @@ impl Book {
                             status: q.get("st").and_then(Value::as_bool).unwrap_or(false),
                         })
                     }),
-                    mentions: Vec::new(), // TODO(#16): backend slice
-                    mentions_me: false,
+                    mentions: record
+                        .get("men")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(|j| j.as_str().map(str::to_owned)).collect())
+                        .unwrap_or_default(),
+                    mentions_me: record.get("mme").and_then(Value::as_bool).unwrap_or(false),
                 };
                 let unread = record.get("unread").and_then(Value::as_bool).unwrap_or(false);
                 let chat = self.chat_mut(&jid);
@@ -505,6 +517,20 @@ pub fn with_media(mut record: Value, media: Option<Value>) -> Value {
     record
 }
 
+/// Adds who the message mentions (`men`) and whether it mentions this number
+/// (`mme`); keys are left out when empty/false so old files stay the same.
+pub fn with_mentions(mut record: Value, mentions: &[String], mentions_me: bool) -> Value {
+    if let Some(object) = record.as_object_mut() {
+        if !mentions.is_empty() {
+            object.insert("men".to_owned(), json!(mentions));
+        }
+        if mentions_me {
+            object.insert("mme".to_owned(), true.into());
+        }
+    }
+    record
+}
+
 /// Adds what the message quotes to its msg record.
 pub fn with_quote(mut record: Value, quote: &Quote) -> Value {
     if let Some(object) = record.as_object_mut() {
@@ -591,6 +617,52 @@ mod tests {
         assert!(!b.chats[0].needs_reply(), "answered");
         let b = book(&[msg("a", false, 10), done_record(chat, 20), done_record(chat, 0)]);
         assert!(b.chats[0].needs_reply(), "unmarked");
+    }
+
+    #[test]
+    fn mentions_round_trip_and_old_records_load() {
+        let chat = "123@g.us";
+        let men = vec!["628111@s.whatsapp.net".to_owned(), "99@lid".to_owned()];
+        let rec = with_mentions(msg_record(chat, "a", false, "5@lid", "@628111 @99", 10, &Delivery::Received, false), &men, true);
+        let b = book(&[rec, msg_record(chat, "b", false, "5@lid", "plain", 11, &Delivery::Received, false)]);
+        let (a, plain) = (&b.chats[0].messages[0], &b.chats[0].messages[1]);
+        assert_eq!(a.mentions, men);
+        assert!(a.mentions_me);
+        assert!(plain.mentions.is_empty() && !plain.mentions_me);
+        let bare_rec = with_mentions(msg_record(chat, "c", true, "", "x", 1, &Delivery::Sent, false), &[], false);
+        assert!(bare_rec.get("men").is_none() && bare_rec.get("mme").is_none());
+    }
+
+    #[test]
+    fn mention_pending_until_we_reply_or_mark_done() {
+        let chat = "123@g.us";
+        let m = |id: &str, ts: i64| with_mentions(msg_record(chat, id, false, "5@lid", "@me", ts, &Delivery::Received, false), &[], true);
+        let other = |id: &str, ts: i64| msg_record(chat, id, false, "5@lid", "obrolan", ts, &Delivery::Received, false);
+        let mine = |id: &str, ts: i64| msg_record(chat, id, true, "", "ok", ts, &Delivery::Sent, false);
+        let b = book(&[other("o", 5), m("a", 10), other("o2", 12)]);
+        assert!(b.chats[0].mention_pending() && b.chats[0].needs_reply());
+        let b = book(&[other("o", 5)]);
+        assert!(!b.chats[0].mention_pending() && !b.chats[0].needs_reply(), "plain group chatter is not a reply");
+        let b = book(&[m("a", 10), mine("r", 15)]);
+        assert!(!b.chats[0].mention_pending(), "we replied");
+        let b = book(&[m("a", 10), done_record(chat, 10)]);
+        assert!(!b.chats[0].mention_pending(), "done at the mention's time");
+        let b = book(&[m("a", 10), done_record(chat, 20), m("b", 30)]);
+        assert!(b.chats[0].mention_pending(), "a newer mention reopens it");
+        let b = book(&[m("a", 10), mine("r", 15), m("b", 20)]);
+        assert!(b.chats[0].mention_pending());
+        // A mention that mentions_me only counts when incoming.
+        let own = with_mentions(msg_record(chat, "x", true, "", "@me", 40, &Delivery::Sent, false), &[], true);
+        assert!(!book(&[own]).chats[0].mention_pending());
+    }
+
+    #[test]
+    fn private_chat_ignores_mentions() {
+        let chat = "628111000001@s.whatsapp.net";
+        let rec = with_mentions(msg_record(chat, "a", false, chat, "x", 10, &Delivery::Received, false), &[], true);
+        let b = book(&[rec]);
+        assert!(!b.chats[0].mention_pending());
+        assert!(b.chats[0].needs_reply(), "private rule unchanged");
     }
 
     fn book(records: &[Value]) -> Book {
