@@ -402,7 +402,11 @@ fn record(
                     Some(e) => Err(format!("Pesan suara gagal diproses: {e}")),
                     None => encoder.finish().and_then(|ogg| save(&dir, &ogg)),
                 };
-                let _ = done.send(saved);
+                // Nobody waits any more (its window closed): the file would only
+                // be left behind.
+                if let Err(mpsc::SendError(Ok(path))) = done.send(saved) {
+                    let _ = std::fs::remove_file(path);
+                }
                 return;
             }
         }

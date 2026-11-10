@@ -44,7 +44,11 @@ Untuk merekam dan meng-encode pesan suara:
   [alsa](https://github.com/diwic/alsa-rs) (Apache-2.0/MIT) dan [alsa-sys](https://github.com/diwic/alsa-sys)
   (MIT) di Linux, [coreaudio-rs](https://github.com/RustAudio/coreaudio-rs) (MIT/Apache-2.0) dan binding
   objc2 CoreAudio (Zlib OR Apache-2.0 OR MIT) di macOS, serta
-  [dasp_sample](https://github.com/rustaudio/sample) (MIT OR Apache-2.0).
+  [dasp_sample](https://github.com/rustaudio/sample) (MIT OR Apache-2.0),
+  [mach2](https://github.com/JohnTitor/mach2) (BSD-2-Clause OR MIT OR Apache-2.0, dipakai di bawah MIT/Apache)
+  dan [byteorder](https://github.com/BurntSushi/byteorder) (Unlicense OR MIT).
+- [cmake](https://github.com/rust-lang/cmake-rs) (MIT OR Apache-2.0), hanya alat build untuk libopus;
+  tidak ikut di dalam binary.
 
 ### libopus
 
