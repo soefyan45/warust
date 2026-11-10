@@ -977,7 +977,14 @@ fn is_dark(c: Color32) -> bool {
 /// of the plain marks on whatever they sit on (`dark` = a dark bubble).
 fn tick(p: &Palette, status: &Delivery, grey: Color32, dark: bool) -> Option<(&'static str, Color32)> {
     let failed = if dark { Color32::from_rgb(0xFF, 0x9B, 0x8F) } else { p.red_text };
-    let blue = if dark || !is_dark(p.bg) { READ_BLUE } else { Color32::from_rgb(0x1E, 0x88, 0xE5) };
+    let blue = if dark && theme::template() == theme::Template::Forest {
+        // Pego `Status pesan keluar`: read is two lime ticks on the forest bubble.
+        p.accent
+    } else if dark || !is_dark(p.bg) {
+        READ_BLUE
+    } else {
+        Color32::from_rgb(0x1E, 0x88, 0xE5)
+    };
     match status {
         Delivery::Received => None,
         Delivery::Queued => Some(("clock", grey)),
@@ -1630,6 +1637,8 @@ enum MsgAction {
     Forward,
     Pin(PinLength),
     Unpin,
+    /// Send a failed message again.
+    Retry,
 }
 
 /// What the user did on a message in the open chat.
@@ -1637,6 +1646,28 @@ enum MsgEvent {
     Media(MediaClick),
     /// A context menu action on the message with this id.
     Menu(MsgAction, String),
+}
+
+/// Room under a failed bubble for its "Not sent · Retry" line.
+const FAILED_FOOT: f32 = 22.0;
+
+/// "Not sent · Retry" under a failed bubble, its right edge at `right_top`
+/// (Pego `Status pesan keluar` · Gagal). True when it was clicked.
+fn retry_link(ui: &Ui, p: &Palette, right_top: egui::Pos2, msg_id: &str, why: &str) -> bool {
+    let color = p.red_text;
+    let label = ui.painter().layout_no_wrap(format!("{} · {}", tr("Not sent", "Gagal terkirim"), tr("Retry", "Coba lagi")), fonts::ui(12.0, Weight::Medium), color);
+    let width = label.size().x + 20.0;
+    let rect = Rect::from_min_size(pos2(right_top.x - width, right_top.y), vec2(width, 18.0));
+    let response = ui.interact(rect, ui.scope_id().with(("retry", msg_id)), Sense::click());
+    let response = response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(why);
+    icons::paint(ui, Rect::from_min_size(rect.min + vec2(0.0, 2.0), vec2(14.0, 14.0)), "circle-alert", 14.0, color);
+    let at = pos2(rect.left() + 20.0, rect.center().y - label.size().y / 2.0);
+    if response.hovered() {
+        let underline = at.y + label.size().y;
+        ui.painter().hline(at.x..=at.x + label.size().x, underline, Stroke::new(1.0, color));
+    }
+    ui.painter().galley(at, label, color);
+    response.clicked()
 }
 
 /// Turns a message event into commands or UI state; shared by the wide and
@@ -1664,6 +1695,7 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         MsgEvent::Menu(MsgAction::Unpin, msg_id) => {
             commands.push(Command::Pin { id: session.id.clone(), chat: chat.jid.clone(), msg_id, pinned: false, length: PinLength::Days7 });
         }
+        MsgEvent::Menu(MsgAction::Retry, msg_id) => commands.push(Command::Retry { id: session.id.clone(), msg_id }),
     }
 }
 
@@ -1747,6 +1779,9 @@ fn pinned_bar(ui: &mut Ui, p: &Palette, chat: &Chat) {
 /// Right-click / long-press menu of a message bubble; returns the chosen action.
 fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
     let mut action = None;
+    if matches!(m.status, Delivery::Failed(_)) && ui.button(tr("Retry", "Kirim ulang")).clicked() {
+        action = Some(MsgAction::Retry);
+    }
     // A message still in the send queue has no WhatsApp id to quote yet.
     if !m.id.starts_with("local-") && ui.button(tr("Reply", "Balas")).clicked() {
         action = Some(MsgAction::Reply);
@@ -1846,6 +1881,8 @@ fn messages(
         /// Space above the bubble that starts a new run.
         lead: f32,
         size: egui::Vec2,
+        /// Room under the bubble for "Not sent · Retry" (Pego: failed).
+        foot: f32,
     }
     enum Item<'a> {
         Day(String),
@@ -1914,7 +1951,8 @@ fn messages(
             text_size.x.max(meta.size().x + if tick.is_some() { 20.0 } else { 0.0 }).max(media_space.x).max(quote_space.x).max(head_space.x) + 28.0,
             head_space.y + quote_space.y + media_space.y + text_size.y + meta.size().y + 20.0,
         );
-        items.push(Item::Bubble(Bubble { m, media, text, tick, quote, meta, head, lead, size }));
+        let foot = if matches!(m.status, Delivery::Failed(_)) { FAILED_FOOT } else { 0.0 };
+        items.push(Item::Bubble(Bubble { m, media, text, tick, quote, meta, head, lead, size, foot }));
     }
     if let Some(label) = typing {
         let typing_word = tr("typing…", "mengetik…");
@@ -1928,7 +1966,7 @@ fn messages(
         .iter()
         .map(|i| match i {
             Item::Day(_) | Item::Unread(_) => DIVIDER,
-            Item::Bubble(b) => b.lead + b.size.y + GAP,
+            Item::Bubble(b) => b.lead + b.size.y + b.foot + GAP,
             Item::Typing(_) => TYPING_ROW + GAP,
         })
         .sum();
@@ -1940,7 +1978,7 @@ fn messages(
             ui.add_space(12.0);
             let height = content.max(ui.available_height());
             let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-            let painter = ui.painter().clone();
+            let mut painter = ui.painter().clone();
             let mut y = area.bottom() - content;
             if start > 0 {
                 let note = Rect::from_min_size(pos2(area.left(), y - 24.0), vec2(area.width(), 16.0));
@@ -1986,8 +2024,15 @@ fn messages(
                         painter.galley(pos2(cx - w / 2.0, cy - galley.size().y / 2.0), galley, p.text_2);
                         y += DIVIDER;
                     }
-                    Item::Bubble(Bubble { m, media, text, tick, quote, meta, head, lead, size }) => {
+                    Item::Bubble(Bubble { m, media, text, tick, quote, meta, head, lead, size, foot }) => {
                         y += lead;
+                        // A failed message is drawn faded (Pego: 70%).
+                        let failed = matches!(m.status, Delivery::Failed(_));
+                        let opacity = ui.opacity();
+                        if failed {
+                            ui.multiply_opacity(0.7);
+                            painter.set_opacity(ui.opacity());
+                        }
                         let (fill, stroke) = if m.from_me {
                             (p.primary, Stroke::NONE)
                         } else {
@@ -2091,11 +2136,18 @@ fn messages(
                             icons::paint(ui, mark, icon, 15.0, tint);
                             ui.interact(mark, ui.scope_id().with(("tick", &m.id)), Sense::hover()).on_hover_text(delivery_label(&m.status));
                         }
-                        if let Delivery::Failed(reason) = &m.status {
-                            ui.interact(rect, ui.scope_id().with(("failed", &m.id)), Sense::hover())
-                                .on_hover_text(crate::trf!("Failed to send: {reason}", "Gagal terkirim: {reason}"));
+                        if failed {
+                            ui.set_opacity(opacity);
+                            painter.set_opacity(opacity);
                         }
-                        y += size.y + GAP;
+                        if let Delivery::Failed(reason) = &m.status {
+                            let why = crate::trf!("Failed to send: {reason}", "Gagal terkirim: {reason}");
+                            ui.interact(rect, ui.scope_id().with(("failed", &m.id)), Sense::hover()).on_hover_text(&why);
+                            if retry_link(ui, p, pos2(rect.right(), rect.bottom() + 4.0), &m.id, &why) {
+                                clicked = Some(MsgEvent::Menu(MsgAction::Retry, m.id.clone()));
+                            }
+                        }
+                        y += size.y + foot + GAP;
                     }
                 }
             }
