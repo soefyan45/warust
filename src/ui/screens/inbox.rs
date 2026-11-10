@@ -157,6 +157,15 @@ pub fn show(
                     if let Some(typing) = &typing_now {
                         ui.label(rich(typing, 12.0, Weight::Medium, typing_color(&p)));
                     }
+                    // "In call · 04:12" while a call with this contact runs (#39).
+                    let in_call = state.call_now.as_ref().filter(|c| c.session == session.id && c.peer == chat.jid);
+                    if let Some(at) = in_call.and_then(|c| c.connected_at) {
+                        let secs = at.elapsed().as_secs();
+                        let label = crate::trf!("In call · {}:{:02}", "Dalam panggilan · {}:{:02}", secs / 60, secs % 60);
+                        Frame::NONE.fill(p.accent_soft).corner_radius(10).inner_margin(Margin::symmetric(8, 3)).show(ui, |ui| {
+                            ui.label(rich(&label, 11.5, Weight::SemiBold, p.accent_text));
+                        });
+                    }
                 },
                 |ui| {
                     if widgets::icon_button(ui, "panel-right", 32.0, state.contact_panel).clicked() {
@@ -1031,6 +1040,8 @@ enum MediaBox {
     Document { pdf: Option<PathBuf>, thumb: Option<PathBuf> },
     /// A voice note: play button, waveform and length (Pego `FM/VN/Bubble`).
     Voice(f32),
+    /// A call's line (Pego `FM/Call/LogBubble`): missed, declined, or how long.
+    Call,
 }
 
 /// What a click on media asks for.
@@ -1053,6 +1064,7 @@ impl MediaBox {
             MediaBox::Sticker(_) => STICKER,
             MediaBox::Document { .. } => vec2(CARD.x, PREVIEW_HEIGHT + CARD.y),
             MediaBox::Voice(width) => vec2(*width, VOICE_HEIGHT),
+            MediaBox::Call => vec2(250.0, 44.0),
         }
     }
 }
@@ -1060,6 +1072,9 @@ impl MediaBox {
 fn media_box(media: &Media, wrap: f32) -> MediaBox {
     if media.kind == "sticker" {
         return MediaBox::Sticker(media.file.clone());
+    }
+    if media.kind == "call" {
+        return MediaBox::Call;
     }
     if media.kind == "audio" && media.voice {
         return MediaBox::Voice(wrap.clamp(200.0, 280.0));
@@ -1175,6 +1190,31 @@ fn media_action(m: &ChatMsg, media: &Media, downloads: &Downloads) -> MediaState
         None if media.downloadable() => MediaState::Download,
         None => MediaState::Unavailable,
     }
+}
+
+/// A call's line in the chat (Pego `FM/Call/LogBubble`): a red icon for a
+/// missed or declined call, else a soft one; what happened and when.
+fn paint_call_log(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media) {
+    let out = media.raw.get("out").and_then(|v| v.as_str()).unwrap_or("missed");
+    let video = media.raw.get("video").and_then(|v| v.as_bool()).unwrap_or(false);
+    let seconds = media.raw.get("secs").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+    let bad = matches!(out, "missed" | "declined" | "failed");
+    let (fill, glyph) = if bad { (p.red_soft, p.red) } else { (p.accent_soft, p.accent_text) };
+    let icon = match (bad, video) {
+        (true, _) => "phone-missed",
+        (false, true) => "video",
+        (false, false) => "phone",
+    };
+    let center = pos2(rect.left() + 18.0, rect.center().y);
+    ui.painter().circle_filled(center, 18.0, fill);
+    icons::paint(ui, Rect::from_center_size(center, vec2(16.0, 16.0)), icon, 16.0, glyph);
+    let label = crate::backend::call::call_label(out, video, seconds);
+    let title = label.trim_start_matches('[').trim_end_matches(']');
+    let fg = if m.from_me { p.on_primary } else { p.text };
+    let text = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top() + 2.0), pos2(rect.right(), rect.top() + 22.0));
+    widgets::paint_text(ui, text, title, fonts::ui(13.5, Weight::SemiBold), fg, Align::Min);
+    let when = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top() + 22.0), pos2(rect.right(), rect.bottom()));
+    widgets::paint_text(ui, when, &time::clock(m.ts), fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
 }
 
 const VOICE_HEIGHT: f32 = 46.0;
@@ -1394,6 +1434,10 @@ fn paint_media(
     if matches!(shown, MediaBox::Voice(_)) {
         return paint_voice(ui, p, rect, m, media, downloads);
     }
+    if matches!(shown, MediaBox::Call) {
+        paint_call_log(ui, p, rect, m, media);
+        return None;
+    }
     let state = media_action(m, media, downloads);
     let action = state.label();
     let response = ui.interact(rect, ui.scope_id().with(("media", &m.id)), Sense::click());
@@ -1437,6 +1481,7 @@ fn paint_media(
             paint_card(ui, p, rect, m, media, &detail);
         }
         MediaBox::Voice(_) => unreachable!("drawn by paint_voice above"),
+        MediaBox::Call => unreachable!("drawn by paint_call_log above"),
         MediaBox::Document { pdf: file, thumb } => {
             let preview = Rect::from_min_size(rect.min, vec2(rect.width(), PREVIEW_HEIGHT));
             let card = Rect::from_min_max(pos2(rect.left(), preview.bottom()), rect.max);

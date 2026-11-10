@@ -88,6 +88,38 @@ pub(crate) fn content(book: &Book, chat: &str, sender: &str, push_name: &str, te
     (title, body)
 }
 
+/// "Incoming voice call" from a contact, whatever the notification
+/// settings say about messages (a call is not a message). Clicking it opens
+/// the chat; the call itself is answered in the app.
+pub(crate) fn incoming_call(state: &Updater, session: &str, jid: &str, push_name: &str, video: bool) {
+    if !state.settings().notify.enabled {
+        return;
+    }
+    let privacy = state.settings().privacy.clone();
+    let who = state.book(session).and_then(|b| b.name_of(jid).map(str::to_owned)).filter(|n| !n.is_empty()).unwrap_or_else(|| {
+        if push_name.is_empty() { super::store::short_jid(jid) } else { push_name.to_owned() }
+    });
+    let title = if video { tr("Incoming video call", "Panggilan video masuk") } else { tr("Incoming voice call", "Panggilan suara masuk") }.to_owned();
+    let body = if privacy.hide_names() { tr("Open warust to answer", "Buka warust untuk menjawab").to_owned() } else { who };
+    let key = chat_key(session, jid);
+    #[cfg(target_os = "linux")]
+    {
+        let (state, session, jid) = (state.clone(), session.to_owned(), jid.to_owned());
+        std::thread::spawn(move || show(&state, &key, &session, &jid, &title, &escape(&body)));
+    }
+    #[cfg(target_os = "macos")]
+    if !macos::show(&key, &title, &body) {
+        std::thread::spawn(move || show_simple(&title, &body));
+    }
+    #[cfg(windows)]
+    std::thread::spawn(move || {
+        if let Err(e) = windows::show(&key, &title, &body) {
+            log::warn!("toast failed, using a balloon: {e}");
+            show_simple(&title, &body);
+        }
+    });
+}
+
 /// Shows (or updates) the chat's notification for a message that just came in.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, sender: &str, push_name: &str, text: &str, group: bool, mentioned: bool) {

@@ -823,6 +823,9 @@ async fn on_event(
             };
             state.set_typing(id, &book.normalize(&chat), typing);
         }
+        Event::IncomingCall(call) => super::call::on_incoming(state, id, client, chats, call),
+        Event::MissedCall(missed) => super::call::on_missed(state, id, chats, missed),
+        Event::CallEndedElsewhere(ended) => super::call::on_elsewhere(state, ended),
         Event::LoggedOut(_) => state.update(id, |v| v.status = Status::LoggedOut),
         Event::StreamReplaced(_) => state.update(id, |v| v.status = Status::Replaced),
         Event::TemporaryBan(ban) => {

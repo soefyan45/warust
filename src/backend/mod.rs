@@ -4,6 +4,7 @@
 //! snapshot changes.
 
 mod api;
+pub mod call;
 mod avatars;
 mod media;
 mod notify;
@@ -129,6 +130,8 @@ pub struct Shared {
     pub typing: Arc<HashMap<String, Typing>>,
     /// Group members by `session|group` (normalized JID), from `Command::GroupMembers`.
     pub members: Arc<HashMap<String, Vec<Member>>>,
+    /// The voice call ringing or in progress (#39).
+    pub call: Option<call::CallView>,
 }
 
 /// A group member, for the `@` mention picker.
@@ -224,6 +227,14 @@ pub enum Command {
     /// Show (or stop showing) "recording audio" on the contact's side while a
     /// voice note is recorded for this chat.
     RecordingAudio { id: String, chat: String, on: bool },
+    /// The ringing call: answer or decline it (#39).
+    AnswerCall,
+    DeclineCall,
+    /// Hang up the call in progress.
+    EndCall,
+    /// Mute our microphone, or silence the caller on our speaker.
+    MuteCall(bool),
+    SpeakerOff(bool),
     /// "Tandai belum dibaca": a local unread marker, also synced to the phone.
     MarkUnread { id: String, chat: String },
     /// Archive a chat, or take it out of the archive; synced to the phone.
@@ -485,6 +496,14 @@ impl Updater {
         let shared = self.shared.lock().ok()?;
         let name = shared.sessions.iter().find(|s| s.id == id)?.name.clone();
         Some((name, shared.sessions.len() > 1))
+    }
+
+    /// The call the UI shows (from `call`).
+    pub(crate) fn set_call(&self, call: Option<call::CallView>) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.call = call;
+        }
+        self.ctx.request_repaint();
     }
 
     pub(crate) fn book(&self, id: &str) -> Option<Arc<Book>> {
@@ -807,6 +826,11 @@ async fn run(
                     r.watch_presence(&id, &chat);
                 }
             }
+            Command::AnswerCall => call::answer(&state),
+            Command::DeclineCall => call::decline(&state),
+            Command::EndCall => call::end(&state),
+            Command::MuteCall(muted) => call::set_muted(&state, muted),
+            Command::SpeakerOff(off) => call::set_speaker_off(&state, off),
             Command::RecordingAudio { id, chat, on } => {
                 if state.settings().typing {
                     if let Some(r) = running.get(&id) {

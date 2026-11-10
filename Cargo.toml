@@ -34,7 +34,7 @@ assets = [
 # pairing with 401 signature-mismatch; the fix is upstream #1440, not yet
 # released. Builds on stable without the `simd` feature. Back to crates.io once
 # a release includes #1440.
-whatsapp-rust = { git = "https://github.com/crmne/whatsapp-rust", rev = "94f7c1376f8f6a77c55d85570a260600ad27de0b", default-features = false, features = ["sqlite-storage", "sqlite-storage-bundled", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "signal"] }
+whatsapp-rust = { git = "https://github.com/crmne/whatsapp-rust", rev = "94f7c1376f8f6a77c55d85570a260600ad27de0b", default-features = false, features = ["sqlite-storage", "sqlite-storage-bundled", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "signal", "voip"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
 log = "0.4"
 env_logger = "0.11"
@@ -74,6 +74,9 @@ qrcode = { version = "0.14", default-features = false }
 # Already in the tree through rustls/ring: OS randomness for API keys and
 # webhook secrets on every OS.
 getrandom = "0.3"
+# Already in the tree through whatsapp-rust: the audio channels a voice call
+# reads the microphone from and plays the caller into (issue #39).
+async-channel = "2"
 # Voice notes (issue #14): microphone capture, libopus (built from source with
 # cmake and linked statically) and the Ogg container WhatsApp expects.
 cpal = "0.18"
