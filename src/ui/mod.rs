@@ -358,16 +358,8 @@ impl App {
                     32.0,
                     |ui| {
                         ui.add_space(6.0);
-                        let (mark, _) = ui.allocate_exact_size(egui::Vec2::splat(22.0), egui::Sense::hover());
-                        ui.painter().rect_filled(mark, theme::R_SM, p.primary);
-                        widgets::paint_text(
-                            ui,
-                            mark,
-                            "w",
-                            fonts::ui(13.0, Weight::SemiBold),
-                            p.on_primary,
-                            egui::Align::Center,
-                        );
+                        let (mark, _) = ui.allocate_exact_size(egui::Vec2::splat(24.0), egui::Sense::hover());
+                        widgets::logo(ui, mark, p.primary, p.on_primary);
                         ui.label(rich("warust", 14.0, Weight::SemiBold, p.text));
                     },
                     |ui| {
@@ -504,9 +496,8 @@ impl App {
                 ui.horizontal_centered(|ui| {
                     // Past the macOS window buttons (the bar's margin is 32).
                     ui.add_space((window::buttons_inset(ui.ctx()) - 32.0).max(0.0));
-                    let (logo, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
-                    ui.painter().circle_filled(logo.center(), 17.0, p.primary);
-                    widgets::paint_text(ui, logo, "w", fonts::ui(16.0, Weight::SemiBold), p.accent, egui::Align::Center);
+                    let (logo, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
+                    widgets::logo(ui, logo, p.primary, p.accent);
                     ui.label(rich("warust", 17.0, Weight::SemiBold, p.text));
                     ui.add_space(14.0);
                     let items = [
