@@ -62,7 +62,7 @@ Semua screenshot memakai data contoh.</sub></p>
 </table>
 
 Juga: emoji berwarna, kirim foto/video/dokumen/stiker, pratinjau PDF di aplikasi, tanda kirim ✓✓,
-notifikasi desktop, dua template (Forest, dan Klasik gelap/terang), serta tata letak HP saat jendela
+notifikasi desktop (klik untuk membuka chat), dua template (Forest, dan Klasik gelap/terang), serta tata letak HP saat jendela
 dikecilkan di bawah 1100 px.
 
 ## Pasang
@@ -86,7 +86,7 @@ tertaut. Folder lain bisa dipilih dengan variabel lingkungan `WARUST_DATA`.
 Beberapa fitur memakai alat bawaan OS. Di Linux, paket .deb menyarankan `zenity` (dialog file),
 `poppler-utils` (pratinjau PDF), `libnotify-bin` dan `gnome-session-canberra` (notifikasi dan suara).
 Pratinjau PDF di macOS dan Windows butuh poppler (`brew install poppler` / Scoop); tanpa itu PDF tetap
-bisa dibuka di aplikasi lain. Klik notifikasi untuk membuka chat baru ada di Linux.
+bisa dibuka di aplikasi lain.
 
 ### Dari source
 
