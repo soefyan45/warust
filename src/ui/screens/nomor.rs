@@ -29,6 +29,8 @@ pub enum Action {
     Relink(String),
     Logout(String),
     Remove(String),
+    /// The number's inbox in a window of its own.
+    Window(String),
     /// Open the "Ganti nama" dialog.
     Rename(String),
 }
@@ -367,6 +369,9 @@ pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView) -> 
     let mut action = None;
     egui::Popup::menu(anchor).show(|ui| {
         ui.set_min_width(180.0);
+        if ui.button("Buka di jendela baru").clicked() {
+            action = Some(Action::Window(session.id.clone()));
+        }
         if ui.button("Ganti nama…").clicked() {
             action = Some(Action::Rename(session.id.clone()));
         }

@@ -79,9 +79,12 @@ fn item(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// Right-click on a number: rename it.
-fn rename_menu(row: &egui::Response, state: &mut State, session: &SessionView) {
+/// Right-click on a number: its inbox in a window of its own, or a new name.
+fn number_menu(row: &egui::Response, state: &mut State, session: &SessionView) {
     row.context_menu(|ui| {
+        if ui.button("Buka di jendela baru").clicked() {
+            state.open_window_requested = Some(session.id.clone());
+        }
         if ui.button("Ganti nama…").clicked() {
             state.rename = Some((session.id.clone(), session.name.clone()));
         }
@@ -120,7 +123,7 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
         if row.clicked() {
             state.inbox_scope = Some(s.id.clone());
         }
-        rename_menu(&row, state, s);
+        number_menu(&row, state, s);
     }
     if !others.is_empty() {
         ui.add_space(10.0);
@@ -135,7 +138,7 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
             if row.clicked() {
                 state.inbox_scope = Some(s.id.clone());
             }
-            rename_menu(&row, state, s);
+            number_menu(&row, state, s);
         }
     }
     ui.add_space(12.0);
