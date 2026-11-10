@@ -117,6 +117,10 @@ pub struct State {
     pub window: Option<String>,
     /// A number to open in a window of its own.
     pub open_window_requested: Option<String>,
+    /// "Pisah per nomor": numbers whose section is folded.
+    pub folded: std::collections::HashSet<String>,
+    /// The chat list scrolls to the open chat once (it was opened elsewhere).
+    pub reveal_chat: bool,
     /// "Tautkan nomor" was clicked in the Inbox's device panel.
     pub add_number_requested: bool,
     /// Ringkasan "Pesan terbaru": 0 = belum dibalas, 1 = semua.

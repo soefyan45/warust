@@ -375,6 +375,10 @@ fn chat_list(
         });
     });
     ui.add_space(6.0);
+    if several {
+        number_chips(ui, p, state, sessions);
+        ui.add_space(6.0);
+    }
     if combined {
         ui.horizontal(|ui| {
             ui.add_space(6.0);
@@ -403,10 +407,14 @@ fn chat_list(
     ui.add_space(4.0);
 
     let lines = lines_for(state, &scoped, state.chat_tab, combined && state.inbox_grouped);
-    let via = combined && !state.inbox_grouped;
+    // Rows name their number when every number is mixed, and in "Pisah per
+    // nomor" when the same contact also chats with another number.
+    let mixed = combined && !state.inbox_grouped;
+    let shared = if combined { shared_jids(&scoped) } else { std::collections::HashSet::new() };
+    let via = |chat: &Chat| mixed || shared.contains(chat.jid.as_str());
     let height = |line: &Line| match line {
         Line::Header(..) => HEADER,
-        Line::Chat(..) if via => ROW_VIA,
+        Line::Chat(_, chat) if via(chat) => ROW_VIA,
         Line::Chat(..) => ROW,
     };
     let total: f32 = lines.iter().map(|l| height(l) + 2.0).sum();
@@ -427,19 +435,36 @@ fn chat_list(
         let origin = ui.max_rect().min;
         let width = ui.available_width();
         let mut y = 0.0;
+        let reveal = std::mem::take(&mut state.reveal_chat);
+        // The section the top of the view is in, and where its next one starts.
+        let mut current: Option<(&SessionView, usize)> = None;
+        let mut next_header = f32::INFINITY;
         for line in &lines {
             let h = height(line);
             let visible = y + h >= viewport.min.y && y <= viewport.max.y;
             let rect = Rect::from_min_size(pos2(origin.x, origin.y + y), vec2(width, h));
+            if let Line::Header(s, count) = line {
+                if y <= viewport.min.y {
+                    current = Some((s, *count));
+                } else if next_header.is_infinite() {
+                    next_header = y;
+                }
+            }
+            if reveal
+                && let Line::Chat(s, chat) = line
+                && state.inbox_session.as_deref() == Some(s.id.as_str())
+                && state.chat_selected.as_deref() == Some(chat.jid.as_str())
+            {
+                ui.scroll_to_rect(rect, Some(Align::Center));
+            }
             y += h + 2.0;
             if !visible {
                 continue;
             }
             match line {
                 Line::Header(s, count) => {
-                    if section_header(ui, p, rect, s, *count) {
-                        state.open_window_requested = Some(s.id.clone());
-                    }
+                    let folded = state.folded.contains(&s.id);
+                    header_action(state, s, section_header(ui, p, rect, s, *count, folded, ""));
                 }
                 Line::Chat(s, chat) => {
                     // Pictures are asked only for rows on screen; the backend paces them.
@@ -450,7 +475,7 @@ fn chat_list(
                     let selected = state.inbox_session.as_deref() == Some(s.id.as_str())
                         && state.chat_selected.as_deref() == Some(chat.jid.as_str());
                     let title = super::chat_title(&s.book, chat);
-                    let via_number = via.then_some(*s);
+                    let via_number = via(chat).then_some(*s);
                     let row = chat_row(ui, p, rect, &title, chat, picture, selected, &s.id, via_number, typing_label(state, &s.id, &s.book, chat).as_deref());
                     chat_menu(&row, s, chat, &mut commands);
                     if row.clicked() {
@@ -461,6 +486,15 @@ fn chat_list(
                     }
                 }
             }
+        }
+        // "Pisah per nomor": the band of the section on screen stays at the top,
+        // pushed up by the next one, so it is always clear whose chats these are.
+        if let Some((s, count)) = current {
+            let top = (origin.y + viewport.min.y).min(origin.y + next_header - HEADER - 2.0);
+            let rect = Rect::from_min_size(pos2(origin.x, top), vec2(width, HEADER));
+            ui.painter().rect_filled(rect, 0.0, p.bg);
+            let folded = state.folded.contains(&s.id);
+            header_action(state, s, section_header(ui, p, rect, s, count, folded, "sticky"));
         }
     });
     commands
@@ -488,7 +522,9 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
         for s in order {
             let mine: Vec<&Chat> = s.book.chats.iter().filter(|c| keep(s, c)).collect();
             lines.push(Line::Header(s, mine.len()));
-            lines.extend(mine.into_iter().map(|c| Line::Chat(s, c)));
+            if !state.folded.contains(&s.id) {
+                lines.extend(mine.into_iter().map(|c| Line::Chat(s, c)));
+            }
         }
     } else {
         let mut mine: Vec<(&SessionView, &Chat)> =
@@ -508,6 +544,13 @@ pub fn open_chat(state: &mut State, session: &str, jid: &str, chat: Option<&Chat
     if already {
         return;
     }
+    // A chat of another number than the filter: the filter follows it, so the
+    // chat is not dropped, and its section opens so the row can be seen.
+    if state.inbox_scope.as_deref().is_some_and(|scope| scope != session) {
+        state.inbox_scope = Some(session.to_owned());
+    }
+    state.folded.remove(session);
+    state.reveal_chat = true;
     state.unread_anchor = chat.and_then(|chat| {
         let incoming: Vec<&ChatMsg> = chat.messages.iter().filter(|m| !m.from_me).collect();
         let count = (chat.unread as usize).min(incoming.len());
@@ -534,16 +577,115 @@ fn chat_menu(row: &egui::Response, session: &SessionView, chat: &Chat, commands:
     });
 }
 
-/// "● CS Utama  4410 ........ 3 chat", red when the number cannot reply.
-/// A number's band in "Pisah per nomor"; true when its "open in a new
-/// window" button is clicked.
-fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count: usize) -> bool {
+fn header_action(state: &mut State, session: &SessionView, click: HeaderClick) {
+    match click {
+        HeaderClick::Fold => {
+            if !state.folded.remove(&session.id) {
+                state.folded.insert(session.id.clone());
+            }
+        }
+        HeaderClick::Window => state.open_window_requested = Some(session.id.clone()),
+        HeaderClick::None => {}
+    }
+}
+
+/// JIDs that chat with more than one of these numbers.
+fn shared_jids<'a>(sessions: &[&'a SessionView]) -> std::collections::HashSet<&'a str> {
+    let mut seen = std::collections::HashSet::new();
+    let mut shared = std::collections::HashSet::new();
+    for s in sessions {
+        for c in &s.book.chats {
+            if !seen.insert(c.jid.as_str()) {
+                shared.insert(c.jid.as_str());
+            }
+        }
+    }
+    shared
+}
+
+/// The number filter above the chat list: "Semua · 144", "● Nomor 1 · 8222 ·
+/// 135", ... always on screen, with or without the device panel. Right-click a
+/// number for its own window.
+fn number_chips(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) {
+    ScrollArea::horizontal()
+        .id_salt("number_chips")
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_space(6.0);
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let total: usize = sessions.iter().map(|s| s.book.chats.iter().filter(|c| !c.archived).count()).sum();
+                if number_chip_button(ui, p, &format!("Semua · {total}"), None, state.inbox_scope.is_none()).clicked() {
+                    state.inbox_scope = None;
+                }
+                for s in sessions {
+                    let count = s.book.chats.iter().filter(|c| !c.archived).count();
+                    let label = format!("{} · {count}", super::devices::chip_label(s));
+                    let dot = super::devices::status_dot(p, &s.status);
+                    let active = state.inbox_scope.as_deref() == Some(s.id.as_str());
+                    let chip = number_chip_button(ui, p, &label, Some(dot), active);
+                    if chip.clicked() {
+                        state.inbox_scope = Some(s.id.clone());
+                    }
+                    chip.context_menu(|ui| {
+                        if ui.button("Buka di jendela baru").clicked() {
+                            state.open_window_requested = Some(s.id.clone());
+                        }
+                    });
+                }
+                ui.add_space(6.0);
+            });
+        });
+}
+
+/// One chip of `number_chips`: a pill, filled when active, with the
+/// number's status dot.
+fn number_chip_button(ui: &mut Ui, p: &Palette, label: &str, dot: Option<Color32>, active: bool) -> egui::Response {
+    let forest = theme::template().top_nav();
+    let (fill, color) = match (active, forest) {
+        (true, true) => (p.accent, p.primary),
+        (true, false) => (p.primary, p.on_primary),
+        (false, _) => (p.panel, p.text_2),
+    };
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(12.5, if active { Weight::SemiBold } else { Weight::Medium }), color);
+    let lead = if dot.is_some() { 22.0 } else { 12.0 };
+    let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + lead + 12.0, 28.0), Sense::click());
+    ui.painter().rect_filled(rect, 14.0, if response.hovered() && !active { p.raised } else { fill });
+    if !active {
+        ui.painter().rect_stroke(rect, 14.0, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    }
+    if let Some(dot) = dot {
+        ui.painter().circle_filled(pos2(rect.left() + 13.0, rect.center().y), 3.5, dot);
+    }
+    ui.painter().galley(pos2(rect.left() + lead, rect.center().y - galley.size().y / 2.0), galley, color);
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// What a click on a section band asks for.
+enum HeaderClick {
+    None,
+    Fold,
+    Window,
+}
+
+/// "▾ ● CS Utama · 4410 ........ 3 chat ↗" in "Pisah per nomor", red when the
+/// number cannot reply. A click folds or opens the section; ↗ opens the number
+/// in a window of its own. `salt` tells the sticky copy apart from the band.
+fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count: usize, folded: bool, salt: &str) -> HeaderClick {
     let band = rect.shrink2(vec2(0.0, 4.0));
     let down = session.status != Status::Connected;
-    ui.painter().rect_filled(band, theme::r_inner(), if down { p.red_soft } else { p.raised });
+    let fold = ui.interact(band, ui.scope_id().with(("fold_section", &session.id, salt)), Sense::click());
+    let fill = match (down, fold.hovered()) {
+        (true, _) => p.red_soft,
+        (false, true) => p.selected,
+        (false, false) => p.raised,
+    };
+    ui.painter().rect_filled(band, theme::r_inner(), fill);
+    let chevron = Rect::from_center_size(pos2(band.left() + 14.0, band.center().y), vec2(14.0, 14.0));
+    icons::paint(ui, chevron, if folded { "chevron-right" } else { "chevron-down" }, 14.0, p.muted);
     let dot = super::devices::status_dot(p, &session.status);
-    ui.painter().circle_filled(pos2(band.left() + 14.0, band.center().y), 3.5, dot);
-    let name = Rect::from_min_max(pos2(band.left() + 26.0, band.top()), pos2(band.right() - 90.0, band.bottom()));
+    ui.painter().circle_filled(pos2(band.left() + 30.0, band.center().y), 3.5, dot);
+    let name = Rect::from_min_max(pos2(band.left() + 42.0, band.top()), pos2(band.right() - 120.0, band.bottom()));
     widgets::paint_text(ui, name, &super::devices::chip_label(session), fonts::ui(13.0, Weight::SemiBold), p.text, Align::Min);
     let right = Rect::from_min_max(pos2(band.right() - 120.0, band.top()), pos2(band.right() - 38.0, band.bottom()));
     let (label, color) = if down {
@@ -554,12 +696,18 @@ fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count
     };
     widgets::paint_text(ui, right, &label, fonts::ui(12.0, Weight::Medium), color, Align::Max);
     let button = Rect::from_center_size(pos2(band.right() - 20.0, band.center().y), vec2(24.0, 24.0));
-    let response = ui.interact(button, ui.scope_id().with(("open_window", &session.id)), Sense::click());
-    if response.hovered() {
-        ui.painter().rect_filled(button, theme::R_SM, p.selected);
+    let window = ui.interact(button, ui.scope_id().with(("open_window", &session.id, salt)), Sense::click());
+    if window.hovered() {
+        ui.painter().rect_filled(button, theme::R_SM, p.panel);
     }
-    icons::paint(ui, button, "arrow-up-right", 14.0, if response.hovered() { p.text } else { p.muted });
-    response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Buka di jendela baru").clicked()
+    icons::paint(ui, button, "arrow-up-right", 14.0, if window.hovered() { p.text } else { p.muted });
+    if window.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Buka di jendela baru").clicked() {
+        HeaderClick::Window
+    } else if fold.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+        HeaderClick::Fold
+    } else {
+        HeaderClick::None
+    }
 }
 
 /// "Percakapan ini terikat ke CS Utama…" above the messages, with several numbers.
@@ -2022,9 +2170,9 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                 }
                 match line {
                     Line::Header(s, count) => {
-                        if section_header(ui, &p, rect.shrink2(vec2(PAD - 8.0, 0.0)), s, *count) {
-                            state.open_window_requested = Some(s.id.clone());
-                        }
+                        let folded = state.folded.contains(&s.id);
+                        let clicked = section_header(ui, &p, rect.shrink2(vec2(PAD - 8.0, 0.0)), s, *count, folded, "");
+                        header_action(state, s, clicked);
                     }
                     Line::Chat(s, chat) => {
                         if !avatars.contains_key(&chat.jid) && state.avatar_asked.insert(chat.jid.clone()) {
