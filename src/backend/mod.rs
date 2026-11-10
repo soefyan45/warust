@@ -670,7 +670,11 @@ async fn run(
             },
             Command::SendVoice { id, chat, path } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::Voice(path), &state, store),
-                _ => log::warn!("send voice note: session {id} is not running"),
+                _ => {
+                    log::warn!("send voice note: session {id} is not running");
+                    // Recorded for this send only: not kept when it cannot go out.
+                    let _ = std::fs::remove_file(&path);
+                }
             },
             Command::Download { msg_id, .. } if state.downloading(&msg_id) => {}
             Command::StatusSeen { id, msg_id } => {

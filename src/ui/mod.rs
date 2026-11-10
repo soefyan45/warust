@@ -50,6 +50,23 @@ pub struct ReplyTarget {
     pub snippet: String,
 }
 
+/// A voice note in the composer, for the chat (and number) it was started in:
+/// it is sent there even if another chat is open by the time it is saved.
+pub struct VoiceNote {
+    pub session: String,
+    pub chat: String,
+    pub step: VoiceStep,
+}
+
+pub enum VoiceStep {
+    Recording(crate::backend::voice::Recorder),
+    /// Finished on the recording thread; the file's path arrives here.
+    Saving(std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>),
+    /// Why it could not be recorded or sent, shown under the composer for a
+    /// few seconds.
+    Failed(String, std::time::Instant),
+}
+
 /// UI state that survives between frames.
 #[derive(Default)]
 pub struct State {
@@ -83,10 +100,8 @@ pub struct State {
     pub forward: Option<forward::Dialog>,
     /// The file dialog running on its own thread; `None` inside when cancelled.
     pub picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
-    /// A voice note being recorded in the composer.
-    pub recording: Option<crate::backend::voice::Recorder>,
-    /// Why the last voice note could not be recorded, shown under the composer.
-    pub voice_error: Option<String>,
+    /// The voice note in the composer, tied to the chat it was started in.
+    pub voice: Option<VoiceNote>,
     /// Result of the last CSV export, shown for a few seconds.
     pub export_note: Option<(String, std::time::Instant)>,
     /// Chats whose profile picture was already asked for.

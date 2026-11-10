@@ -82,6 +82,9 @@ Data (kunci sesi, chat, media, pengaturan, API key) disimpan di folder per pengg
 `~/.local/share/warust` (Linux), `~/Library/Application Support/warust` (macOS), atau
 `%APPDATA%\warust` (Windows). Jangan bagikan folder itu: isinya cukup untuk masuk ke akun WhatsApp yang
 tertaut. Folder lain bisa dipilih dengan variabel lingkungan `WARUST_DATA`.
+Pesan suara yang direkam disimpan di subfolder `voice/` (Ogg Opus, sekitar 4 KB per detik) agar
+bisa dibuka lagi dari chat; warust tidak menghapusnya sendiri, jadi folder itu boleh dikosongkan bila
+perlu ruang.
 
 Beberapa fitur memakai alat bawaan OS. Di Linux, paket .deb menyarankan `zenity` (dialog file),
 `poppler-utils` (pratinjau PDF), `libnotify-bin` dan `gnome-session-canberra` (notifikasi dan suara).

@@ -20,7 +20,7 @@ type Downloads = HashMap<String, Option<String>>;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG, R_MD};
 use crate::ui::widgets::{self, Kind, rich, rich_mono};
-use crate::ui::{ReplyTarget, State, UnreadAnchor, emoji, forward, icons, markup, pdf, stickers, time};
+use crate::ui::{ReplyTarget, State, UnreadAnchor, VoiceNote, VoiceStep, emoji, forward, icons, markup, pdf, stickers, time};
 
 const ROW: f32 = 60.0;
 /// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai", "Diarsipkan".
@@ -170,11 +170,11 @@ pub fn show(
             let to = super::chat_title(&book, chat);
             let (id, jid) = (session.id.clone(), chat.jid.clone());
             reply_bar(ui, &p, state, &id, &jid);
-            match composer(ui, &p, state, &to, session, &book, several, false) {
+            match composer(ui, &p, state, &to, &jid, session, &book, several, false) {
                 Some(Outgoing::Text(text)) => commands.push(text_command(state, id, jid, text)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
-                Some(Outgoing::Voice(path)) => commands.push(Command::SendVoice { id, chat: jid, path }),
+                Some(Outgoing::Voice { session, chat, path }) => commands.push(Command::SendVoice { id: session, chat, path }),
                 None => {}
             }
         });
@@ -1531,8 +1531,8 @@ enum Outgoing {
     /// A file with its caption (may be empty).
     File(PathBuf, String),
     Sticker(PathBuf),
-    /// A recorded voice note (Ogg Opus).
-    Voice(PathBuf),
+    /// A recorded voice note (Ogg Opus), for the chat it was recorded in.
+    Voice { session: String, chat: String, path: PathBuf },
 }
 
 /// What the recording bar asks for.
@@ -1542,19 +1542,24 @@ enum Recording {
     Send,
 }
 
+/// How long an error about a voice note stays under the composer.
+const VOICE_ERROR_FOR: std::time::Duration = std::time::Duration::from_secs(8);
+
 /// The composer while a voice note records: a red dot, the time, a level
-/// meter, cancel and send. Esc cancels, Enter sends.
-fn recording_bar(ui: &mut Ui, p: &Palette, recorder: &crate::backend::voice::Recorder, compact: bool) -> Recording {
+/// meter, cancel and send. Esc cancels, Enter sends. While the microphone
+/// opens, or the note is saved, it says so instead.
+fn recording_bar(ui: &mut Ui, p: &Palette, recorder: Option<&crate::backend::voice::Recorder>, compact: bool) -> Recording {
     // Keeps the clock and meter moving.
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-    let elapsed = recorder.elapsed().as_secs();
+    let recording = recorder.filter(|r| r.elapsed() > std::time::Duration::ZERO);
+    let elapsed = recording.map(|r| r.elapsed().as_secs()).unwrap_or(0);
     if elapsed >= crate::backend::voice::MAX_SECONDS {
         return Recording::Send;
     }
     let mut action = ui.input_mut(|i| {
-        if i.consume_key(Modifiers::NONE, Key::Escape) {
+        if recorder.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
             Recording::Cancel
-        } else if i.consume_key(Modifiers::NONE, Key::Enter) {
+        } else if recording.is_some() && i.consume_key(Modifiers::NONE, Key::Enter) {
             Recording::Send
         } else {
             Recording::Keep
@@ -1569,9 +1574,18 @@ fn recording_bar(ui: &mut Ui, p: &Palette, recorder: &crate::backend::voice::Rec
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
+                ui.set_min_height(40.0);
+                let Some(recorder) = recorder else {
+                    ui.label(rich("Menyimpan pesan suara…", 14.0, Weight::Regular, p.muted));
+                    return;
+                };
                 let cancel = widgets::icon_button(ui, "x", 32.0, false).on_hover_text("Batalkan rekaman (Esc)");
                 if cancel.clicked() {
                     action = Recording::Cancel;
+                }
+                if recording.is_none() {
+                    ui.label(rich("Menyiapkan mikrofon…", 14.0, Weight::Regular, p.muted));
+                    return;
                 }
                 // Blinks once a second while recording.
                 let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
@@ -1596,24 +1610,73 @@ fn recording_bar(ui: &mut Ui, p: &Palette, recorder: &crate::backend::voice::Rec
     action
 }
 
-/// The microphone button: starts recording a voice note.
-fn mic_button(
-    ui: &mut Ui,
-    recording: &mut Option<crate::backend::voice::Recorder>,
-    error: &mut Option<String>,
-    size: f32,
-    connected: bool,
-) {
+/// The microphone button: starts recording a voice note for this chat.
+fn mic_button(ui: &mut Ui, voice: &mut Option<VoiceNote>, session: &str, chat: &str, size: f32, connected: bool) {
     let button = ui.add_enabled_ui(connected, |ui| widgets::icon_button(ui, "mic", size, false)).inner;
     if button.on_hover_text("Rekam pesan suara").clicked() {
-        match crate::backend::voice::Recorder::start() {
-            Ok(recorder) => {
-                *recording = Some(recorder);
-                *error = None;
+        let recorder = crate::backend::voice::Recorder::start();
+        *voice = Some(VoiceNote { session: session.to_owned(), chat: chat.to_owned(), step: VoiceStep::Recording(recorder) });
+    }
+}
+
+/// Moves the composer's voice note along. `Some` holds what to send (to the
+/// chat the note belongs to); `Err` hides the rest of the composer while the
+/// note records or saves here.
+fn voice_note(ui: &mut Ui, p: &Palette, state: &mut State, session: &SessionView, chat: &str, compact: bool) -> Result<Option<Outgoing>, ()> {
+    let Some(note) = state.voice.as_mut() else { return Ok(None) };
+    let here = note.session == session.id && note.chat == chat;
+    let failed = |e: String| VoiceStep::Failed(e, std::time::Instant::now());
+    match &mut note.step {
+        // Saving goes on whichever chat is open, and is sent to its own.
+        VoiceStep::Saving(saved) => match saved.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                if here {
+                    recording_bar(ui, p, None, compact);
+                    return Err(());
+                }
             }
-            Err(e) => *error = Some(e),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => note.step = failed("Pesan suara gagal diproses".to_owned()),
+            Ok(Err(e)) => note.step = failed(e),
+            Ok(Ok(path)) if here && session.status != Status::Connected => {
+                // Not sent, so not kept.
+                let _ = std::fs::remove_file(&path);
+                note.step = failed(format!("{} tidak terhubung, pesan suara belum bisa dikirim", session.name));
+            }
+            Ok(Ok(path)) => {
+                let VoiceNote { session, chat, .. } = state.voice.take().expect("checked above");
+                return Ok(Some(Outgoing::Voice { session, chat, path }));
+            }
+        },
+        // Another chat opened: the recording (or its error) is left behind.
+        _ if !here => state.voice = None,
+        VoiceStep::Recording(recorder) => {
+            if let crate::backend::voice::Mic::Failed(e) = recorder.poll() {
+                note.step = failed(e);
+                return Ok(None);
+            }
+            match recording_bar(ui, p, Some(recorder), compact) {
+                Recording::Keep => {}
+                Recording::Cancel => state.voice = None,
+                Recording::Send => {
+                    let VoiceStep::Recording(recorder) = std::mem::replace(&mut note.step, VoiceStep::Failed(String::new(), std::time::Instant::now())) else {
+                        unreachable!("matched above")
+                    };
+                    note.step = VoiceStep::Saving(recorder.finish(crate::platform::data_dir().join("voice")));
+                }
+            }
+            return Err(());
+        }
+        VoiceStep::Failed(_, since) => {
+            let left = VOICE_ERROR_FOR.saturating_sub(since.elapsed());
+            if left.is_zero() {
+                state.voice = None;
+            } else {
+                ui.ctx().request_repaint_after(left);
+            }
         }
     }
+    Ok(None)
 }
 
 fn composer(
@@ -1621,6 +1684,7 @@ fn composer(
     p: &Palette,
     state: &mut State,
     to: &str,
+    chat: &str,
     session: &SessionView,
     book: &Book,
     several: bool,
@@ -1628,28 +1692,10 @@ fn composer(
 ) -> Option<Outgoing> {
     let connected = session.status == Status::Connected;
     let id = ui.make_persistent_id("composer_text");
-    if let Some(recorder) = &state.recording {
-        let action = recording_bar(ui, p, recorder, compact);
-        let voice = match action {
-            Recording::Keep => return None,
-            Recording::Cancel => {
-                state.recording = None;
-                return None;
-            }
-            Recording::Send => state.recording.take().map(|r| r.finish(&crate::platform::data_dir().join("voice"))),
-        };
-        return match voice {
-            Some(Ok(path)) if connected => Some(Outgoing::Voice(path)),
-            Some(Ok(_)) => {
-                state.voice_error = Some(format!("{} tidak terhubung, pesan suara belum bisa dikirim", session.name));
-                None
-            }
-            Some(Err(e)) => {
-                state.voice_error = Some(e);
-                None
-            }
-            None => None,
-        };
+    match voice_note(ui, p, state, session, chat, compact) {
+        Err(()) => return None,
+        Ok(Some(voice)) => return Some(voice),
+        Ok(None) => {}
     }
     if let Some(rx) = &state.picking {
         match rx.try_recv() {
@@ -1726,7 +1772,7 @@ fn composer(
                     if clip.clicked() && state.picking.is_none() {
                         state.picking = Some(pick_file(ui.ctx()));
                     }
-                    mic_button(ui, &mut state.recording, &mut state.voice_error, 32.0, connected);
+                    mic_button(ui, &mut state.voice, &session.id, chat, 32.0, connected);
                 });
             });
             let (rect, response) = ui.allocate_exact_size(vec2(48.0, 48.0), if connected { Sense::click() } else { Sense::hover() });
@@ -1780,7 +1826,7 @@ fn composer(
                     emoji::picker(ui, &smile, id, text);
                     let sticker = widgets::icon_button(ui, "sticker", 28.0, false).on_hover_text("Stiker");
                     sticker_sent = stickers::picker(ui, &sticker, book, connected);
-                    mic_button(ui, &mut state.recording, &mut state.voice_error, 28.0, connected);
+                    mic_button(ui, &mut state.voice, &session.id, chat, 28.0, connected);
                     ui.add_space(8.0);
                     let note = if connected && several {
                         format!("Membalas dari {} · dikunci ke nomor penerima", super::devices::chip_label(session))
@@ -1808,7 +1854,7 @@ fn composer(
             );
         });
     }
-    if let Some(error) = &state.voice_error {
+    if let Some(VoiceNote { step: VoiceStep::Failed(error, _), .. }) = &state.voice {
         ui.add_space(4.0);
         ui.label(rich(error, 12.0, Weight::Regular, p.red_text));
     }
@@ -2222,11 +2268,11 @@ fn compact_chat(
             }
             let (id, jid) = (session.id.clone(), chat.jid.clone());
             reply_bar(ui, &p, state, &id, &jid);
-            match composer(ui, &p, state, &title, session, book, several, true) {
+            match composer(ui, &p, state, &title, &jid, session, book, several, true) {
                 Some(Outgoing::Text(text)) => commands.push(text_command(state, id, jid, text)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
-                Some(Outgoing::Voice(path)) => commands.push(Command::SendVoice { id, chat: jid, path }),
+                Some(Outgoing::Voice { session, chat, path }) => commands.push(Command::SendVoice { id: session, chat, path }),
                 None => {}
             }
         });
