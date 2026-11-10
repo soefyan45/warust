@@ -367,7 +367,15 @@ impl Book {
         match record.get("t").and_then(Value::as_str) {
             Some("lid") => {
                 if let (Some(lid), Some(pn)) = (text("lid"), text("pn")) {
-                    self.lid_to_pn.insert(bare(&lid), bare(&pn));
+                    let (lid, pn) = (bare(&lid), bare(&pn));
+                    // An archive record may have come before this mapping.
+                    if self.archived.remove(&lid) {
+                        self.archived.insert(pn.clone());
+                        if let Some(c) = self.chats.iter_mut().find(|c| c.jid == pn) {
+                            c.archived = true;
+                        }
+                    }
+                    self.lid_to_pn.insert(lid, pn);
                 }
             }
             Some("name") => {
@@ -738,6 +746,15 @@ mod tests {
         assert!(!b.chats[0].archived);
         // The phone may archive before the history brings the chat.
         let b = reopen(&[archive_record(chat, true), msg("a", 1)]);
+        assert!(b.chats[0].archived);
+    }
+
+    #[test]
+    fn archive_before_lid_mapping_moves_to_the_number() {
+        let (lid, pn) = ("111222@lid", "628111000003@s.whatsapp.net");
+        let msg = msg_record(pn, "a", false, pn, "x", 1, &Delivery::Received, true);
+        let b = reopen(&[archive_record(lid, true), lid_record(lid, pn), msg]);
+        assert_eq!(b.chats.len(), 1);
         assert!(b.chats[0].archived);
     }
 

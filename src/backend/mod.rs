@@ -596,10 +596,15 @@ async fn run(
                 _ => log::warn!("send: session {id} is not running"),
             },
             Command::Reply { id, chat, text, reply_to } => {
-                let body = state.book(&id).and_then(|book| session::reply_body(&book, &chat, text, &reply_to));
-                match (running.get(&id), stores.get(&id), body) {
-                    (Some(r), Some(store), Some(body)) => r.enqueue(&id, chat, body, &state, store),
-                    _ => log::warn!("reply: session {id} is not running or the quoted message is gone"),
+                // A quote that is gone (or never in this number's book) goes out as plain text.
+                let quoted = state.book(&id).and_then(|book| session::reply_body(&book, &chat, text.clone(), &reply_to));
+                if quoted.is_none() {
+                    log::warn!("reply: session {id} has no message {reply_to} in {chat}; sending without the quote");
+                }
+                let body = quoted.unwrap_or(Body::Text(text));
+                match (running.get(&id), stores.get(&id)) {
+                    (Some(r), Some(store)) => r.enqueue(&id, chat, body, &state, store),
+                    _ => log::warn!("reply: session {id} is not running"),
                 }
             }
             Command::Forward { id, chats, text } => match (running.get(&id), stores.get(&id)) {

@@ -146,7 +146,8 @@ Centang biru hanya terkirim bila **Kirim tanda dibaca** di Pengaturan menyala (b
 
 Untuk membalas (kutipan) sebuah pesan, tambahkan `"reply_to": "<id pesan>"` di body
 `messages/text`. Id-nya dari `message.received`, `GET /sessions/{id}/chats`, atau id kembalian kirim
-sebelumnya; pesannya harus ada di chat `to`, kalau tidak jawabannya `404 reply_not_found`.
+sebelumnya; pesannya harus ada di chat `to`, kalau tidak jawabannya `404 reply_not_found`;
+pesan yang masih di antrean (belum terkirim) belum bisa dibalas: `409 reply_not_sent`.
 
 Sematan dikirim ke WhatsApp dan dijawab `202`; sematan baru tampil di chat setelah WhatsApp menerimanya.
 Hanya pesan yang sudah terkirim (bukan yang masih di antrean) yang bisa disematkan.

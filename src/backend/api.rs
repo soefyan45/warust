@@ -413,8 +413,14 @@ async fn send_text(_: Authed, State(context): State<Context>, Path(id): Path<Str
     let chat = check_target(&view, &to_jid(&body.to)?, body.allow_cold)?;
     let message = match body.reply_to.as_deref().filter(|r| !r.is_empty()) {
         None => Body::Text(body.text),
-        Some(reply_to) => reply_body(&view.book, &chat, body.text, reply_to)
-            .ok_or_else(|| error(StatusCode::NOT_FOUND, "reply_not_found", "`reply_to` tidak ditemukan di chat ini"))?,
+        Some(reply_to) => {
+            let real = view.book.aliases.get(reply_to).map(String::as_str).unwrap_or(reply_to);
+            if real.starts_with("local-") {
+                return Err(error(StatusCode::CONFLICT, "reply_not_sent", "`reply_to` masih di antrean, belum terkirim"));
+            }
+            reply_body(&view.book, &chat, body.text, reply_to)
+                .ok_or_else(|| error(StatusCode::NOT_FOUND, "reply_not_found", "`reply_to` tidak ditemukan di chat ini"))?
+        }
     };
     let local_id = new_local_id();
     send(&context, Command::Enqueue { id: id.clone(), chat, body: message, local_id: local_id.clone() })?;

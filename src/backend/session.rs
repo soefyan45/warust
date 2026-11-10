@@ -16,6 +16,8 @@ use whatsapp_rust::serde_json::{Value, json};
 use whatsapp_rust::wacore::history_sync::{HistorySyncStream, MAX_DECOMPRESSED};
 use whatsapp_rust::wacore::proto_helpers::build_quote_context_with_info;
 use whatsapp_rust::wacore::store::DevicePropsOverride;
+use whatsapp_rust::wacore::types::message::AddressingMode;
+use whatsapp_rust::wacore_binary::JidExt;
 use whatsapp_rust::wacore::types::presence::{ChatActivity, ReceiptType};
 
 use super::media;
@@ -377,7 +379,8 @@ fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
         }
         if let Some(quote) = &m.quote {
             // A reply: the quoted message must still be in the book (it gives the participant).
-            let quoted = book.chats.iter().flat_map(|c| &c.messages).find(|q| q.id == quote.id)?;
+            let real = book.aliases.get(&quote.id).unwrap_or(&quote.id);
+            let quoted = book.chats.iter().flat_map(|c| &c.messages).find(|q| q.id == *real || q.id == quote.id)?;
             return Some(Body::Reply { text: m.text.clone(), quote: reply_quote(quoted) });
         }
         return Some(Body::Text(m.text.clone()));
@@ -940,6 +943,19 @@ async fn send_worker(
     }
 }
 
+/// Our own JID (no device part) as the author of a quoted message: the LID in
+/// LID-addressed groups, else the phone number, like the crate's own add-on keys.
+async fn own_author(client: &Client, chat: &Jid) -> Result<Jid, String> {
+    let pn = client.pn().ok_or("Nomor belum tertaut")?;
+    if chat.is_group()
+        && let Ok(routing) = client.groups().routing_info(chat).await
+        && routing.addressing_mode == AddressingMode::Lid
+    {
+        return Ok(client.lid().unwrap_or(pn).to_non_ad());
+    }
+    Ok(pn.to_non_ad())
+}
+
 async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message, String> {
     match body {
         Body::Text(text) => Ok(wa::Message::text(text)),
@@ -953,8 +969,8 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
         }
         Body::Reply { text, quote } => {
             let participant = match &quote.participant {
-                Some(sender) => sender.parse::<Jid>().map_err(|e| format!("JID pengirim pesan tidak valid: {e:?}"))?,
-                None => client.pn().ok_or("Nomor belum tertaut")?,
+                Some(sender) => sender.parse::<Jid>().map_err(|e| format!("JID pengirim pesan tidak valid: {e:?}"))?.to_non_ad(),
+                None => own_author(client, chat).await?,
             };
             // Same chat: no remote_jid, like a reply in WA Web.
             let context = build_quote_context_with_info(quote.id, &participant, chat, chat, &wa::Message::text(quote.text));

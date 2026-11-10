@@ -169,7 +169,7 @@ pub fn show(
         .show(ui, |ui| {
             let to = super::chat_title(&book, chat);
             let (id, jid) = (session.id.clone(), chat.jid.clone());
-            reply_bar(ui, &p, state, &jid);
+            reply_bar(ui, &p, state, &id, &jid);
             match composer(ui, &p, state, &to, session, &book, several, false) {
                 Some(Outgoing::Text(text)) => commands.push(text_command(state, id, jid, text)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
@@ -963,7 +963,7 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
             let Some(m) = chat.messages.iter().find(|m| m.id == msg_id) else { return };
             let author = if m.from_me { "Anda".to_owned() } else { super::sender_label(&session.book, &m.sender) };
             let snippet = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
-            state.reply = Some(ReplyTarget { chat: chat.jid.clone(), id: m.id.clone(), author, snippet });
+            state.reply = Some(ReplyTarget { session: session.id.clone(), chat: chat.jid.clone(), id: m.id.clone(), author, snippet });
         }
         MsgEvent::Menu(MsgAction::Pin(length), msg_id) => {
             commands.push(Command::Pin { id: session.id.clone(), chat: chat.jid.clone(), msg_id, pinned: true, length });
@@ -976,7 +976,7 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
 
 /// The text to send: a quoted reply when "Balas" is active in this chat.
 fn text_command(state: &mut State, id: String, chat: String, text: String) -> Command {
-    match state.reply.take_if(|r| r.chat == chat) {
+    match state.reply.take_if(|r| r.chat == chat && r.session == id) {
         Some(reply) => Command::Reply { id, chat, text, reply_to: reply.id },
         None => Command::Send { id, chat, text },
     }
@@ -984,8 +984,8 @@ fn text_command(state: &mut State, id: String, chat: String, text: String) -> Co
 
 /// "Membalas <nama>: <cuplikan>" above the composer; x or Esc cancels. A reply
 /// started in another chat is dropped.
-fn reply_bar(ui: &mut Ui, p: &Palette, state: &mut State, chat: &str) {
-    if state.reply.as_ref().is_some_and(|r| r.chat != chat) {
+fn reply_bar(ui: &mut Ui, p: &Palette, state: &mut State, session: &str, chat: &str) {
+    if state.reply.as_ref().is_some_and(|r| r.chat != chat || r.session != session) {
         state.reply = None;
     }
     let Some(reply) = &state.reply else { return };
@@ -1054,7 +1054,8 @@ fn pinned_bar(ui: &mut Ui, p: &Palette, chat: &Chat) {
 /// Right-click / long-press menu of a message bubble; returns the chosen action.
 fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
     let mut action = None;
-    if ui.button("Balas").clicked() {
+    // A message still in the send queue has no WhatsApp id to quote yet.
+    if !m.id.starts_with("local-") && ui.button("Balas").clicked() {
         action = Some(MsgAction::Reply);
     }
     // Text only for now; media forwarding is stage 2.
@@ -1928,7 +1929,7 @@ fn compact_chat(
                 ui.add_space(8.0);
             }
             let (id, jid) = (session.id.clone(), chat.jid.clone());
-            reply_bar(ui, &p, state, &jid);
+            reply_bar(ui, &p, state, &id, &jid);
             match composer(ui, &p, state, &title, session, book, several, true) {
                 Some(Outgoing::Text(text)) => commands.push(text_command(state, id, jid, text)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),

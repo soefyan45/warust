@@ -38,6 +38,8 @@ pub enum Screen {
 
 /// The message the composer is replying to (Balas), for one chat.
 pub struct ReplyTarget {
+    /// Number (session) the message belongs to; the same chat JID can exist under two numbers.
+    pub session: String,
     /// JID of the chat; the reply is dropped when another chat opens.
     pub chat: String,
     /// Id of the quoted message.
