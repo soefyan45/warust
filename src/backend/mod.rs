@@ -25,6 +25,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use registry::Registry;
 use session::{Body, Running};
 pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
+pub use registry::{NAME_MAX, clean_name};
 pub use session::mask_phone;
 pub use settings::Settings;
 pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost};
@@ -183,6 +184,8 @@ pub enum Command {
     Logout { id: String },
     /// Unlink (if linked) and delete the session.
     Remove { id: String },
+    /// A new name for a number (already checked with `registry::clean_name`).
+    Rename { id: String, name: String },
     /// Queue a text message. `chat` is a JID from the session's book.
     Send { id: String, chat: String, text: String },
     /// Queue a text that quotes message `reply_to` of `chat`.
@@ -306,6 +309,14 @@ pub(crate) struct Updater {
 }
 
 impl Updater {
+    /// Numbers that could not start because another process holds their lock.
+    fn locked(&self) -> Vec<String> {
+        let Ok(shared) = self.shared.lock() else {
+            return Vec::new();
+        };
+        shared.sessions.iter().filter(|s| s.status == Status::Locked).map(|s| s.id.clone()).collect()
+    }
+
     pub(crate) fn update(&self, id: &str, change: impl FnOnce(&mut SessionView)) {
         let mut changed = None;
         if let Ok(mut shared) = self.shared.lock() {
@@ -498,6 +509,9 @@ fn unread_incoming(book: &Book, chat: &str) -> Vec<(String, String)> {
     ids
 }
 
+/// How often a number locked by another process is tried again.
+const LOCK_RETRY: Duration = Duration::from_secs(5);
+
 async fn run(
     data_dir: PathBuf,
     state: Updater,
@@ -534,7 +548,28 @@ async fn run(
         }
     }
 
-    while let Some(command) = commands.recv().await {
+    // A number locked by another warust (one still closing, say) is tried
+    // again until the lock frees, instead of staying "Dipakai proses lain".
+    let mut retry = tokio::time::interval(LOCK_RETRY);
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => match command {
+                Some(command) => command,
+                None => break,
+            },
+            _ = retry.tick() => {
+                for id in state.locked() {
+                    if !running.contains_key(&id)
+                        && let Some(store) = stores.get(&id).cloned()
+                        && let Some(r) = session::start(&id, &registry, &state, store).await
+                    {
+                        running.insert(id, r);
+                    }
+                }
+                continue;
+            }
+        };
         match command {
             Command::Add { id, name } => {
                 registry.add(&id, &name);
@@ -557,6 +592,11 @@ async fn run(
                     } else {
                         r.stop().await;
                     }
+                }
+                // Another warust may be using these keys: never delete them under it.
+                if registry.in_use(&id) {
+                    state.update(&id, |v| v.status = Status::Locked);
+                    continue;
                 }
                 registry.delete_store(&id);
                 // Chats stay: re-linking the same number brings the history again,
@@ -582,6 +622,10 @@ async fn run(
                     v.pair_code = None;
                 });
             }
+            Command::Rename { id, name } => {
+                registry.rename(&id, &name);
+                state.update(&id, |v| v.name = name);
+            }
             Command::Remove { id } => {
                 if let Some(r) = running.remove(&id) {
                     if r.is_linked() {
@@ -589,6 +633,10 @@ async fn run(
                     } else {
                         r.stop().await;
                     }
+                }
+                if registry.in_use(&id) {
+                    state.update(&id, |v| v.status = Status::Locked);
+                    continue;
                 }
                 registry.remove(&id);
                 stores.remove(&id);
