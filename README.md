@@ -132,6 +132,7 @@ curl -X POST http://127.0.0.1:8787/sessions/<id>/messages/text \
 | `POST /sessions/{id}/messages/media` | Foto, dokumen atau stiker dari `path` atau `url` |
 | `GET /sessions/{id}/messages/{msg_id}` | Status kirim satu pesan |
 | `POST /sessions/{id}/messages/{msg_id}/forward` | Teruskan pesan teks ke 1-5 tujuan (`{"to": ["628123456789", ...]}`), lewat antrean anti-ban. Media ditolak `400 not_forwardable` |
+| `POST /sessions/{id}/messages/{msg_id}/pin` | Sematkan atau lepas sematan pesan, body `{"pinned": true, "duration": "24h"\|"7d"\|"30d"}` (`duration` bawaan `7d`, diabaikan saat melepas) |
 | `GET /sessions/{id}/chats` · `GET /sessions/{id}/statuses` | Daftar chat dan status 24 jam terakhir |
 | `POST /sessions/{id}/chats/{jid}/read` | Tandai chat dibaca: kirim centang biru dan sinkron ke HP. Body opsional `{"read": false}` untuk menandai belum dibaca |
 | `POST /sessions/{id}/chats/{jid}/archive` | Arsipkan atau keluarkan dari arsip: body `{"archived": true}` atau `{"archived": false}` |
@@ -146,6 +147,9 @@ Centang biru hanya terkirim bila **Kirim tanda dibaca** di Pengaturan menyala (b
 Untuk membalas (kutipan) sebuah pesan, tambahkan `"reply_to": "<id pesan>"` di body
 `messages/text`. Id-nya dari `message.received`, `GET /sessions/{id}/chats`, atau id kembalian kirim
 sebelumnya; pesannya harus ada di chat `to`, kalau tidak jawabannya `404 reply_not_found`.
+
+Sematan dikirim ke WhatsApp dan dijawab `202`; sematan baru tampil di chat setelah WhatsApp menerimanya.
+Hanya pesan yang sudah terkirim (bukan yang masih di antrean) yang bisa disematkan.
 
 Pesan ke nomor yang belum pernah chat dengan nomormu ditolak (`403 cold_contact`) kecuali request
 menyertakan `"allow_cold": true`. Ini sengaja, karena pesan ke kontak dingin adalah penyebab umum

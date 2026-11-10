@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use whatsapp_rust::PinDuration;
 use whatsapp_rust::pair_code::PairCodeOptions;
 use whatsapp_rust::prelude::*;
 use whatsapp_rust::serde_json::{Value, json};
@@ -72,6 +73,14 @@ pub fn reply_body(book: &store::Book, chat: &str, text: String, reply_to: &str) 
 
 fn reply_quote(m: &store::ChatMsg) -> ReplyQuote {
     ReplyQuote { id: m.id.clone(), participant: (!m.from_me).then(|| m.sender.clone()), text: m.text.clone() }
+}
+
+/// The message to pin or unpin. `sender` is its author as stored, `None` for
+/// our own messages (groups need the author to address a message).
+pub struct PinTarget {
+    pub chat: String,
+    pub msg_id: String,
+    pub sender: Option<String>,
 }
 
 pub struct Running {
@@ -221,6 +230,46 @@ impl Running {
             let result = if archived { actions.archive_chat(&chat, None).await } else { actions.unarchive_chat(&chat, None).await };
             if let Err(e) = result {
                 log::warn!("session {id}: archive sync failed: {e}");
+            }
+        });
+    }
+
+    /// Pins or unpins a message for everyone; the chat store only changes once
+    /// WhatsApp accepted it. `sender` is the author as stored (groups need it).
+    pub fn pin(&self, id: &str, target: PinTarget, length: Option<store::PinLength>, state: &Updater, store: Arc<Mutex<Store>>) {
+        let Ok(chat_jid) = target.chat.parse::<Jid>() else {
+            return;
+        };
+        let sender_jid = target.sender.as_deref().and_then(|s| s.parse::<Jid>().ok());
+        let from_me = target.sender.is_none();
+        let (client, id, state) = (self.client.clone(), id.to_owned(), state.clone());
+        tokio::spawn(async move {
+            let PinTarget { chat, msg_id, .. } = target;
+            let addressed = MessageId::new(msg_id.as_str()).and_then(|mid| MessageRef::new(&chat_jid, mid, sender_jid.as_ref(), from_me));
+            let addressed = match addressed {
+                Ok(addressed) => addressed,
+                Err(e) => return log::warn!("session {id}: cannot address message {msg_id} to pin: {e}"),
+            };
+            let sent = match length {
+                Some(length) => {
+                    let duration = match length {
+                        store::PinLength::Hours24 => PinDuration::Hours24,
+                        store::PinLength::Days7 => PinDuration::Days7,
+                        store::PinLength::Days30 => PinDuration::Days30,
+                    };
+                    client.pin_message(&addressed, duration).await
+                }
+                None => client.unpin_message(&addressed).await,
+            };
+            match sent {
+                Ok(_) => {
+                    let record = match length {
+                        Some(length) => store::pin_record(&chat, &msg_id, unix_secs(), length.secs()),
+                        None => store::unpin_record(&chat, &msg_id),
+                    };
+                    state.record(&id, &store, &[record]);
+                }
+                Err(e) => log::warn!("session {id}: pin failed: {e}"),
             }
         });
     }
@@ -438,6 +487,27 @@ fn body(message: &wa::Message) -> Option<String> {
     None
 }
 
+/// The pin/unpin a `pinInChatMessage` stands for. The pin lasts for the
+/// duration in its context info (7 days when absent), counted from `ts`.
+fn pin_record_of(message: &wa::Message, chat: &str, ts: i64) -> Option<Value> {
+    use wa::message::pin_in_chat_message::Type;
+    let base = message.get_base_message();
+    let pin = base.pin_in_chat_message.as_option()?;
+    let target = pin.key.as_option()?.id.as_deref()?;
+    match pin.r#type {
+        Some(Type::PinForAll) => {
+            let secs = base
+                .message_context_info
+                .as_option()
+                .and_then(|c| c.message_add_on_duration_in_secs)
+                .map_or(0, i64::from);
+            Some(store::pin_record(chat, target, ts, store::PinLength::from_secs(secs).secs()))
+        }
+        Some(Type::UnpinForAll) => Some(store::unpin_record(chat, target)),
+        _ => None,
+    }
+}
+
 /// Background and text colour of a text status.
 fn status_colors(message: &wa::Message) -> (Option<u32>, Option<u32>) {
     match message.get_base_message().extended_text_message.as_option() {
@@ -503,6 +573,12 @@ fn on_message(
         if let Some(book) = state.book(id) {
             state.set_typing(id, &book.normalize(&chat), None);
         }
+    }
+    // A pin or unpin (from the phone or the contact) updates the chat's pins;
+    // it has no bubble of its own.
+    if let Some(record) = pin_record_of(&ctx.message, &chat, ctx.info.timestamp.timestamp()) {
+        state.record(id, chats, &[record]);
+        return;
     }
     let Some(text) = body(&ctx.message) else {
         return;

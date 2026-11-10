@@ -219,6 +219,9 @@ pub enum Command {
     Forward { id: String, chats: Vec<String>, text: String },
     /// Queue a message from the REST API under an id chosen by the caller.
     Enqueue { id: String, chat: String, body: session::Body, local_id: String },
+    /// Pin a message for everyone (for `length`), or unpin it. `msg_id` is a real
+    /// WhatsApp id from `chat`'s messages.
+    Pin { id: String, chat: String, msg_id: String, pinned: bool, length: store::PinLength },
     /// Save new settings; restarts the API server when its part changed.
     SaveSettings(Settings),
     /// Send a `webhook.test` event to the global webhook URL.
@@ -698,6 +701,21 @@ async fn run(
                     if let Some(r) = running.get(&id) {
                         r.chat_state(&id, &chat, typing);
                     }
+                }
+            }
+            Command::Pin { id, chat, msg_id, pinned, length } => {
+                let found = state.book(&id).and_then(|book| {
+                    let jid = book.normalize(&chat);
+                    let c = book.chats.iter().find(|c| c.jid == jid)?;
+                    let m = c.messages.iter().find(|m| m.id == msg_id)?;
+                    Some((c.jid.clone(), m.from_me, m.sender.clone()))
+                });
+                match (running.get(&id), stores.get(&id), found) {
+                    (Some(r), Some(store), Some((chat, from_me, sender))) => {
+                        let target = session::PinTarget { chat, msg_id, sender: (!from_me).then_some(sender) };
+                        r.pin(&id, target, pinned.then_some(length), &state, store.clone());
+                    }
+                    _ => log::warn!("pin: session {id} is not running or the message is gone"),
                 }
             }
             Command::Seen { id, chat } => {

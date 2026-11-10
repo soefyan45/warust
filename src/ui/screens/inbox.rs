@@ -10,6 +10,7 @@ use egui::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::backend::store::PinLength;
 use crate::backend::{Book, Chat, ChatMsg, Command, Delivery, MAX_FILE_BYTES, Media, SessionView, Status};
 
 /// Profile pictures by JID, as the backend shares them.
@@ -189,6 +190,7 @@ pub fn show(
                     state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                     commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
                 }
+                pinned_bar(ui, &p, chat);
                 if let Some(event) = messages(ui, &p, &book, chat, downloads, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref()) {
                     on_message_event(event, state, session, chat, &mut commands);
                 }
@@ -933,6 +935,8 @@ enum MsgAction {
     Copy,
     Reply,
     Forward,
+    Pin(PinLength),
+    Unpin,
 }
 
 /// What the user did on a message in the open chat.
@@ -960,6 +964,12 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
             let author = if m.from_me { "Anda".to_owned() } else { super::sender_label(&session.book, &m.sender) };
             let snippet = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
             state.reply = Some(ReplyTarget { chat: chat.jid.clone(), id: m.id.clone(), author, snippet });
+        }
+        MsgEvent::Menu(MsgAction::Pin(length), msg_id) => {
+            commands.push(Command::Pin { id: session.id.clone(), chat: chat.jid.clone(), msg_id, pinned: true, length });
+        }
+        MsgEvent::Menu(MsgAction::Unpin, msg_id) => {
+            commands.push(Command::Pin { id: session.id.clone(), chat: chat.jid.clone(), msg_id, pinned: false, length: PinLength::Days7 });
         }
     }
 }
@@ -1003,8 +1013,46 @@ fn reply_bar(ui: &mut Ui, p: &Palette, state: &mut State, chat: &str) {
     }
 }
 
+/// Where a click on the pinned bar asks `messages` to scroll to (temp memory,
+/// so the bar and the list need no shared state).
+fn jump_id() -> egui::Id {
+    egui::Id::unique("pin_jump")
+}
+
+/// The bar above the messages: the latest pin that has not lapsed, with the
+/// number of pins. A click scrolls to the message and flashes it.
+fn pinned_bar(ui: &mut Ui, p: &Palette, chat: &Chat) {
+    let pins = chat.active_pins(time::now());
+    let Some((latest, m)) = pins.iter().rev().find_map(|pin| chat.messages.iter().find(|m| m.id == pin.id).map(|m| (*pin, m))) else {
+        return;
+    };
+    let mut label = caption(m);
+    if label.is_empty() {
+        label = m.media.as_ref().map(media_title).unwrap_or_default();
+    }
+    let label = label.replace('\n', " ");
+    ui.add_space(8.0);
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+    let response = response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Buka pesan yang disematkan");
+    ui.painter().rect(rect, R_MD, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 18.0, rect.center().y), vec2(14.0, 14.0)), "pin", 14.0, p.primary);
+    let count = if pins.len() > 1 { format!("{} sematan", pins.len()) } else { String::new() };
+    let right = if count.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(count.clone(), fonts::ui(11.0, Weight::Medium), p.muted).size().x + 12.0 };
+    let text = Rect::from_min_max(pos2(rect.left() + 34.0, rect.top()), pos2(rect.right() - 12.0 - right, rect.bottom()));
+    widgets::paint_text(ui, text, &label, fonts::ui(13.0, Weight::Regular), p.text, Align::Min);
+    if !count.is_empty() {
+        let tag = Rect::from_min_max(pos2(rect.right() - right, rect.top()), pos2(rect.right() - 12.0, rect.bottom()));
+        widgets::paint_text(ui, tag, &count, fonts::ui(11.0, Weight::Medium), p.muted, Align::Max);
+    }
+    if response.clicked() {
+        ui.data_mut(|d| d.insert_temp(jump_id(), latest.id.clone()));
+        ui.ctx().request_repaint();
+    }
+    ui.add_space(4.0);
+}
+
 /// Right-click / long-press menu of a message bubble; returns the chosen action.
-fn message_menu(ui: &mut Ui, m: &ChatMsg) -> Option<MsgAction> {
+fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
     let mut action = None;
     if ui.button("Balas").clicked() {
         action = Some(MsgAction::Reply);
@@ -1016,6 +1064,22 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg) -> Option<MsgAction> {
     // Media without a caption has nothing to copy.
     if !caption(m).is_empty() && ui.button("Salin").clicked() {
         action = Some(MsgAction::Copy);
+    }
+    // A message still in the send queue has no WhatsApp id to pin yet.
+    if !m.id.starts_with("local-") {
+        if pinned {
+            if ui.button("Lepas sematan").clicked() {
+                action = Some(MsgAction::Unpin);
+            }
+        } else {
+            ui.menu_button("Sematkan", |ui| {
+                for (label, length) in [("24 jam", PinLength::Hours24), ("7 hari", PinLength::Days7), ("30 hari", PinLength::Days30)] {
+                    if ui.button(label).clicked() {
+                        action = Some(MsgAction::Pin(length));
+                    }
+                }
+            });
+        }
     }
     if action.is_some() {
         ui.close();
@@ -1031,6 +1095,16 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
     let start = chat.messages.len().saturating_sub(SHOWN);
     let shown: &[ChatMsg] = &chat.messages[start..];
     let mut clicked = None;
+    let now = time::now();
+    // Set by the pinned bar: scroll to this message, then flash it for a moment.
+    let jump: Option<String> = ui.data_mut(|d| d.remove_temp(jump_id()));
+    let flash_id = egui::Id::unique("pin_flash");
+    let flash: Option<(String, f64)> = ui.data(|d| d.get_temp(flash_id));
+    let clock = ui.input(|i| i.time);
+    let flash = flash.filter(|(_, until)| *until > clock).map(|(id, _)| id);
+    if flash.is_some() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+    }
 
     struct Bubble<'a> {
         m: &'a ChatMsg,
@@ -1159,7 +1233,15 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
                         // Created before the media's own click area, so media keeps its primary click.
                         let bubble = ui.interact(rect, ui.scope_id().with(("bubble", &m.id)), Sense::click());
                         let mut action = None;
-                        bubble.context_menu(|ui| action = message_menu(ui, m));
+                        bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                        if jump.as_deref() == Some(m.id.as_str()) {
+                            ui.scroll_to_rect(rect, Some(Align::Center));
+                            ui.data_mut(|d| d.insert_temp(flash_id, (m.id.clone(), clock + 1.8)));
+                            ui.ctx().request_repaint();
+                        }
+                        if flash.as_deref() == Some(m.id.as_str()) {
+                            painter.rect_stroke(rect.expand(2.0), R_LG, Stroke::new(2.0, p.primary), StrokeKind::Outside);
+                        }
                         match action {
                             Some(MsgAction::Copy) => ui.ctx().copy_text(caption(m)),
                             Some(action) => clicked = Some(MsgEvent::Menu(action, m.id.clone())),
@@ -1862,6 +1944,7 @@ fn compact_chat(
                 state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                 commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
             }
+            pinned_bar(ui, &p, chat);
             if let Some(event) = messages(ui, &p, book, chat, downloads, auto_stickers, typing_label(state, &session.id, book, chat).as_deref()) {
                 on_message_event(event, state, session, chat, &mut commands);
             }

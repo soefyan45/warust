@@ -19,7 +19,7 @@ use tokio::task::JoinHandle;
 use whatsapp_rust::serde_json::{Value, json};
 
 use super::session::{Body, reply_body};
-use super::{ApiState, Backend, Book, Command, SessionView, Shared, Status, Updater, media};
+use super::{ApiState, Backend, Book, Command, SessionView, Shared, Status, Updater, media, store};
 
 #[derive(Clone)]
 pub struct Context {
@@ -70,6 +70,7 @@ fn router(context: Context) -> Router {
         .route("/sessions/{id}/messages/media", post(send_media))
         .route("/sessions/{id}/messages/{msg_id}", get(get_message))
         .route("/sessions/{id}/messages/{msg_id}/forward", post(forward_message))
+        .route("/sessions/{id}/messages/{msg_id}/pin", post(pin_message))
         .route("/sessions/{id}/webhook", put(put_webhook))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "Endpoint tidak ada") })
         .with_state(context)
@@ -573,6 +574,49 @@ async fn forward_message(
         queued.push(json!({ "to": chat, "id": local_id, "status": "queued", "next": format!("GET /sessions/{id}/messages/{local_id}") }));
     }
     Ok((StatusCode::ACCEPTED, Json(json!({ "messages": queued }))).into_response())
+}
+
+#[derive(Deserialize)]
+struct PinBody {
+    pinned: bool,
+    /// `24h`, `7d` (default) or `30d`; only used when pinning.
+    duration: Option<String>,
+}
+
+async fn pin_message(
+    _: Authed,
+    State(context): State<Context>,
+    Path((id, msg_id)): Path<(String, String)>,
+    Json(body): Json<PinBody>,
+) -> Answer {
+    let view = session(&context, &id)?;
+    if view.status != Status::Connected {
+        return Err(error(StatusCode::CONFLICT, "not_connected", "Nomor belum terhubung"));
+    }
+    let length = match body.duration.as_deref() {
+        None => store::PinLength::Days7,
+        Some(code) => store::PinLength::parse(code)
+            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_duration", "duration harus 24h, 7d atau 30d"))?,
+    };
+    let real = view.book.aliases.get(&msg_id).cloned().unwrap_or_else(|| msg_id.clone());
+    let Some(chat) = view.book.chats.iter().find(|c| c.messages.iter().any(|m| m.id == real)) else {
+        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Pesan tidak ditemukan"));
+    };
+    if real.starts_with("local-") {
+        return Err(error(StatusCode::CONFLICT, "not_sent_yet", "Pesan masih dalam antrean"));
+    }
+    let chat = chat.jid.clone();
+    send(&context, Command::Pin { id: id.clone(), chat: chat.clone(), msg_id: real.clone(), pinned: body.pinned, length })?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": if body.pinned { "pinning" } else { "unpinning" },
+            "id": real,
+            "chat": chat,
+            "duration": body.pinned.then_some(length.code()),
+        })),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
