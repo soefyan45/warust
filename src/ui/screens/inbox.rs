@@ -187,10 +187,8 @@ pub fn show(
                     state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                     commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
                 }
-                match messages(ui, &p, &book, chat, downloads, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref()) {
-                    Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
-                    Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
-                    None => {}
+                if let Some(event) = messages(ui, &p, &book, chat, downloads, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref()) {
+                    on_message_event(event, state, session, chat, &mut commands);
                 }
             });
         });
@@ -900,10 +898,30 @@ fn paint_media(
     }
 }
 
-/// An entry of the message context menu. Add a variant, a button in
-/// `message_menu` and a branch where it is handled to extend the menu.
+/// An entry of the message context menu. To extend the menu add a variant,
+/// a button in `message_menu` and a branch in `on_message_event` (or handle
+/// it inline in `messages` when it needs no backend, like `Copy`).
 enum MsgAction {
     Copy,
+}
+
+/// What the user did on a message in the open chat.
+enum MsgEvent {
+    Media(MediaClick),
+    /// A context menu action on the message with this id.
+    Menu(MsgAction, String),
+}
+
+/// Turns a message event into commands or UI state; shared by the wide and
+/// compact layouts.
+fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, chat: &Chat, commands: &mut Vec<Command>) {
+    let _ = chat;
+    match event {
+        MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
+        MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
+        // Handled inline where the menu is shown.
+        MsgEvent::Menu(MsgAction::Copy, _) => {}
+    }
 }
 
 /// Right-click / long-press menu of a message bubble; returns the chosen action.
@@ -920,7 +938,7 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg) -> Option<MsgAction> {
 }
 
 /// Paints the open chat; returns a message whose media the user wants downloaded.
-fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool, typing: Option<&str>) -> Option<MediaClick> {
+fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool, typing: Option<&str>) -> Option<MsgEvent> {
     const GAP: f32 = 6.0;
     const DIVIDER: f32 = 36.0;
     let wrap = (ui.available_width() * 0.7).min(420.0);
@@ -1055,6 +1073,7 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
                         bubble.context_menu(|ui| action = message_menu(ui, m));
                         match action {
                             Some(MsgAction::Copy) => ui.ctx().copy_text(caption(m)),
+                            Some(action) => clicked = Some(MsgEvent::Menu(action, m.id.clone())),
                             None => {}
                         }
                         let mut at = rect.min + vec2(14.0, 10.0);
@@ -1070,7 +1089,7 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
                             let media_size = shown.size();
                             let media_rect = Rect::from_min_size(at, media_size);
                             if let Some(click) = paint_media(ui, p, media_rect, m, media, shown, downloads, auto_stickers) {
-                                clicked = Some(click);
+                                clicked = Some(MsgEvent::Media(click));
                             }
                             at.y += media_size.y + 8.0;
                         }
@@ -1731,10 +1750,8 @@ fn compact_chat(
                 state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                 commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
             }
-            match messages(ui, &p, book, chat, downloads, auto_stickers, typing_label(state, &session.id, book, chat).as_deref()) {
-                Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
-                Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
-                None => {}
+            if let Some(event) = messages(ui, &p, book, chat, downloads, auto_stickers, typing_label(state, &session.id, book, chat).as_deref()) {
+                on_message_event(event, state, session, chat, &mut commands);
             }
         });
     });
