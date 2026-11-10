@@ -148,7 +148,10 @@ jobs:
           ln -s /Applications dist/dmg/Applications
           cp README.md LICENSE THIRD_PARTY_NOTICES.md dist/dmg/
           dmg="dist/warust-$GITHUB_REF_NAME-macos-universal.dmg"
-          hdiutil create -volname warust -srcfolder dist/dmg -ov -format UDZO "$dmg"
+          # hdiutil's own size estimate for -srcfolder can come out too small
+          # ("No space left on device"), so the size is given with room to spare.
+          size=$(( $(du -sm dist/dmg | cut -f1) + 64 ))
+          hdiutil create -volname warust -srcfolder dist/dmg -ov -fs HFS+ -size "${size}m" -format UDZO "$dmg"
           if [ "$IDENTITY" != "-" ]; then
             codesign --force --timestamp --sign "$IDENTITY" "$dmg"
           fi
