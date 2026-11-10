@@ -138,6 +138,8 @@ pub struct App {
     pairing_id: Option<String>,
     /// The chat last reported to the notifier as on screen.
     viewing: Option<(String, String)>,
+    /// The unread count last shown on the taskbar icon and the title.
+    shown_unread: Option<u32>,
 }
 
 impl App {
@@ -181,6 +183,7 @@ impl App {
             // Dev aid: WARUST_PAIR=<session id> opens its pairing screen.
             pairing_id: std::env::var("WARUST_PAIR").ok(),
             viewing: None,
+            shown_unread: None,
             state: State {
                 contact_panel: true,
                 // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
@@ -809,6 +812,13 @@ impl eframe::App for App {
         };
         for command in screens::inbox::typing_signal(ui.ctx(), &mut self.state, open_chat) {
             self.backend.send(command);
+        }
+        // Unread messages on the taskbar/Dock icon and in the window title.
+        let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).map(|c| c.unread).sum();
+        if self.shown_unread != Some(unread) {
+            crate::platform::set_unread_badge(unread);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(crate::platform::window_title(unread)));
+            self.shown_unread = Some(unread);
         }
         // The open chat in a focused window gets no notification.
         let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);
