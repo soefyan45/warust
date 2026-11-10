@@ -135,6 +135,8 @@ pub struct State {
     pub voice: Option<VoiceNote>,
     /// Result of the last CSV export, shown for a few seconds.
     pub export_note: Option<(String, std::time::Instant)>,
+    /// Settings: the picture being chosen (and copied) for the chat wallpaper.
+    pub wallpaper_picking: Option<std::sync::mpsc::Receiver<Option<Result<std::path::PathBuf, String>>>>,
     /// "Recording audio" last told to this chat, and when.
     pub recording_told: Option<(String, String, std::time::Instant)>,
     /// Chats whose profile picture was already asked for.
@@ -924,6 +926,7 @@ impl eframe::App for App {
         self.webhooks = snapshot.webhooks;
         self.api = snapshot.api;
         crate::i18n::set(&self.settings.language);
+        widgets::set_wallpaper(&self.settings.wallpaper, &self.settings.wallpaper_file, self.settings.wallpaper_dim);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.

@@ -391,23 +391,101 @@ pub fn picture_uri(ctx: &egui::Context, path: &Path) -> Option<String> {
 }
 
 
-/// The doodle wallpaper behind an open chat (Pego "Mobile · Chat wallpaper"),
-/// repeated every 390 px so the doodles keep their size. Dark mode stays plain.
+/// A designed chat wallpaper (Pego "Mobile · Chat wallpaper"): settings key,
+/// names, the colour under it, and the image.
+pub struct Wallpaper {
+    pub key: &'static str,
+    pub name: (&'static str, &'static str),
+    pub background: Color32,
+    pub uri: &'static str,
+    pub bytes: &'static [u8],
+}
+
+/// The six designed wallpapers: the templates' own, then the ones users pick.
+pub const WALLPAPERS: [Wallpaper; 6] = [
+    Wallpaper { key: "forest", name: ("Forest", "Forest"), background: Color32::from_rgb(0xEC, 0xE8, 0xE2), uri: "bytes://wallpaper/forest.webp", bytes: include_bytes!("../../assets/wallpaper/forest.webp") },
+    Wallpaper { key: "mono", name: ("Monochrome", "Monokrom"), background: Color32::from_rgb(0xFA, 0xFA, 0xFA), uri: "bytes://wallpaper/mono.webp", bytes: include_bytes!("../../assets/wallpaper/mono.webp") },
+    Wallpaper { key: "dark", name: ("Dark", "Dark"), background: Color32::from_rgb(0x0B, 0x0B, 0x0C), uri: "bytes://wallpaper/dark.webp", bytes: include_bytes!("../../assets/wallpaper/dark.webp") },
+    Wallpaper { key: "forest-dark", name: ("Forest dark", "Forest Gelap"), background: Color32::from_rgb(0x0F, 0x2A, 0x1F), uri: "bytes://wallpaper/forest-dark.webp", bytes: include_bytes!("../../assets/wallpaper/forest-dark.webp") },
+    Wallpaper { key: "geometric", name: ("Geometric", "Geometri"), background: Color32::from_rgb(0xF3, 0xF1, 0xEA), uri: "bytes://wallpaper/geometric.webp", bytes: include_bytes!("../../assets/wallpaper/geometric.webp") },
+    Wallpaper { key: "botanical", name: ("Botanical", "Botani"), background: Color32::from_rgb(0xE9, 0xF0, 0xE6), uri: "bytes://wallpaper/botanical.webp", bytes: include_bytes!("../../assets/wallpaper/botanical.webp") },
+];
+
+/// The chosen background, set from the settings every frame.
+#[derive(Clone, Default, PartialEq)]
+struct Chosen {
+    key: String,
+    file: String,
+    dim: u8,
+}
+
+fn chosen() -> &'static Mutex<Chosen> {
+    static CHOSEN: OnceLock<Mutex<Chosen>> = OnceLock::new();
+    CHOSEN.get_or_init(Default::default)
+}
+
+/// Takes the wallpaper choice from the settings (cheap; called every frame).
+pub fn set_wallpaper(key: &str, file: &str, dim: u8) {
+    if let Ok(mut current) = chosen().lock() {
+        if current.key != key || current.file != file || current.dim != dim {
+            *current = Chosen { key: key.to_owned(), file: file.to_owned(), dim };
+        }
+    }
+}
+
+/// The designed wallpaper `auto` means: Forest for the Forest template,
+/// Monochrome for Classic light, Dark for Classic dark.
+pub fn auto_wallpaper(dark: bool) -> &'static Wallpaper {
+    let key = match (theme::template(), dark) {
+        (theme::Template::Forest, _) => "forest",
+        (_, false) => "mono",
+        (_, true) => "dark",
+    };
+    WALLPAPERS.iter().find(|w| w.key == key).unwrap_or(&WALLPAPERS[0])
+}
+
+/// The chat background behind an open chat: the wallpaper chosen in
+/// Settings (#56). Designed wallpapers repeat every 390 px so the doodles keep
+/// their size; a custom picture covers the thread, dimmed as chosen.
 pub fn wallpaper(ui: &Ui, rect: Rect) {
     let p = theme::palette(ui.ctx());
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     painter.rect_filled(rect, 0.0, p.chat_bg);
-    let (uri, bytes): (&str, &'static [u8]) = match (theme::template(), ui.ctx().theme()) {
-        (theme::Template::Forest, _) => ("bytes://wallpaper/forest.webp", include_bytes!("../../assets/wallpaper/forest.webp")),
-        (_, egui::Theme::Light) => ("bytes://wallpaper/mono.webp", include_bytes!("../../assets/wallpaper/mono.webp")),
-        _ => return,
-    };
-    // The source is 941 x 1672.
-    let tile = vec2(390.0, 390.0 * 1672.0 / 941.0);
-    let image = egui::Image::from_bytes(uri, bytes);
-    let Ok(egui::load::TexturePoll::Ready { texture }) = image.load_for_size(ui.ctx(), tile) else {
+    let choice = chosen().lock().map(|c| c.clone()).unwrap_or_default();
+    let dark = ui.ctx().theme() == egui::Theme::Dark;
+    match choice.key.as_str() {
+        "none" => {}
+        "custom" if !choice.file.is_empty() => {
+            let Some(uri) = picture_uri(ui.ctx(), Path::new(&choice.file)) else { return };
+            let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::from_uri(uri).load_for_size(ui.ctx(), rect.size()) else {
+                return;
+            };
+            // Cover: fill the thread, cropping what does not fit, centred.
+            let size = texture.size;
+            let scale = (rect.width() / size.x.max(1.0)).max(rect.height() / size.y.max(1.0));
+            let shown = Rect::from_center_size(rect.center(), size * scale);
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            painter.image(texture.id, shown, uv, Color32::WHITE);
+            let dim = f32::from(choice.dim.min(80)) / 100.0;
+            if dim > 0.0 {
+                painter.rect_filled(rect, 0.0, p.chat_bg.gamma_multiply(dim));
+            }
+        }
+        key => {
+            let wall = WALLPAPERS.iter().find(|w| w.key == key).unwrap_or_else(|| auto_wallpaper(dark));
+            paint_tiles(ui, &painter, rect, wall);
+        }
+    }
+}
+
+/// `wall` repeated every 390 px across `rect`.
+fn paint_tiles(ui: &Ui, painter: &egui::Painter, rect: Rect, wall: &Wallpaper) {
+    painter.rect_filled(rect, 0.0, wall.background);
+    let image = egui::Image::from_bytes(wall.uri, wall.bytes);
+    let Ok(egui::load::TexturePoll::Ready { texture }) = image.load_for_size(ui.ctx(), vec2(390.0, 700.0)) else {
         return;
     };
+    let tile = vec2(390.0, 390.0 * texture.size.y / texture.size.x.max(1.0));
     let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
     let mut y = rect.top();
     while y < rect.bottom() {
@@ -418,4 +496,11 @@ pub fn wallpaper(ui: &Ui, rect: Rect) {
         }
         y += tile.y;
     }
+}
+
+/// A small preview of a designed wallpaper, for the picker in Settings.
+pub fn paint_wallpaper_preview(ui: &Ui, rect: Rect, wall: &Wallpaper) {
+    let painter = ui.painter().with_clip_rect(rect);
+    painter.rect_filled(rect, 8.0, wall.background);
+    egui::Image::from_bytes(wall.uri, wall.bytes).corner_radius(8).fit_to_exact_size(rect.size()).paint_at(ui, rect);
 }
