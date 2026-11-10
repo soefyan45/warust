@@ -215,6 +215,8 @@ pub enum Command {
     /// Comment or react (one emoji) on a contact's status, from the number
     /// that saw it; goes to the poster's chat through the paced queue.
     StatusReply { id: String, msg_id: String, text: String },
+    /// Queue a forwarded text message to each chat (paced like any send).
+    Forward { id: String, chats: Vec<String>, text: String },
     /// Queue a message from the REST API under an id chosen by the caller.
     Enqueue { id: String, chat: String, body: session::Body, local_id: String },
     /// Save new settings; restarts the API server when its part changed.
@@ -597,6 +599,14 @@ async fn run(
                     _ => log::warn!("reply: session {id} is not running or the quoted message is gone"),
                 }
             }
+            Command::Forward { id, chats, text } => match (running.get(&id), stores.get(&id)) {
+                (Some(r), Some(store)) => {
+                    for chat in chats {
+                        r.enqueue(&id, chat, Body::Forward(text.clone()), &state, store);
+                    }
+                }
+                _ => log::warn!("forward: session {id} is not running"),
+            },
             Command::SendFile { id, chat, path, caption } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::File { path, caption }, &state, store),
                 _ => log::warn!("send file: session {id} is not running"),

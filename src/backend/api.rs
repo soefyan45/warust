@@ -69,6 +69,7 @@ fn router(context: Context) -> Router {
         .route("/sessions/{id}/messages/text", post(send_text))
         .route("/sessions/{id}/messages/media", post(send_media))
         .route("/sessions/{id}/messages/{msg_id}", get(get_message))
+        .route("/sessions/{id}/messages/{msg_id}/forward", post(forward_message))
         .route("/sessions/{id}/webhook", put(put_webhook))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "Endpoint tidak ada") })
         .with_state(context)
@@ -514,6 +515,64 @@ async fn get_message(_: Authed, State(context): State<Context>, Path((id, msg_id
         "error": failure,
     }))
     .into_response())
+}
+
+/// WhatsApp forwards to at most this many chats at once.
+const MAX_FORWARD_TARGETS: usize = 5;
+
+#[derive(Deserialize)]
+struct Forward {
+    to: Vec<String>,
+    #[serde(default)]
+    allow_cold: bool,
+}
+
+/// Forwards a stored text message to other chats through the paced queue.
+/// Media messages are refused for now.
+async fn forward_message(
+    _: Authed,
+    State(context): State<Context>,
+    Path((id, msg_id)): Path<(String, String)>,
+    Json(body): Json<Forward>,
+) -> Answer {
+    let view = session(&context, &id)?;
+    if body.to.is_empty() || body.to.len() > MAX_FORWARD_TARGETS {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "invalid_to",
+            format!("`to` harus berisi 1 sampai {MAX_FORWARD_TARGETS} tujuan"),
+        ));
+    }
+    let real = view.book.aliases.get(&msg_id).cloned().unwrap_or_else(|| msg_id.clone());
+    let found = view.book.chats.iter().flat_map(|c| &c.messages).find(|m| m.id == real || m.id == msg_id);
+    let Some(message) = found else {
+        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Pesan tidak ditemukan"));
+    };
+    if !message.forwardable() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "not_forwardable",
+            "Hanya pesan teks yang bisa diteruskan (media belum didukung)",
+        ));
+    }
+    // Check every target first so a bad one queues nothing.
+    let mut chats = Vec::new();
+    for to in &body.to {
+        let chat = check_target(&view, &to_jid(to)?, body.allow_cold)?;
+        if !chats.contains(&chat) {
+            chats.push(chat);
+        }
+    }
+    let mut queued = Vec::new();
+    for chat in chats {
+        let local_id = new_local_id();
+        send(
+            &context,
+            Command::Enqueue { id: id.clone(), chat: chat.clone(), body: Body::Forward(message.text.clone()), local_id: local_id.clone() },
+        )?;
+        queued.push(json!({ "to": chat, "id": local_id, "status": "queued", "next": format!("GET /sessions/{id}/messages/{local_id}") }));
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({ "messages": queued }))).into_response())
 }
 
 #[derive(Deserialize)]

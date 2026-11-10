@@ -47,6 +47,8 @@ pub enum Body {
     StatusReply { text: String, status: store::StatusPost },
     /// A text that quotes an earlier message of the same chat.
     Reply { text: String, quote: ReplyQuote },
+    /// A forwarded text message (stage 1: no media).
+    Forward(String),
 }
 
 /// The message a `Body::Reply` quotes.
@@ -238,15 +240,16 @@ impl Running {
             Body::Text(text) => text.clone(),
             Body::File { path, caption } => media::label(path, caption),
             Body::Sticker(_) => "[Stiker]".to_owned(),
-            Body::StatusReply { text, .. } | Body::Reply { text, .. } => text.clone(),
+            Body::StatusReply { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
         };
         let media = match &body {
-            Body::Text(_) | Body::StatusReply { .. } | Body::Reply { .. } => None,
+            Body::Text(_) | Body::StatusReply { .. } | Body::Reply { .. } | Body::Forward(_) => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
         };
         let record = store::msg_record(&chat, &local_id, true, "", &shown, unix_secs(), &Delivery::Queued, false);
         let mut record = store::with_media(record, media);
+        record = store::with_forwarded(record, matches!(body, Body::Forward(_)));
         if let Body::StatusReply { status, .. } = &body {
             let text = if status.media.is_some() && status.caption().is_empty() { status.text.clone() } else { status.caption() };
             record = store::with_quote(record, &store::Quote { id: status.id.clone(), text, status: true });
@@ -320,6 +323,9 @@ fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
         return Some(Body::StatusReply { text: m.text.clone(), status });
     }
     let Some(media) = &m.media else {
+        if m.forwarded {
+            return Some(Body::Forward(m.text.clone()));
+        }
         if let Some(quote) = &m.quote {
             // A reply: the quoted message must still be in the book (it gives the participant).
             let quoted = book.chats.iter().flat_map(|c| &c.messages).find(|q| q.id == quote.id)?;
@@ -535,6 +541,7 @@ fn on_message(
     let summary = media.as_ref().map(|m| {
         json!({ "kind": m.get("k"), "name": m.get("name"), "mime": m.get("mime"), "size": m.get("size") })
     });
+    let record = store::with_forwarded(record, ctx.message.is_forwarded());
     records.push(store::with_media(record, media));
     state.record(id, chats, &records);
     if !source.is_from_me {
@@ -786,6 +793,7 @@ fn history_records(compressed: &[u8], media_dir: &Path) -> Result<Vec<Value>, St
             let ts = info.message_timestamp.unwrap_or(0) as i64;
             let record = store::msg_record(&chat, msg_id, from_me, &sender, &text, ts, &status, false);
             let record = store::with_media(record, media::describe(message, media_dir, msg_id));
+            let record = store::with_forwarded(record, message.is_forwarded());
             let (background, color) = status_colors(message);
             records.push(store::with_colors(record, background, color));
         }
@@ -876,6 +884,14 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
             let context = build_quote_context_with_info(quote.id, &participant, chat, chat, &wa::Message::text(quote.text));
             Ok(wa::Message::text_with_context(text, context))
         }
+        // The original wa::Message is not kept, so the text is rebuilt with
+        // the same markers `prepare_for_forward` sets (score 1: first hop).
+        Body::Forward(text) => {
+            let mut context = wa::ContextInfo::default();
+            context.is_forwarded = Some(true);
+            context.forwarding_score = Some(1);
+            Ok(wa::Message::text_with_context(text, context))
+        }
     }
 }
 
@@ -964,6 +980,7 @@ mod tests {
             store::with_media(q("b", "[Dokumen] nota.pdf tolong dicek"), Some(super::media::describe_sent(&doc))),
             store::with_media(q("c", "[Dokumen] hilang.pdf"), Some(super::media::describe_sent(&dir.join("hilang.pdf")))),
             store::with_quote(q("d", "👍"), &Quote { id: "ST1".to_owned(), text: "Promo".to_owned(), status: true }),
+            store::with_forwarded(q("e", "info penting"), true),
         ];
         let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
         let path = dir.join("s.jsonl");
@@ -974,6 +991,7 @@ mod tests {
         assert!(matches!(body("b"), Some(Body::File { path, caption }) if path == doc && caption == "tolong dicek"));
         assert!(body("c").is_none());
         assert!(matches!(body("d"), Some(Body::StatusReply { text, status }) if text == "👍" && status.id == "ST1"));
+        assert!(matches!(body("e"), Some(Body::Forward(t)) if t == "info penting"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

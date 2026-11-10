@@ -19,7 +19,7 @@ type Downloads = HashMap<String, Option<String>>;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG, R_MD};
 use crate::ui::widgets::{self, Kind, rich, rich_mono};
-use crate::ui::{ReplyTarget, State, emoji, icons, markup, pdf, stickers, time};
+use crate::ui::{ReplyTarget, State, emoji, forward, icons, markup, pdf, stickers, time};
 
 const ROW: f32 = 60.0;
 /// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai", "Diarsipkan".
@@ -932,6 +932,7 @@ fn paint_media(
 enum MsgAction {
     Copy,
     Reply,
+    Forward,
 }
 
 /// What the user did on a message in the open chat.
@@ -949,6 +950,11 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
         // Handled inline where the menu is shown.
         MsgEvent::Menu(MsgAction::Copy, _) => {}
+        MsgEvent::Menu(MsgAction::Forward, msg_id) => {
+            if let Some(m) = chat.messages.iter().find(|m| m.id == msg_id).filter(|m| m.forwardable()) {
+                state.forward = Some(forward::Dialog::new(session.id.clone(), m.text.clone()));
+            }
+        }
         MsgEvent::Menu(MsgAction::Reply, msg_id) => {
             let Some(m) = chat.messages.iter().find(|m| m.id == msg_id) else { return };
             let author = if m.from_me { "Anda".to_owned() } else { super::sender_label(&session.book, &m.sender) };
@@ -1002,6 +1008,10 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg) -> Option<MsgAction> {
     let mut action = None;
     if ui.button("Balas").clicked() {
         action = Some(MsgAction::Reply);
+    }
+    // Text only for now; media forwarding is stage 2.
+    if m.forwardable() && ui.button("Teruskan").clicked() {
+        action = Some(MsgAction::Forward);
     }
     // Media without a caption has nothing to copy.
     if !caption(m).is_empty() && ui.button("Salin").clicked() {
@@ -1064,6 +1074,9 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
         let tick = if m.from_me { tick(p, &m.status, meta_color, !sticker && is_dark(p.primary)) } else { None };
         if chat.is_group() && !m.from_me {
             meta = format!("{} · {meta}", super::sender_label(book, &m.sender));
+        }
+        if m.forwarded {
+            meta = format!("Diteruskan · {meta}");
         }
         let meta = ui.painter().layout_no_wrap(meta, fonts::ui(11.0, Weight::Regular), meta_color);
         let quote = m.quote.as_ref().map(|q| {

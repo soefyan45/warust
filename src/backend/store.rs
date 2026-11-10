@@ -73,6 +73,16 @@ pub struct ChatMsg {
     pub media: Option<Media>,
     /// What this message replies to; for now only our replies to a status.
     pub quote: Option<Quote>,
+    /// Shown as "Diteruskan": it came in forwarded, or we forwarded it.
+    pub forwarded: bool,
+}
+
+impl ChatMsg {
+    /// Stage 1 of forwarding: plain text only. Media, locations and
+    /// contacts are only a label here, not something to send again.
+    pub fn forwardable(&self) -> bool {
+        self.media.is_none() && !self.text.trim().is_empty() && !matches!(self.text.as_str(), "[Lokasi]" | "[Kontak]")
+    }
 }
 
 /// The message a reply quotes.
@@ -340,6 +350,7 @@ impl Book {
                             status: q.get("st").and_then(Value::as_bool).unwrap_or(false),
                         })
                     }),
+                    forwarded: record.get("fw").and_then(Value::as_bool).unwrap_or(false),
                 };
                 let unread = record.get("unread").and_then(Value::as_bool).unwrap_or(false);
                 let chat = self.chat_mut(&jid);
@@ -523,6 +534,14 @@ pub fn with_media(mut record: Value, media: Option<Value>) -> Value {
     record
 }
 
+/// Marks a msg record as forwarded (absent means not).
+pub fn with_forwarded(mut record: Value, forwarded: bool) -> Value {
+    if let (true, Some(object)) = (forwarded, record.as_object_mut()) {
+        object.insert("fw".to_owned(), true.into());
+    }
+    record
+}
+
 /// Adds what the message quotes to its msg record.
 pub fn with_quote(mut record: Value, quote: &Quote) -> Value {
     if let Some(object) = record.as_object_mut() {
@@ -645,6 +664,18 @@ mod tests {
         let m = &b.chats[0].messages[0];
         let q = m.quote.as_ref().expect("quote kept");
         assert_eq!((q.id.as_str(), q.text.as_str(), q.status), ("ST1", "Pesanan katering", true));
+    }
+
+    #[test]
+    fn forwarded_flag_round_trips_and_old_records_read_false() {
+        let chat = "628111@s.whatsapp.net";
+        let plain = msg_record(chat, "a", false, chat, "halo", 10, &Delivery::Received, false);
+        assert!(plain.get("fw").is_none(), "absent when not forwarded");
+        let fw = with_forwarded(msg_record(chat, "b", false, chat, "info", 20, &Delivery::Received, false), true);
+        let b = book(&[plain, fw]);
+        let flags: Vec<bool> = b.chats[0].messages.iter().map(|m| m.forwarded).collect();
+        assert_eq!(flags, [false, true]);
+        assert!(b.chats[0].messages[1].forwardable());
     }
 
     #[test]

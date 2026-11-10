@@ -4,6 +4,7 @@
 mod compact;
 mod emoji;
 mod fonts;
+mod forward;
 mod icons;
 mod markup;
 mod pdf;
@@ -76,6 +77,8 @@ pub struct State {
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
     pub pdf_view: Option<pdf::Viewer>,
+    /// "Teruskan ke…" dialog for a message of the open chat.
+    pub forward: Option<forward::Dialog>,
     /// The file dialog running on its own thread; `None` inside when cancelled.
     pub picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
     /// Result of the last CSV export, shown for a few seconds.
@@ -822,6 +825,9 @@ impl eframe::App for App {
             None
         };
         for command in screens::inbox::typing_signal(ui.ctx(), &mut self.state, open_chat) {
+            self.backend.send(command);
+        }
+        for command in forward::show(ui.ctx(), &mut self.state.forward, &self.sessions) {
             self.backend.send(command);
         }
         // The open chat in a focused window gets no notification.

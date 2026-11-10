@@ -131,6 +131,7 @@ curl -X POST http://127.0.0.1:8787/sessions/<id>/messages/text \
 | `POST /sessions/{id}/messages/text` | Kirim teks lewat antrean anti-ban |
 | `POST /sessions/{id}/messages/media` | Foto, dokumen atau stiker dari `path` atau `url` |
 | `GET /sessions/{id}/messages/{msg_id}` | Status kirim satu pesan |
+| `POST /sessions/{id}/messages/{msg_id}/forward` | Teruskan pesan teks ke 1-5 tujuan (`{"to": ["628123456789", ...]}`), lewat antrean anti-ban. Media ditolak `400 not_forwardable` |
 | `GET /sessions/{id}/chats` · `GET /sessions/{id}/statuses` | Daftar chat dan status 24 jam terakhir |
 | `POST /sessions/{id}/chats/{jid}/read` | Tandai chat dibaca: kirim centang biru dan sinkron ke HP. Body opsional `{"read": false}` untuk menandai belum dibaca |
 | `POST /sessions/{id}/chats/{jid}/archive` | Arsipkan atau keluarkan dari arsip: body `{"archived": true}` atau `{"archived": false}` |
