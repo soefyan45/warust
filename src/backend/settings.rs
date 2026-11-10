@@ -139,6 +139,14 @@ pub struct Settings {
     pub send_read: bool,
     /// UI language: `en` (the default, also for older files) or `id`.
     pub language: String,
+    /// Chat background: `auto` (the template's own), one of the designed
+    /// wallpapers (`forest`, `mono`, `dark`, `forest-dark`, `geometric`,
+    /// `botanical`), `none`, or `custom` with `wallpaper_file`.
+    pub wallpaper: String,
+    /// The user's own picture, copied into the data folder.
+    pub wallpaper_file: String,
+    /// How much a custom picture is dimmed toward the chat colour, 0 to 80 %.
+    pub wallpaper_dim: u8,
 }
 
 impl Default for Settings {
@@ -156,6 +164,9 @@ impl Default for Settings {
             typing: true,
             send_read: false,
             language: crate::i18n::EN.to_owned(),
+            wallpaper: "auto".to_owned(),
+            wallpaper_file: String::new(),
+            wallpaper_dim: 30,
         }
     }
 }
