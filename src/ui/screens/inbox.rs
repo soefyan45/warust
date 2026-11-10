@@ -975,6 +975,8 @@ enum MediaBox {
     /// A document with a first-page preview above its card: the rendered PDF
     /// once downloaded, else the thumbnail that came with the message.
     Document { pdf: Option<PathBuf>, thumb: Option<PathBuf> },
+    /// A voice note: play button, waveform and length (Pego `FM/VN/Bubble`).
+    Voice(f32),
 }
 
 /// What a click on media asks for.
@@ -996,6 +998,7 @@ impl MediaBox {
             MediaBox::Card => CARD,
             MediaBox::Sticker(_) => STICKER,
             MediaBox::Document { .. } => vec2(CARD.x, PREVIEW_HEIGHT + CARD.y),
+            MediaBox::Voice(width) => vec2(*width, VOICE_HEIGHT),
         }
     }
 }
@@ -1003,6 +1006,9 @@ impl MediaBox {
 fn media_box(media: &Media, wrap: f32) -> MediaBox {
     if media.kind == "sticker" {
         return MediaBox::Sticker(media.file.clone());
+    }
+    if media.kind == "audio" && media.voice {
+        return MediaBox::Voice(wrap.clamp(200.0, 280.0));
     }
     if media.kind == "document" {
         let pdf = media.file.clone().filter(|f| pdf::is_pdf(f));
@@ -1117,6 +1123,172 @@ fn media_action(m: &ChatMsg, media: &Media, downloads: &Downloads) -> MediaState
     }
 }
 
+const VOICE_HEIGHT: f32 = 46.0;
+/// Bars in a voice bubble: the waveform's peaks in this many equal slices,
+/// so every bubble is as wide whatever its length.
+const VOICE_BARS: usize = 34;
+
+/// Length and waveform of voice notes read from their files, for notes
+/// whose record does not carry them (sent before they were stored).
+fn voice_file_info(ctx: &egui::Context, path: &Path) -> Option<(u32, Vec<u8>)> {
+    use std::sync::{Mutex, OnceLock};
+    static INFO: OnceLock<Mutex<HashMap<PathBuf, Option<(u32, Vec<u8>)>>>> = OnceLock::new();
+    let info = INFO.get_or_init(Mutex::default);
+    let mut map = info.lock().ok()?;
+    if let Some(found) = map.get(path) {
+        return found.clone();
+    }
+    map.insert(path.to_owned(), None);
+    let (path, ctx) = (path.to_owned(), ctx.clone());
+    // Decoding takes a moment for long notes: off the UI thread.
+    std::thread::spawn(move || {
+        let found = std::fs::read(&path).ok().and_then(|bytes| crate::backend::voice::inspect(&bytes).ok());
+        if let Some(info) = INFO.get().and_then(|i| i.lock().ok()).as_mut() {
+            info.insert(path, found);
+        }
+        ctx.request_repaint();
+    });
+    None
+}
+
+/// `VOICE_BARS` heights from 0 to 1: the peak of each slice of `wave`.
+fn voice_bars(wave: &[u8]) -> Vec<f32> {
+    if wave.is_empty() {
+        return vec![0.15; VOICE_BARS];
+    }
+    (0..VOICE_BARS)
+        .map(|bar| {
+            let from = bar * wave.len() / VOICE_BARS;
+            let to = ((bar + 1) * wave.len() / VOICE_BARS).max(from + 1).min(wave.len());
+            f32::from(wave[from..to].iter().copied().max().unwrap_or(0)) / 100.0
+        })
+        .collect()
+}
+
+/// `m:ss`.
+fn clock_of(seconds: f32) -> String {
+    let s = seconds.max(0.0).round() as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// A voice note's bubble (Pego `FM/VN/Bubble/Out` and `/In`): ▶/⏸, the
+/// waveform filling as it plays with a knob to seek, the length (or the time
+/// played), and the speed chip while it is loaded. A note not downloaded yet
+/// downloads on ▶.
+fn paint_voice(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, downloads: &Downloads) -> Option<MediaClick> {
+    use crate::backend::player;
+    let forest = theme::template().top_nav();
+    let (button, glyph, played, rest, sub) = if m.from_me {
+        let button = if forest { p.accent } else { p.on_primary };
+        (button, p.primary, button, p.on_primary_muted, p.on_primary_muted)
+    } else {
+        (p.primary, p.on_primary, p.primary, p.border_strong, p.muted)
+    };
+    let file = media.file.as_deref();
+    let status = player::status(&m.id);
+    let loading = player::is_loading(&m.id) || matches!(downloads.get(&m.id), Some(None));
+    let from_file = if media.waveform.is_empty() || media.seconds.is_none() { file.and_then(|f| voice_file_info(ui.ctx(), f)) } else { None };
+    let wave = if media.waveform.is_empty() { from_file.as_ref().map(|(_, w)| w.as_slice()).unwrap_or_default() } else { &media.waveform };
+    let duration = status.map(|s| s.duration).or(media.seconds.map(|s| s as f32)).or(from_file.as_ref().map(|(s, _)| *s as f32));
+    let fraction = status.map(|s| (s.position / s.duration.max(0.01)).clamp(0.0, 1.0)).unwrap_or(0.0);
+    if status.is_some_and(|s| s.playing) || loading {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+    }
+
+    // ▶ / ⏸
+    let center = pos2(rect.left() + 20.0, rect.top() + 20.0);
+    let play = Rect::from_center_size(center, vec2(38.0, 38.0));
+    let play_response = ui.interact(play, ui.scope_id().with(("voice_play", &m.id)), Sense::click());
+    let radius = if play_response.hovered() { 19.0 } else { 18.0 };
+    ui.painter().circle_filled(center, radius, button);
+    let icon = if loading {
+        "loader-circle"
+    } else if status.is_some_and(|s| s.playing) {
+        "pause"
+    } else if file.is_none() {
+        "download"
+    } else {
+        "play"
+    };
+    icons::paint(ui, Rect::from_center_size(center, vec2(18.0, 18.0)), icon, 18.0, glyph);
+
+    // Waveform; played bars full, the rest muted, the knob where it is.
+    let bars_rect = Rect::from_min_max(pos2(rect.left() + 48.0, rect.top() + 6.0), pos2(rect.right() - 4.0, rect.top() + 30.0));
+    let bars = voice_bars(wave);
+    let step = bars_rect.width() / VOICE_BARS as f32;
+    let width = (step * 0.55).clamp(2.0, 3.0);
+    for (i, value) in bars.iter().enumerate() {
+        let x = bars_rect.left() + step * (i as f32 + 0.5);
+        let height = 3.0 + value.powf(0.7) * (bars_rect.height() - 3.0);
+        let done = status.is_some() && (i as f32 + 0.5) / VOICE_BARS as f32 <= fraction;
+        let bar = Rect::from_center_size(pos2(x, bars_rect.center().y), vec2(width, height));
+        ui.painter().rect_filled(bar, width / 2.0, if done { played } else { rest });
+    }
+    let seek = ui.interact(bars_rect.expand2(vec2(0.0, 4.0)), ui.scope_id().with(("voice_seek", &m.id)), Sense::click_and_drag());
+    if status.is_some() {
+        let knob = pos2(bars_rect.left() + bars_rect.width() * fraction, bars_rect.center().y);
+        ui.painter().circle_filled(knob, if seek.hovered() || seek.dragged() { 7.0 } else { 6.0 }, played);
+    }
+
+    // Length (or the time played), the mic on received notes, the speed chip.
+    let row_y = rect.top() + 38.0;
+    let mut x = bars_rect.left();
+    if !m.from_me {
+        icons::paint(ui, Rect::from_center_size(pos2(x + 6.0, row_y), vec2(12.0, 12.0)), "mic", 12.0, played);
+        x += 16.0;
+    }
+    let shown = match (status, duration) {
+        (Some(s), _) if s.playing || s.position > 0.0 => clock_of(s.position),
+        (_, Some(d)) => clock_of(d),
+        _ => match media.size {
+            Some(size) => human_size(size),
+            None => String::new(),
+        },
+    };
+    let time = ui.painter().layout_no_wrap(shown, fonts::mono(11.0), sub);
+    ui.painter().galley(pos2(x, row_y - time.size().y / 2.0), time, sub);
+    let mut speed_clicked = false;
+    if let Some(s) = status {
+        let label = if s.speed == 1.0 { "1×".to_owned() } else { format!("{}×", s.speed).replace('.', if crate::i18n::indonesian() { "," } else { "." }) };
+        let galley = ui.painter().layout_no_wrap(label, fonts::ui(11.0, Weight::SemiBold), if m.from_me { p.on_primary } else { p.text });
+        let chip = Rect::from_center_size(pos2(bars_rect.center().x, row_y), vec2(galley.size().x + 14.0, 16.0));
+        let chip_response = ui.interact(chip, ui.scope_id().with(("voice_speed", &m.id)), Sense::click());
+        let fill = if m.from_me { p.on_primary_muted.gamma_multiply(0.35) } else { p.raised };
+        ui.painter().rect_filled(chip, 8.0, fill);
+        ui.painter().galley(chip.center() - galley.size() / 2.0, galley, if m.from_me { p.on_primary } else { p.text });
+        speed_clicked = chip_response
+            .on_hover_text(tr("Playback speed", "Kecepatan putar"))
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked();
+        if speed_clicked {
+            player::set_speed(player::next_speed(s.speed));
+        }
+    }
+
+    let play_hint = match (file.is_some(), status.is_some_and(|s| s.playing)) {
+        (false, _) => match downloads.get(&m.id) {
+            Some(Some(reason)) => crate::trf!("Download failed: {reason}", "Gagal mengunduh: {reason}"),
+            _ => tr("Download and play", "Unduh dan putar").to_owned(),
+        },
+        (true, true) => tr("Pause", "Jeda").to_owned(),
+        (true, false) => tr("Play", "Putar").to_owned(),
+    };
+    let play_clicked = play_response.on_hover_text(play_hint).on_hover_cursor(CursorIcon::PointingHand).clicked();
+    let Some(file) = file else {
+        let wants = play_clicked && media.downloadable() && !loading;
+        return wants.then(|| MediaClick::Download(m.id.clone()));
+    };
+    if play_clicked {
+        player::toggle(&m.id, file);
+    } else if !speed_clicked && (seek.clicked() || seek.dragged()) {
+        if let Some(at) = seek.interact_pointer_pos() {
+            player::seek(&m.id, file, (at.x - bars_rect.left()) / bars_rect.width());
+        }
+    }
+    let _ = seek.on_hover_cursor(CursorIcon::PointingHand);
+    None
+}
+
 /// Opens a downloaded file in the desktop's default app.
 fn open_file(path: &Path) {
     crate::platform::open(path);
@@ -1165,6 +1337,9 @@ fn paint_media(
     downloads: &Downloads,
     auto_stickers: bool,
 ) -> Option<MediaClick> {
+    if matches!(shown, MediaBox::Voice(_)) {
+        return paint_voice(ui, p, rect, m, media, downloads);
+    }
     let state = media_action(m, media, downloads);
     let action = state.label();
     let response = ui.interact(rect, ui.scope_id().with(("media", &m.id)), Sense::click());
@@ -1207,6 +1382,7 @@ fn paint_media(
             };
             paint_card(ui, p, rect, m, media, &detail);
         }
+        MediaBox::Voice(_) => unreachable!("drawn by paint_voice above"),
         MediaBox::Document { pdf: file, thumb } => {
             let preview = Rect::from_min_size(rect.min, vec2(rect.width(), PREVIEW_HEIGHT));
             let card = Rect::from_min_max(pos2(rect.left(), preview.bottom()), rect.max);

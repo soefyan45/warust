@@ -12,6 +12,7 @@ pub mod rules;
 mod session;
 pub mod settings;
 pub mod store;
+pub mod player;
 pub mod voice;
 pub mod webhook;
 

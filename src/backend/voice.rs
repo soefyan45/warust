@@ -251,6 +251,13 @@ impl Encoder {
 /// Length in whole seconds and the waveform of an Ogg Opus voice note, read
 /// back from the file so a queued note can be sent again from its path.
 pub fn inspect(ogg: &[u8]) -> Result<(u32, Vec<u8>), String> {
+    let audio = decode(ogg)?;
+    Ok((seconds_of(audio.len() as u64), waveform(&audio)))
+}
+
+/// The 48 kHz mono samples of an Ogg Opus file (ours, or a received voice
+/// note), without the encoder's priming samples.
+pub fn decode(ogg: &[u8]) -> Result<Vec<f32>, String> {
     let mut reader = ogg::PacketReader::new(std::io::Cursor::new(ogg));
     let head = reader.read_packet_expected().map_err(|e| crate::trf!("Not a voice message: {e}", "Bukan pesan suara: {e}"))?;
     if !head.data.starts_with(b"OpusHead") || head.data.len() < 19 {
@@ -258,6 +265,7 @@ pub fn inspect(ogg: &[u8]) -> Result<(u32, Vec<u8>), String> {
     }
     let pre_skip = usize::from(u16::from_le_bytes([head.data[10], head.data[11]]));
     reader.read_packet_expected().map_err(|e| crate::trf!("Broken voice message: {e}", "Pesan suara rusak: {e}"))?; // OpusTags
+    // Mono output also decodes stereo streams (libopus downmixes).
     let mut decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|e| e.to_string())?;
     let (mut pcm, mut end) = (Vec::new(), 0u64);
     let mut out = vec![0.0f32; 5_760];
@@ -268,8 +276,9 @@ pub fn inspect(ogg: &[u8]) -> Result<(u32, Vec<u8>), String> {
     }
     // The last granule marks where the audio ends; the first `pre_skip` samples are priming.
     let end = usize::try_from(end).unwrap_or(usize::MAX).min(pcm.len());
-    let audio = pcm.get(pre_skip.min(end)..end).unwrap_or_default();
-    Ok((seconds_of(audio.len() as u64), waveform(audio)))
+    pcm.truncate(end);
+    pcm.drain(..pre_skip.min(pcm.len()));
+    Ok(pcm)
 }
 
 /// Where a recording stands.
