@@ -52,7 +52,7 @@ Semua screenshot memakai data contoh.</sub></p>
     <td width="50%" valign="top"><strong>🟢 Status & reaksi</strong><br>Lihat status kontak dari semua nomor, kirim reaksi dan komentar sebagai balasan berkutip.</td>
   </tr>
   <tr>
-    <td valign="top"><strong>🔌 REST API lokal</strong><br>Kirim teks, foto, dokumen dan stiker lewat HTTP di 127.0.0.1, dengan API key Bearer.</td>
+    <td valign="top"><strong>🔌 REST API lokal</strong><br>Kirim teks, foto, video, dokumen dan stiker lewat HTTP di 127.0.0.1, dengan API key Bearer.</td>
     <td valign="top"><strong>🪝 Webhook bertanda tangan</strong><br>Pesan masuk, status kirim dan status sesi dikirim sebagai JSON dengan HMAC-SHA256 dan coba ulang.</td>
   </tr>
   <tr>
@@ -61,7 +61,7 @@ Semua screenshot memakai data contoh.</sub></p>
   </tr>
 </table>
 
-Juga: emoji berwarna, kirim foto/dokumen/stiker, pratinjau PDF di aplikasi, tanda kirim ✓✓,
+Juga: emoji berwarna, kirim foto/video/dokumen/stiker, rekam pesan suara, pratinjau PDF di aplikasi, tanda kirim ✓✓,
 notifikasi desktop (klik untuk membuka chat), dua template (Forest, dan Klasik gelap/terang), serta tata letak HP saat jendela
 dikecilkan di bawah 1100 px.
 
@@ -82,15 +82,21 @@ Data (kunci sesi, chat, media, pengaturan, API key) disimpan di folder per pengg
 `~/.local/share/warust` (Linux), `~/Library/Application Support/warust` (macOS), atau
 `%APPDATA%\warust` (Windows). Jangan bagikan folder itu: isinya cukup untuk masuk ke akun WhatsApp yang
 tertaut. Folder lain bisa dipilih dengan variabel lingkungan `WARUST_DATA`.
+Pesan suara yang direkam disimpan di subfolder `voice/` (Ogg Opus, sekitar 4 KB per detik) agar
+bisa dibuka lagi dari chat; warust tidak menghapusnya sendiri, jadi folder itu boleh dikosongkan bila
+perlu ruang.
 
 Beberapa fitur memakai alat bawaan OS. Di Linux, paket .deb menyarankan `zenity` (dialog file),
-`poppler-utils` (pratinjau PDF), `libnotify-bin` dan `gnome-session-canberra` (notifikasi dan suara).
+`poppler-utils` (pratinjau PDF), `libnotify-bin` dan `gnome-session-canberra` (notifikasi dan suara),
+serta `ffmpeg` (thumbnail video).
 Pratinjau PDF di macOS dan Windows butuh poppler (`brew install poppler` / Scoop); tanpa itu PDF tetap
-bisa dibuka di aplikasi lain.
+bisa dibuka di aplikasi lain. Tanpa ffmpeg, video tetap terkirim dan bisa diputar, hanya tanpa
+thumbnail (di macOS, Quick Look dipakai sebagai gantinya).
 
 ### Dari source
 
-Butuh [Rust](https://rustup.rs) (versi dipatok di `rust-toolchain.toml`) dan compiler C untuk SQLite.
+Butuh [Rust](https://rustup.rs) (versi dipatok di `rust-toolchain.toml`), compiler C untuk SQLite, dan
+CMake untuk libopus (pesan suara). Di Linux juga header ALSA untuk mikrofon (`sudo apt install cmake libasound2-dev`).
 
 ```bash
 git clone https://github.com/soefyan45/warust && cd warust
@@ -129,7 +135,7 @@ curl -X POST http://127.0.0.1:8787/sessions/<id>/messages/text \
 | `GET /sessions` · `POST /sessions` | Daftar nomor dan statusnya · tambah nomor baru |
 | `GET /sessions/{id}/qr` · `POST /sessions/{id}/pair-code` | QR atau kode pairing |
 | `POST /sessions/{id}/messages/text` | Kirim teks lewat antrean anti-ban |
-| `POST /sessions/{id}/messages/media` | Foto, dokumen atau stiker dari `path` atau `url` |
+| `POST /sessions/{id}/messages/media` | Foto, video (MP4/MOV), dokumen atau stiker dari `path` atau `url` |
 | `GET /sessions/{id}/messages/{msg_id}` | Status kirim satu pesan |
 | `POST /sessions/{id}/messages/{msg_id}/forward` | Teruskan pesan teks ke 1-5 tujuan (`{"to": ["628123456789", ...]}`), lewat antrean anti-ban. Media ditolak `400 not_forwardable` |
 | `POST /sessions/{id}/messages/{msg_id}/pin` | Sematkan atau lepas sematan pesan, body `{"pinned": true, "duration": "24h"\|"7d"\|"30d"}` (`duration` bawaan `7d`, diabaikan saat melepas) |

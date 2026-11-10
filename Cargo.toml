@@ -1,6 +1,6 @@
 [package]
 name = "warust"
-version = "0.1.1"
+version = "0.1.3"
 edition = "2024"
 description = "Desktop WhatsApp gateway: many numbers in one inbox, a local REST API, signed webhooks and triggers"
 license = "MIT"
@@ -15,7 +15,7 @@ maintainer = "Soefyan Syah <2637377+soefyan45@users.noreply.github.com>"
 section = "net"
 priority = "optional"
 depends = "$auto"
-recommends = "zenity, poppler-utils, libnotify-bin, gnome-session-canberra"
+recommends = "zenity, poppler-utils, libnotify-bin, gnome-session-canberra, ffmpeg"
 extended-description = """\
 Many WhatsApp numbers in one inbox, a status page, a local REST API, signed \
 webhooks and triggers. Unofficial client, not affiliated with WhatsApp or Meta."""
@@ -71,6 +71,11 @@ qrcode = { version = "0.14", default-features = false }
 # Already in the tree through rustls/ring: OS randomness for API keys and
 # webhook secrets on every OS.
 getrandom = "0.3"
+# Voice notes (issue #14): microphone capture, libopus (built from source with
+# cmake and linked statically) and the Ogg container WhatsApp expects.
+cpal = "0.18"
+opus = "0.4"
+ogg = "0.9"
 
 
 # Clickable notifications (issue #15). macOS: the objc2 family eframe/winit

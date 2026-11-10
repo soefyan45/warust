@@ -26,6 +26,8 @@ jobs:
       - name: Toolchain (rust-toolchain.toml)
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@v2
+      - name: ALSA headers (microphone for voice notes)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: Install cargo-deb
         run: cargo install cargo-deb --locked
       - name: Build package
@@ -136,7 +138,9 @@ jobs:
             codesign --force --sign - dist/warust.app
           else
             # Hardened runtime and a secure timestamp are required for notarization.
-            codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/warust.app
+            # The entitlements let the hardened app use the microphone (voice notes).
+            codesign --force --options runtime --timestamp --entitlements packaging/macos/warust.entitlements \
+              --sign "$IDENTITY" dist/warust.app
           fi
           codesign --verify --strict --verbose=2 dist/warust.app
       - name: Make the disk image
@@ -148,7 +152,10 @@ jobs:
           ln -s /Applications dist/dmg/Applications
           cp README.md LICENSE THIRD_PARTY_NOTICES.md dist/dmg/
           dmg="dist/warust-$GITHUB_REF_NAME-macos-universal.dmg"
-          hdiutil create -volname warust -srcfolder dist/dmg -ov -format UDZO "$dmg"
+          # hdiutil's own size estimate for -srcfolder can come out too small
+          # ("No space left on device"), so the size is given with room to spare.
+          size=$(( $(du -sm dist/dmg | cut -f1) + 64 ))
+          hdiutil create -volname warust -srcfolder dist/dmg -ov -fs HFS+ -size "${size}m" -format UDZO "$dmg"
           if [ "$IDENTITY" != "-" ]; then
             codesign --force --timestamp --sign "$IDENTITY" "$dmg"
           fi

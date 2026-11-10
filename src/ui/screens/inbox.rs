@@ -20,7 +20,7 @@ type Downloads = HashMap<String, Option<String>>;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG, R_MD};
 use crate::ui::widgets::{self, Kind, rich, rich_mono};
-use crate::ui::{ReplyTarget, State, UnreadAnchor, emoji, forward, icons, markup, mention, pdf, stickers, time};
+use crate::ui::{ReplyTarget, State, UnreadAnchor, VoiceNote, VoiceStep, emoji, forward, icons, markup, mention, pdf, stickers, time};
 
 /// A panel's id; a number's own window salts it with the number, so its
 /// panel sizes and scroll positions are not the main window's.
@@ -180,10 +180,11 @@ pub fn show(
             let to = super::chat_title(&book, chat);
             let (id, jid) = (session.id.clone(), chat.jid.clone());
             reply_bar(ui, &p, state, &id, &jid);
-            match composer(ui, &p, state, &to, session, &book, several, false, &jid) {
+            match composer(ui, &p, state, &to, &jid, session, &book, several, false) {
                 Some(Outgoing::Text(text, mentions)) => commands.push(text_command(state, id, jid, text, mentions)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
+                Some(Outgoing::Voice { session, chat, path }) => commands.push(Command::SendVoice { id: session, chat, path }),
                 None => {}
             }
         });
@@ -1075,7 +1076,8 @@ fn paint_card(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, deta
     let back = if m.from_me { p.on_primary_muted.gamma_multiply(0.25) } else { p.panel };
     ui.painter().rect_filled(rect, R_MD, back);
     let icon = match media.kind.as_str() {
-        "image" | "video" => "image",
+        "image" => "image",
+        "video" => "video",
         "sticker" => "sticker",
         _ => "file-text",
     };
@@ -1710,7 +1712,7 @@ fn pick_file(ctx: &egui::Context) -> std::sync::mpsc::Receiver<Option<PathBuf>> 
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let picked = crate::platform::pick_file("Pilih foto atau dokumen", false);
+        let picked = crate::platform::pick_file("Pilih foto, video, atau dokumen", false);
         let _ = tx.send(picked);
         ctx.request_repaint();
     });
@@ -1803,6 +1805,194 @@ enum Outgoing {
     /// A file with its caption (may be empty).
     File(PathBuf, String),
     Sticker(PathBuf),
+    /// A recorded voice note (Ogg Opus), for the chat it was recorded in.
+    Voice { session: String, chat: String, path: PathBuf },
+}
+
+/// Enter alone sends. `consume_key` ignores extra Shift and Alt, so without
+/// this check Shift+Enter would send too instead of reaching the text box as a
+/// new line.
+fn enter_sends(input: &mut egui::InputState) -> bool {
+    !input.modifiers.shift && !input.modifiers.alt && input.consume_key(Modifiers::NONE, Key::Enter)
+}
+
+/// What the recording bar asks for.
+enum Recording {
+    Keep,
+    Cancel,
+    Send,
+}
+
+/// How long an error about a voice note stays under the composer.
+const VOICE_ERROR_FOR: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// The composer while a voice note records: a red dot, the time, a level
+/// meter, cancel and send. Esc cancels, Enter sends. While the microphone
+/// opens, or the note is saved, it says so instead.
+fn recording_bar(ui: &mut Ui, p: &Palette, recorder: Option<&crate::backend::voice::Recorder>, compact: bool) -> Recording {
+    // Keeps the clock and meter moving.
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+    let recording = recorder.filter(|r| r.elapsed() > std::time::Duration::ZERO);
+    let elapsed = recording.map(|r| r.elapsed().as_secs()).unwrap_or(0);
+    if elapsed >= crate::backend::voice::MAX_SECONDS {
+        return Recording::Send;
+    }
+    let mut action = ui.input_mut(|i| {
+        if recorder.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
+            Recording::Cancel
+        } else if recording.is_some() && enter_sends(i) {
+            Recording::Send
+        } else {
+            Recording::Keep
+        }
+    });
+    Frame::NONE
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0, p.border_strong))
+        .corner_radius(if compact { 24 } else { R_LG })
+        .inner_margin(Margin { left: 14, right: 8, top: 8, bottom: 8 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.set_min_height(40.0);
+                let Some(recorder) = recorder else {
+                    ui.label(rich("Menyimpan pesan suara…", 14.0, Weight::Regular, p.muted));
+                    return;
+                };
+                let cancel = widgets::icon_button(ui, "x", 32.0, false).on_hover_text("Batalkan rekaman (Esc)");
+                if cancel.clicked() {
+                    action = Recording::Cancel;
+                }
+                if recording.is_none() {
+                    ui.label(rich("Menyiapkan mikrofon…", 14.0, Weight::Regular, p.muted));
+                    return;
+                }
+                // Blinks once a second while recording.
+                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                let on = recorder.elapsed().as_millis() % 1000 < 600;
+                ui.painter().circle_filled(dot.center(), 5.0, if on { p.red } else { p.red.gamma_multiply(0.35) });
+                let clock = format!("{}:{:02}", elapsed / 60, elapsed % 60);
+                ui.label(rich_mono(&clock, 14.0, p.text));
+                let meter_w = (ui.available_width() - 60.0).max(40.0);
+                let (meter, _) = ui.allocate_exact_size(vec2(meter_w, 6.0), Sense::hover());
+                ui.painter().rect_filled(meter, 3.0, p.border);
+                // Speech peaks are low; the square root makes the bar readable.
+                let filled = meter.width() * recorder.level().sqrt();
+                ui.painter().rect_filled(egui::Rect::from_min_size(meter.min, vec2(filled, meter.height())), 3.0, p.primary);
+                let (rect, response) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
+                ui.painter().circle_filled(rect.center(), 20.0, p.primary);
+                icons::paint(ui, Rect::from_center_size(rect.center() + vec2(-1.0, 1.0), vec2(18.0, 18.0)), "send", 18.0, p.on_primary);
+                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Kirim pesan suara (Enter)").clicked() {
+                    action = Recording::Send;
+                }
+            });
+        });
+    action
+}
+
+/// The microphone button: starts recording a voice note for this chat.
+fn mic_button(ui: &mut Ui, voice: &mut Option<VoiceNote>, session: &str, chat: &str, size: f32, connected: bool) {
+    let button = ui.add_enabled_ui(connected, |ui| widgets::icon_button(ui, "mic", size, false)).inner;
+    if button.on_hover_text("Rekam pesan suara").clicked() {
+        let recorder = crate::backend::voice::Recorder::start();
+        *voice = Some(VoiceNote { session: session.to_owned(), chat: chat.to_owned(), step: VoiceStep::Recording(recorder) });
+    }
+}
+
+/// Each frame, outside the composer: a voice note whose chat is no longer on
+/// screen (back to the chat list, another page, its window closed) stops
+/// recording, so the mic is released. One still saving is sent to its chat
+/// once saved, or its file deleted when that number is offline.
+pub fn voice_off_screen(ctx: &egui::Context, state: &mut State, sessions: &[SessionView], open: Option<(&str, &str)>) -> Vec<Command> {
+    let Some(note) = state.voice.as_mut() else { return Vec::new() };
+    if open == Some((note.session.as_str(), note.chat.as_str())) {
+        return Vec::new();
+    }
+    let VoiceStep::Saving(saved) = &note.step else {
+        state.voice = None;
+        return Vec::new();
+    };
+    match saved.try_recv() {
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            Vec::new()
+        }
+        Ok(Ok(path)) => {
+            let connected = sessions.iter().any(|s| s.id == note.session && s.status == Status::Connected);
+            let VoiceNote { session, chat, .. } = state.voice.take().expect("checked above");
+            if connected {
+                vec![Command::SendVoice { id: session, chat, path }]
+            } else {
+                let _ = std::fs::remove_file(&path);
+                Vec::new()
+            }
+        }
+        _ => {
+            state.voice = None;
+            Vec::new()
+        }
+    }
+}
+
+/// Moves the composer's voice note along. `Some` holds what to send (to the
+/// chat the note belongs to); `Err` hides the rest of the composer while the
+/// note records or saves here.
+fn voice_note(ui: &mut Ui, p: &Palette, state: &mut State, session: &SessionView, chat: &str, compact: bool) -> Result<Option<Outgoing>, ()> {
+    let Some(note) = state.voice.as_mut() else { return Ok(None) };
+    let here = note.session == session.id && note.chat == chat;
+    let failed = |e: String| VoiceStep::Failed(e, std::time::Instant::now());
+    match &mut note.step {
+        // Saving goes on whichever chat is open, and is sent to its own.
+        VoiceStep::Saving(saved) => match saved.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+                if here {
+                    recording_bar(ui, p, None, compact);
+                    return Err(());
+                }
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => note.step = failed("Pesan suara gagal diproses".to_owned()),
+            Ok(Err(e)) => note.step = failed(e),
+            Ok(Ok(path)) if here && session.status != Status::Connected => {
+                // Not sent, so not kept.
+                let _ = std::fs::remove_file(&path);
+                note.step = failed(format!("{} tidak terhubung, pesan suara belum bisa dikirim", session.name));
+            }
+            Ok(Ok(path)) => {
+                let VoiceNote { session, chat, .. } = state.voice.take().expect("checked above");
+                return Ok(Some(Outgoing::Voice { session, chat, path }));
+            }
+        },
+        // Another chat opened: the recording (or its error) is left behind.
+        _ if !here => state.voice = None,
+        VoiceStep::Recording(recorder) => {
+            if let crate::backend::voice::Mic::Failed(e) = recorder.poll() {
+                note.step = failed(e);
+                return Ok(None);
+            }
+            match recording_bar(ui, p, Some(recorder), compact) {
+                Recording::Keep => {}
+                Recording::Cancel => state.voice = None,
+                Recording::Send => {
+                    let VoiceStep::Recording(recorder) = std::mem::replace(&mut note.step, VoiceStep::Failed(String::new(), std::time::Instant::now())) else {
+                        unreachable!("matched above")
+                    };
+                    note.step = VoiceStep::Saving(recorder.finish(crate::platform::data_dir().join("voice")));
+                }
+            }
+            return Err(());
+        }
+        VoiceStep::Failed(_, since) => {
+            let left = VOICE_ERROR_FOR.saturating_sub(since.elapsed());
+            if left.is_zero() {
+                state.voice = None;
+            } else {
+                ui.ctx().request_repaint_after(left);
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn composer(
@@ -1810,15 +2000,20 @@ fn composer(
     p: &Palette,
     state: &mut State,
     to: &str,
+    chat: &str,
     session: &SessionView,
     book: &Book,
     several: bool,
     compact: bool,
-    chat_jid: &str,
 ) -> Option<Outgoing> {
     let connected = session.status == Status::Connected;
     let id = ui.make_persistent_id("composer_text");
-    let mut mention = mention_input(ui, state, book, session, chat_jid, id);
+    match voice_note(ui, p, state, session, chat, compact) {
+        Err(()) => return None,
+        Ok(Some(voice)) => return Some(voice),
+        Ok(None) => {}
+    }
+    let mut mention = mention_input(ui, state, book, session, chat, id);
     if let Some(rx) = &state.picking {
         match rx.try_recv() {
             Ok(picked) => {
@@ -1855,11 +2050,8 @@ fn composer(
             Err(e) => log::warn!("cannot keep a pasted image: {e}"),
         }
     }
-    // Enter belongs to the `@` picker while it is open.
-    let mut send = connected
-        && !mention.picked
-        && ui.memory(|m| m.has_focus(id))
-        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+    // Enter belongs to the `@` picker while it is open; Shift+Enter is a new line.
+    let mut send = connected && !mention.picked && ui.memory(|m| m.has_focus(id)) && ui.input_mut(enter_sends);
     let mut sendable = true;
     let mut sticker_sent = None;
     let mut edit_rect = None;
@@ -1897,7 +2089,7 @@ fn composer(
                     ui.spacing_mut().item_spacing.x = 2.0;
                     let smile = widgets::icon_button(ui, "smile", 32.0, false).on_hover_text("Emoji");
                     emoji::picker(ui, &smile, id, text);
-                    let edit_w = (ui.available_width() - 70.0).max(60.0);
+                    let edit_w = (ui.available_width() - 104.0).max(60.0);
                     let edit = ui.add(
                         egui::TextEdit::multiline(text)
                             .id(id)
@@ -1917,6 +2109,7 @@ fn composer(
                     if clip.clicked() && state.picking.is_none() {
                         state.picking = Some(pick_file(ui.ctx()));
                     }
+                    mic_button(ui, &mut state.voice, &session.id, chat, 32.0, connected);
                 });
             });
             let (rect, response) = ui.allocate_exact_size(vec2(48.0, 48.0), if connected { Sense::click() } else { Sense::hover() });
@@ -1972,6 +2165,7 @@ fn composer(
                     emoji::picker(ui, &smile, id, text);
                     let sticker = widgets::icon_button(ui, "sticker", 28.0, false).on_hover_text("Stiker");
                     sticker_sent = stickers::picker(ui, &sticker, book, connected);
+                    mic_button(ui, &mut state.voice, &session.id, chat, 28.0, connected);
                     ui.add_space(8.0);
                     let note = if connected && several {
                         format!("Membalas dari {} · dikunci ke nomor penerima", super::devices::chip_label(session))
@@ -2002,6 +2196,10 @@ fn composer(
     if let Some(rect) = edit_rect {
         mention_popup(ui, p, state, &mut mention, rect, id);
     }
+    if let Some(VoiceNote { step: VoiceStep::Failed(error, _), .. }) = &state.voice {
+        ui.add_space(4.0);
+        ui.label(rich(error, 12.0, Weight::Regular, p.red_text));
+    }
     if let Some(path) = sticker_sent {
         return Some(Outgoing::Sticker(path));
     }
@@ -2016,7 +2214,7 @@ fn composer(
     Some(match state.attachment.take() {
         Some(path) => Outgoing::File(path, message),
         None => {
-            let (text, mentions) = wire_text(chat_jid.ends_with("@g.us"), &message, &picks);
+            let (text, mentions) = wire_text(chat.ends_with("@g.us"), &message, &picks);
             Outgoing::Text(text, mentions)
         }
     })
@@ -2571,10 +2769,11 @@ fn compact_chat(
             }
             let (id, jid) = (session.id.clone(), chat.jid.clone());
             reply_bar(ui, &p, state, &id, &jid);
-            match composer(ui, &p, state, &title, session, book, several, true, &jid) {
+            match composer(ui, &p, state, &title, &jid, session, book, several, true) {
                 Some(Outgoing::Text(text, mentions)) => commands.push(text_command(state, id, jid, text, mentions)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
+                Some(Outgoing::Voice { session, chat, path }) => commands.push(Command::SendVoice { id: session, chat, path }),
                 None => {}
             }
         });
@@ -2713,5 +2912,27 @@ mod member_color_tests {
         let distinct: std::collections::HashSet<_> =
             (0..40).map(|n| member_color(&format!("62812{n:04}@s.whatsapp.net"), true)).collect();
         assert!(distinct.len() >= 8, "members spread over the palette: {}", distinct.len());
+    }
+}
+
+#[cfg(test)]
+mod enter_tests {
+    use super::*;
+
+    /// Whether one frame with Enter pressed under `modifiers` asks to send.
+    fn sends(modifiers: Modifiers) -> bool {
+        let ctx = egui::Context::default();
+        let event = egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers };
+        let input = egui::RawInput { events: vec![egui::Event::ModifiersChanged(modifiers), event], ..Default::default() };
+        let mut sent = false;
+        ctx.run_ui(input, |ui| sent = ui.input_mut(enter_sends)).textures_delta.clear();
+        sent
+    }
+
+    #[test]
+    fn only_plain_enter_sends() {
+        assert!(sends(Modifiers::NONE));
+        assert!(!sends(Modifiers::SHIFT), "Shift+Enter is a new line");
+        assert!(!sends(Modifiers::ALT));
     }
 }

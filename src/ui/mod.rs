@@ -51,6 +51,23 @@ pub struct ReplyTarget {
     pub snippet: String,
 }
 
+/// A voice note in the composer, for the chat (and number) it was started in:
+/// it is sent there even if another chat is open by the time it is saved.
+pub struct VoiceNote {
+    pub session: String,
+    pub chat: String,
+    pub step: VoiceStep,
+}
+
+pub enum VoiceStep {
+    Recording(crate::backend::voice::Recorder),
+    /// Finished on the recording thread; the file's path arrives here.
+    Saving(std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>),
+    /// Why it could not be recorded or sent, shown under the composer for a
+    /// few seconds.
+    Failed(String, std::time::Instant),
+}
+
 /// UI state that survives between frames.
 #[derive(Default)]
 pub struct State {
@@ -96,6 +113,8 @@ pub struct State {
     pub forward: Option<forward::Dialog>,
     /// The file dialog running on its own thread; `None` inside when cancelled.
     pub picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    /// The voice note in the composer, tied to the chat it was started in.
+    pub voice: Option<VoiceNote>,
     /// Result of the last CSV export, shown for a few seconds.
     pub export_note: Option<(String, std::time::Instant)>,
     /// Chats whose profile picture was already asked for.
@@ -600,6 +619,8 @@ impl App {
                 pdf::show(ui.ctx(), &mut w.state.pdf_view);
                 commands.extend(forward::show(ui.ctx(), &mut w.state.forward, &self.sessions));
                 let open = w.state.inbox_session.clone().zip(w.state.chat_selected.clone());
+                let shown = open.as_ref().map(|(session, chat)| (session.as_str(), chat.as_str()));
+                commands.extend(screens::inbox::voice_off_screen(ui.ctx(), &mut w.state, one, shown));
                 commands.extend(screens::inbox::typing_signal(ui.ctx(), &mut w.state, open.clone()));
                 if ui.input(|i| i.viewport().focused).unwrap_or(false) {
                     focused_chat = open;
@@ -1072,6 +1093,10 @@ impl eframe::App for App {
         } else {
             None
         };
+        let open = open_chat.as_ref().map(|(session, chat)| (session.as_str(), chat.as_str()));
+        for command in screens::inbox::voice_off_screen(ui.ctx(), &mut self.state, &self.sessions, open) {
+            self.backend.send(command);
+        }
         for command in screens::inbox::typing_signal(ui.ctx(), &mut self.state, open_chat) {
             self.backend.send(command);
         }

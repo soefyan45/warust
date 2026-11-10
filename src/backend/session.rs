@@ -45,6 +45,8 @@ pub enum Body {
     /// A photo or document; `caption` may be empty.
     File { path: PathBuf, caption: String },
     Sticker(PathBuf),
+    /// A voice note recorded in the composer (Ogg Opus), sent push-to-talk.
+    Voice(PathBuf),
     /// A comment or reaction on a contact's status, quoting it (sent to the
     /// poster's chat, as WhatsApp does).
     StatusReply { text: String, status: store::StatusPost },
@@ -312,6 +314,7 @@ impl Running {
             Body::Text(text) => text.clone(),
             Body::File { path, caption } => media::label(path, caption),
             Body::Sticker(_) => "[Stiker]".to_owned(),
+            Body::Voice(_) => "[Pesan suara]".to_owned(),
             Body::StatusReply { text, .. } | Body::Mention { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
             Body::Pin { .. } => unreachable!("returned above"),
         };
@@ -319,6 +322,7 @@ impl Running {
             Body::Text(_) | Body::StatusReply { .. } | Body::Mention { .. } | Body::Reply { .. } | Body::Forward(_) => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
+            Body::Voice(path) => Some(media::describe_sent_voice(path)),
             Body::Pin { .. } => unreachable!("returned above"),
         };
         let record = store::msg_record(&chat, &local_id, true, "", &shown, unix_secs(), &Delivery::Queued, false);
@@ -417,6 +421,9 @@ fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
     let path = media.file.clone().filter(|p| p.is_file())?;
     if media.kind == "sticker" {
         return Some(Body::Sticker(path));
+    }
+    if media.kind == "audio" {
+        return Some(Body::Voice(path));
     }
     // The text is the label plus the caption ("[Gambar] caption").
     let label = media::label(&path, "");
@@ -1083,6 +1090,7 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
         }
         Body::File { path, caption } => media::message(client, &path, &caption).await,
         Body::Sticker(path) => media::sticker_message(client, &path).await,
+        Body::Voice(path) => media::voice_message(client, &path).await,
         Body::StatusReply { text, status } => {
             let poster = status.sender.parse::<Jid>().map_err(|e| format!("JID pengirim status tidak valid: {e:?}"))?;
             // remote_jid = status@broadcast marks the quote as a status, like WA Web.
@@ -1180,13 +1188,16 @@ mod tests {
     use crate::backend::store::{self, Delivery, Quote, Store};
 
     /// A stored queued message comes back as what it was: text, file with
-    /// its caption, a reply to a status; a file that is gone does not.
+    /// its caption, a reply to a status, a voice note; a file that is gone
+    /// does not.
     #[test]
     fn queued_messages_rebuild_their_body() {
         let dir = std::env::temp_dir().join(format!("warust-queue-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let doc = dir.join("nota.pdf");
         std::fs::write(&doc, b"%PDF-1.4").unwrap();
+        let note = dir.join("voice-1.ogg");
+        std::fs::write(&note, b"OggS").unwrap();
         let chat = "628111000001@s.whatsapp.net";
         let q = |id: &str, text: &str| store::msg_record(chat, id, true, "", text, 100, &Delivery::Queued, false);
         let status = store::msg_record(store::STATUS_CHAT, "ST1", false, chat, "Promo", 90, &Delivery::Received, false);
@@ -1197,6 +1208,7 @@ mod tests {
             store::with_media(q("c", "[Dokumen] hilang.pdf"), Some(super::media::describe_sent(&dir.join("hilang.pdf")))),
             store::with_quote(q("d", "👍"), &Quote { id: "ST1".to_owned(), text: "Promo".to_owned(), status: true }),
             store::with_forwarded(q("e", "info penting"), true),
+            store::with_media(q("f", "[Pesan suara]"), Some(super::media::describe_sent_voice(&note))),
         ];
         let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
         let path = dir.join("s.jsonl");
@@ -1208,6 +1220,7 @@ mod tests {
         assert!(body("c").is_none());
         assert!(matches!(body("d"), Some(Body::StatusReply { text, status }) if text == "👍" && status.id == "ST1"));
         assert!(matches!(body("e"), Some(Body::Forward(t)) if t == "info penting"));
+        assert!(matches!(body("f"), Some(Body::Voice(path)) if path == note));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
