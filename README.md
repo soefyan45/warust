@@ -61,7 +61,7 @@ Semua screenshot memakai data contoh.</sub></p>
   </tr>
 </table>
 
-Juga: emoji berwarna, kirim foto/dokumen/stiker, pratinjau PDF di aplikasi, tanda kirim ✓✓,
+Juga: emoji berwarna, kirim foto/dokumen/stiker, rekam pesan suara, pratinjau PDF di aplikasi, tanda kirim ✓✓,
 notifikasi desktop (klik untuk membuka chat), dua template (Forest, dan Klasik gelap/terang), serta tata letak HP saat jendela
 dikecilkan di bawah 1100 px.
 
@@ -90,7 +90,8 @@ bisa dibuka di aplikasi lain.
 
 ### Dari source
 
-Butuh [Rust](https://rustup.rs) (versi dipatok di `rust-toolchain.toml`) dan compiler C untuk SQLite.
+Butuh [Rust](https://rustup.rs) (versi dipatok di `rust-toolchain.toml`), compiler C untuk SQLite, dan
+CMake untuk libopus (pesan suara). Di Linux juga header ALSA untuk mikrofon (`sudo apt install cmake libasound2-dev`).
 
 ```bash
 git clone https://github.com/soefyan45/warust && cd warust

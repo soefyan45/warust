@@ -64,6 +64,10 @@ pub struct State {
     pub pdf_view: Option<pdf::Viewer>,
     /// The file dialog running on its own thread; `None` inside when cancelled.
     pub picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    /// A voice note being recorded in the composer.
+    pub recording: Option<crate::backend::voice::Recorder>,
+    /// Why the last voice note could not be recorded, shown under the composer.
+    pub voice_error: Option<String>,
     /// Result of the last CSV export, shown for a few seconds.
     pub export_note: Option<(String, std::time::Instant)>,
     /// Chats whose profile picture was already asked for.
