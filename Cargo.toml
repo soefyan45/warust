@@ -68,13 +68,20 @@ qrcode = { version = "0.14", default-features = false }
 # webhook secrets on every OS.
 getrandom = "0.3"
 
-# macOS: places the native window buttons in the app's topbar. All already in
-# the tree through winit.
+# macOS, all from the objc2 family eframe/winit already pull in:
+# clickable notifications (issue #15) through UserNotifications, and the
+# native window buttons placed in the app's topbar (issue #22).
 [target.'cfg(target_os = "macos")'.dependencies]
-raw-window-handle = "0.6"
 objc2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }
+block2 = "0.6"
+raw-window-handle = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSBundle", "NSError", "NSObject", "NSSet", "NSGeometry"] }
+objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSResponder", "NSView", "NSWindow", "NSControl", "NSButton"] }
+
+# Windows: toasts through WinRT, the same windows crate accesskit already uses.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation"] }
 
 [profile.release]
 # Smaller downloads: no symbol tables in the shipped binary.

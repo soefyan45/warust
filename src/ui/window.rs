@@ -19,6 +19,7 @@ const EDGE: f32 = 5.0;
 pub const NATIVE: bool = cfg!(target_os = "macos");
 
 /// Left edge of the macOS window buttons, in points from the window's left.
+#[cfg(target_os = "macos")]
 const BUTTONS_X: f64 = 18.0;
 
 /// Where the content of the bar holding the macOS window buttons may start,
