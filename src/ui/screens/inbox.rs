@@ -226,6 +226,7 @@ pub fn show(
                     on_message_event(event, state, session, chat, &mut commands);
                 }
                 delete_dialog(ui.ctx(), state, &mut commands);
+                contact_dialog(ui.ctx(), state, session, &mut commands);
             });
         });
     });
@@ -2365,15 +2366,200 @@ fn messages(
 /// Returns the text to send when Enter (or Kirim) is pressed. Shift+Enter
 /// adds a new line, like WhatsApp Web.
 /// Runs the desktop's file dialog (zenity) off the UI thread.
-fn pick_file(ctx: &egui::Context) -> std::sync::mpsc::Receiver<Option<PathBuf>> {
+fn pick_file(ctx: &egui::Context, media_only: bool) -> std::sync::mpsc::Receiver<Option<PathBuf>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let picked = crate::platform::pick_file(tr("Choose a photo, video, or document", "Pilih foto, video, atau dokumen"), false);
+        let picked = if media_only {
+            crate::platform::pick_media(tr("Choose a photo or video", "Pilih foto atau video"))
+        } else {
+            crate::platform::pick_file(tr("Choose a document", "Pilih dokumen"), false)
+        };
         let _ = tx.send(picked);
         ctx.request_repaint();
     });
     rx
+}
+
+/// How long the composer shows why an attachment failed.
+const ATTACH_NOTE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// An entry of the attachment menu.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Attach {
+    Document,
+    Media,
+    Camera,
+    Contact,
+}
+
+/// The menu under the clip (Pego `Menu lampiran`): a colored tile, the
+/// label and a hint per entry. Camera is off without ffmpeg.
+fn attach_menu(ui: &Ui, clip: &egui::Response, busy: bool) -> Option<Attach> {
+    let p = theme::palette(ui.ctx());
+    let camera_ok = crate::backend::video::ffmpeg().is_some();
+    let mut picked = None;
+    if busy {
+        return None;
+    }
+    egui::Popup::menu(clip).width(280.0).show(|ui| {
+        ui.spacing_mut().item_spacing.y = 2.0;
+        let rows = [
+            (Attach::Document, "file-text", p.red_soft, p.red, tr("Document", "Dokumen"), tr("PDF, Excel, ZIP up to 100 MB", "PDF, Excel, ZIP hingga 100 MB"), true),
+            (Attach::Media, "image", p.blue_soft, p.blue, tr("Photo & video", "Foto & video"), tr("Sent with a preview", "Dikirim dengan pratinjau"), true),
+            (
+                Attach::Camera,
+                "camera",
+                p.accent_soft,
+                p.accent_text,
+                tr("Camera", "Kamera"),
+                if camera_ok { tr("Take a photo with the webcam", "Ambil foto dari webcam") } else { tr("Needs ffmpeg installed", "Butuh ffmpeg terpasang") },
+                camera_ok,
+            ),
+            (Attach::Contact, "contact", p.orange_soft, p.amber, tr("Contact", "Kontak"), tr("Share a contact card", "Bagikan kartu kontak"), true),
+        ];
+        for (what, icon, fill, glyph, label, hint, enabled) in rows {
+            let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), if enabled { Sense::click() } else { Sense::hover() });
+            let painter = ui.painter();
+            if enabled && response.hovered() {
+                painter.rect_filled(rect, 10.0, p.panel);
+            }
+            let fade = if enabled { 1.0 } else { 0.45 };
+            let tile = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 18.0), vec2(36.0, 36.0));
+            painter.rect_filled(tile, 4.0, fill.gamma_multiply(fade));
+            icons::paint(ui, tile, icon, 18.0, glyph.gamma_multiply(fade));
+            let text_left = tile.right() + 12.0;
+            let title = Rect::from_min_max(pos2(text_left, rect.center().y - 18.0), pos2(rect.right() - 6.0, rect.center().y + 1.0));
+            widgets::paint_text(ui, title, label, fonts::ui(14.0, Weight::SemiBold), p.text.gamma_multiply(fade), Align::Min);
+            let sub = Rect::from_min_max(pos2(text_left, rect.center().y + 2.0), pos2(rect.right() - 6.0, rect.center().y + 18.0));
+            widgets::paint_text(ui, sub, hint, fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
+            if enabled && response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                picked = Some(what);
+                ui.close();
+            }
+        }
+    });
+    picked
+}
+
+/// The parts of `State` an attachment starts, borrowed apart from the
+/// composer's text.
+struct Attaching<'a> {
+    picking: &'a mut Option<std::sync::mpsc::Receiver<Option<PathBuf>>>,
+    camera: &'a mut Option<std::sync::mpsc::Receiver<Result<PathBuf, String>>>,
+    contact: &'a mut Option<ContactPick>,
+}
+
+/// Does what the attachment menu asked for in this chat.
+fn start_attach(ctx: &egui::Context, state: Attaching, pick: Attach, session: &str, chat: &str) {
+    match pick {
+        Attach::Document => *state.picking = Some(pick_file(ctx, false)),
+        Attach::Media => *state.picking = Some(pick_file(ctx, true)),
+        Attach::Camera => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::backend::video::snapshot(&crate::platform::data_dir().join("pasted")));
+                ctx.request_repaint();
+            });
+            *state.camera = Some(rx);
+        }
+        Attach::Contact => *state.contact = Some(ContactPick { session: session.to_owned(), chat: chat.to_owned(), search: String::new(), picked: None }),
+    }
+}
+
+/// "Share a contact": this number's phone contacts, searchable; one is sent
+/// as a contact card to the open chat.
+pub struct ContactPick {
+    session: String,
+    chat: String,
+    search: String,
+    /// JID of the chosen contact.
+    picked: Option<String>,
+}
+
+fn contact_dialog(ctx: &egui::Context, state: &mut State, session: &SessionView, commands: &mut Vec<Command>) {
+    let Some(pick) = state.contact_pick.as_mut() else { return };
+    if pick.session != session.id {
+        return;
+    }
+    let p = theme::palette(ctx);
+    let width = 380.0_f32.min(ctx.content_rect().width() - 48.0).max(240.0);
+    let contacts = session.book.contacts();
+    let (mut close, mut send) = (false, false);
+    let modal = egui::Modal::new(egui::Id::unique("contact_pick"))
+        .frame(
+            egui::Frame::NONE
+                .fill(p.panel)
+                .stroke(Stroke::new(1.0, p.border_strong))
+                .corner_radius(R_LG)
+                .inner_margin(egui::Margin::same(20)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(width);
+            ui.spacing_mut().item_spacing.y = 10.0;
+            ui.label(rich(tr("Share a contact", "Bagikan kontak"), 16.0, Weight::SemiBold, p.text));
+            widgets::search(ui, &mut pick.search, tr("Search name or number", "Cari nama atau nomor"), width, false);
+            let query = pick.search.trim().to_lowercase();
+            let shown: Vec<&(String, String)> = contacts
+                .iter()
+                .filter(|(jid, name)| query.is_empty() || name.to_lowercase().contains(&query) || jid.contains(&query))
+                .collect();
+            egui::ScrollArea::vertical().max_height(320.0).auto_shrink([false, true]).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                if shown.is_empty() {
+                    let empty = if contacts.is_empty() {
+                        tr("No phone contacts synced for this number yet.", "Belum ada kontak HP yang tersinkron untuk nomor ini.")
+                    } else {
+                        tr("No contact matches.", "Tidak ada kontak yang cocok.")
+                    };
+                    ui.label(rich(empty, 13.0, Weight::Regular, p.muted));
+                }
+                for (jid, name) in shown {
+                    let chosen = pick.picked.as_deref() == Some(jid.as_str());
+                    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 48.0), Sense::click());
+                    if chosen {
+                        ui.painter().rect_filled(rect, R_MD, p.accent_soft);
+                    } else if response.hovered() {
+                        ui.painter().rect_filled(rect, R_MD, p.raised);
+                    }
+                    let face = pos2(rect.left() + 22.0, rect.center().y);
+                    ui.painter().circle_filled(face, 16.0, p.orange_soft);
+                    widgets::paint_text(ui, Rect::from_center_size(face, vec2(32.0, 32.0)), &super::initials(name), fonts::ui(12.0, Weight::SemiBold), p.amber, Align::Center);
+                    let text_left = rect.left() + 48.0;
+                    let title = Rect::from_min_max(pos2(text_left, rect.center().y - 17.0), pos2(rect.right() - 8.0, rect.center().y + 1.0));
+                    widgets::paint_text(ui, title, name, fonts::ui(13.5, Weight::SemiBold), p.text, Align::Min);
+                    let sub = Rect::from_min_max(pos2(text_left, rect.center().y + 2.0), pos2(rect.right() - 8.0, rect.center().y + 18.0));
+                    widgets::paint_text(ui, sub, &crate::backend::mask_phone(jid), fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
+                    if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                        pick.picked = Some(jid.clone());
+                    }
+                }
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let ready = pick.picked.is_some();
+                if widgets::button(ui, Some("send"), tr("Send", "Kirim"), Kind::Primary).clicked() && ready {
+                    send = true;
+                }
+                if widgets::button(ui, None, tr("Cancel", "Batal"), Kind::Secondary).clicked() {
+                    close = true;
+                }
+            });
+        });
+    if modal.should_close() {
+        close = true;
+    }
+    if send {
+        let chosen = pick.picked.clone().and_then(|jid| contacts.iter().find(|(j, _)| *j == jid).cloned());
+        if let Some((jid, name)) = chosen {
+            let number = jid.split('@').next().unwrap_or_default().to_owned();
+            commands.push(Command::SendContact { id: pick.session.clone(), chat: pick.chat.clone(), name, number });
+        }
+        close = true;
+    }
+    if close {
+        state.contact_pick = None;
+    }
 }
 
 /// The file a paste really is: Finder (and Linux file managers) put the
@@ -2999,6 +3185,28 @@ fn composer(
             Err(std::sync::mpsc::TryRecvError::Empty) => {}
         }
     }
+    if let Some(rx) = &state.camera {
+        match rx.try_recv() {
+            Ok(Ok(photo)) => {
+                state.attachment = Some(photo);
+                state.camera = None;
+            }
+            Ok(Err(why)) => {
+                state.attach_note = Some((why, std::time::Instant::now()));
+                state.camera = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => state.camera = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+    if let Some((note, at)) = &state.attach_note {
+        if at.elapsed() < ATTACH_NOTE_FOR {
+            ui.label(rich(note, 12.0, Weight::Regular, p.red_text));
+            ui.ctx().request_repaint_after(ATTACH_NOTE_FOR.saturating_sub(at.elapsed()));
+        } else {
+            state.attach_note = None;
+        }
+    }
     let (dropped, hovering) = ui.input(|i| {
         (i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).find(|p| p.is_file()), !i.raw.hovered_files.is_empty())
     });
@@ -3096,9 +3304,10 @@ fn composer(
                     edit_rect = Some(edit.rect);
                     let sticker = widgets::icon_button(ui, "sticker", 32.0, false).on_hover_text(tr("Sticker", "Stiker"));
                     sticker_sent = stickers::picker(ui, &sticker, book, connected);
-                    let clip = widgets::icon_button(ui, "paperclip", 32.0, state.picking.is_some()).on_hover_text(tr("Attach a photo or document", "Lampirkan foto atau dokumen"));
-                    if clip.clicked() && state.picking.is_none() {
-                        state.picking = Some(pick_file(ui.ctx()));
+                    let busy = state.picking.is_some() || state.camera.is_some();
+                    let clip = widgets::icon_button(ui, "paperclip", 32.0, busy).on_hover_text(tr("Attach", "Lampirkan"));
+                    if let Some(pick) = attach_menu(ui, &clip, busy) {
+                        start_attach(ui.ctx(), Attaching { picking: &mut state.picking, camera: &mut state.camera, contact: &mut state.contact_pick }, pick, &session.id, chat);
                     }
                 });
             });
@@ -3144,10 +3353,11 @@ fn composer(
                 ui,
                 32.0,
                 |ui| {
-                    let clip = widgets::icon_button(ui, "paperclip", 28.0, state.picking.is_some())
-                        .on_hover_text(tr("Attach a photo or document (or drag a file here)", "Lampirkan foto atau dokumen (atau seret file ke sini)"));
-                    if clip.clicked() && state.picking.is_none() {
-                        state.picking = Some(pick_file(ui.ctx()));
+                    let busy = state.picking.is_some() || state.camera.is_some();
+                    let clip = widgets::icon_button(ui, "paperclip", 28.0, busy)
+                        .on_hover_text(tr("Attach (or drag a file here)", "Lampirkan (atau seret file ke sini)"));
+                    if let Some(pick) = attach_menu(ui, &clip, busy) {
+                        start_attach(ui.ctx(), Attaching { picking: &mut state.picking, camera: &mut state.camera, contact: &mut state.contact_pick }, pick, &session.id, chat);
                     }
                     let smile = widgets::icon_button(ui, "smile", 28.0, false).on_hover_text("Emoji");
                     emoji::picker(ui, &smile, id, text);
@@ -3822,6 +4032,7 @@ fn compact_chat(
                 on_message_event(event, state, session, chat, &mut commands);
             }
             delete_dialog(ui.ctx(), state, &mut commands);
+            contact_dialog(ui.ctx(), state, session, &mut commands);
         });
     });
     commands

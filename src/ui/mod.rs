@@ -138,6 +138,12 @@ pub struct State {
     pub delete_ask: Option<screens::inbox::DeleteAsk>,
     /// The file dialog running on its own thread; `None` inside when cancelled.
     pub picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
+    /// A photo being taken with the webcam for the composer (#71).
+    pub camera: Option<std::sync::mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    /// Why the last attachment could not be made, shown for a few seconds.
+    pub attach_note: Option<(String, std::time::Instant)>,
+    /// "Share a contact" dialog for the open chat (#71).
+    pub contact_pick: Option<screens::inbox::ContactPick>,
     /// The voice note in the composer, tied to the chat it was started in.
     pub voice: Option<VoiceNote>,
     /// Result of the last CSV export, shown for a few seconds.
