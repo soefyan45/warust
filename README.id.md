@@ -91,7 +91,7 @@ perlu ruang.
 Beberapa fitur memakai alat bawaan OS. Di Linux, paket .deb menyarankan `zenity` (dialog file),
 `poppler-utils` (pratinjau PDF), `libnotify-bin` dan `gnome-session-canberra` (notifikasi dan suara),
 serta `ffmpeg` (thumbnail video).
-Pratinjau PDF di macOS dan Windows butuh poppler (`brew install poppler` / Scoop); tanpa itu PDF tetap
+Pratinjau PDF di macOS memakai perender bawaan sistem. Di Windows butuh poppler (lewat Scoop); tanpa itu PDF tetap
 bisa dibuka di aplikasi lain. Tanpa ffmpeg, video tetap terkirim dan bisa diputar, hanya tanpa
 thumbnail (di macOS, Quick Look dipakai sebagai gantinya).
 

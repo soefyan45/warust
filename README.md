@@ -90,7 +90,7 @@ need the space.
 Some features use tools built into the OS. On Linux, the .deb package suggests `zenity` (file dialogs),
 `poppler-utils` (PDF preview), `libnotify-bin` and `gnome-session-canberra` (notifications and sound),
 and `ffmpeg` (video thumbnails).
-PDF preview on macOS and Windows needs poppler (`brew install poppler` / Scoop); without it, PDFs can
+PDF preview on macOS uses the system's own renderer. On Windows it needs poppler (through Scoop); without it, PDFs can
 still be opened in another app. Without ffmpeg, videos are still sent and can be played, just without a
 thumbnail (on macOS, Quick Look is used instead).
 

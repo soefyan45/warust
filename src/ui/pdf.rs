@@ -1,7 +1,8 @@
-//! PDF pages as pictures for chat previews and the in-app viewer. Rendered by
-//! poppler's `pdftoppm` (page count and size from `pdfinfo`) on one background
-//! thread, one job at a time, and cached in `data/pdf-pages/` (never next to
-//! the file: a sent PDF lives in the user's own folders).
+//! PDF pages as pictures for chat previews and the in-app viewer. Rendered on
+//! one background thread, one job at a time, and cached in `data/pdf-pages/`
+//! (never next to the file: a sent PDF lives in the user's own folders).
+//! macOS renders with CoreGraphics (`pdf/macos.rs`); Linux and Windows with
+//! poppler's `pdftoppm` (page count and size from `pdfinfo`).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,6 +10,9 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, OnceLock};
 
 use egui::{Align, Frame, Key, Margin, ScrollArea, Sense, Stroke, StrokeKind, vec2};
+
+#[cfg(target_os = "macos")]
+mod macos;
 
 use super::fonts::{self, Weight};
 use super::icons;
@@ -79,6 +83,7 @@ pub fn is_pdf(path: &Path) -> bool {
 }
 
 /// `Pages: 12` and `Page size: 595.276 x 841.89 pts (A4)` from `pdfinfo`.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
 fn parse_info(text: &str) -> Option<Info> {
     let field = |name: &str| {
         text.lines()
@@ -94,6 +99,10 @@ fn parse_info(text: &str) -> Option<Info> {
     Some(Info { pages, aspect })
 }
 
+#[cfg(target_os = "macos")]
+use macos::{read_info, render};
+
+#[cfg(not(target_os = "macos"))]
 fn read_info(file: &Path) -> Option<Info> {
     let out = std::process::Command::new("pdfinfo")
         .arg(file)
@@ -103,6 +112,7 @@ fn read_info(file: &Path) -> Option<Info> {
     parse_info(&String::from_utf8_lossy(&out.stdout))
 }
 
+#[cfg(not(target_os = "macos"))]
 fn render(file: &Path, page: u32, width: u32, target: &Path) -> bool {
     let Some(dir) = target.parent() else { return false };
     if std::fs::create_dir_all(dir).is_err() {
@@ -138,6 +148,26 @@ pub fn info(ctx: &egui::Context, file: &Path) -> Option<Info> {
     drop(c);
     let _ = queue(ctx).lock().map(|q| q.send(Job::Info(file.to_owned())));
     None
+}
+
+/// The file was tried and could not be read as a PDF.
+fn unreadable(file: &Path) -> bool {
+    cache().lock().is_ok_and(|c| matches!(c.infos.get(file), Some(Slot::Failed)))
+}
+
+/// What the viewer says instead of pages when the PDF cannot be shown.
+fn unreadable_note() -> &'static str {
+    if cfg!(target_os = "macos") {
+        tr(
+            "This PDF cannot be shown: the file is damaged or locked with a password. Try \"Open in another app\".",
+            "PDF ini tidak bisa ditampilkan: filenya rusak atau terkunci kata sandi. Coba \"Buka di aplikasi lain\".",
+        )
+    } else {
+        tr(
+            "This PDF cannot be shown. The preview needs poppler (pdftoppm and pdfinfo); or use \"Open in another app\".",
+            "PDF ini tidak bisa ditampilkan. Pratinjau butuh poppler (pdftoppm dan pdfinfo); atau pakai \"Buka di aplikasi lain\".",
+        )
+    }
 }
 
 /// A rendered page (1-based) about `width` pixels wide; `None` until ready.
@@ -233,7 +263,8 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
             );
             ui.add_space(8.0);
             let Some(info) = info else {
-                ui.label(rich(tr("Reading PDF…", "Membaca PDF…"), 13.0, Weight::Regular, p.muted));
+                let note = if unreadable(&viewer.file) { unreadable_note() } else { tr("Reading PDF…", "Membaca PDF…") };
+                ui.label(rich(note, 13.0, Weight::Regular, p.muted));
                 return;
             };
             let width = (ui.available_width() - 24.0) * viewer.zoom;
