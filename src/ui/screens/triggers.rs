@@ -6,6 +6,7 @@ use egui::{Align, Frame, Margin, Sense, Ui, vec2};
 
 use crate::backend::SessionView;
 use crate::backend::rules::{self, Incoming, Kind, Op, Rule};
+use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette};
 use crate::ui::widgets::{self, rich, rich_mono};
@@ -21,7 +22,7 @@ fn host_and_path(url: &str) -> (String, String) {
 
 fn numbers_label(rule: &Rule, sessions: &[SessionView]) -> String {
     if rule.sessions.is_empty() {
-        return "Semua nomor".to_owned();
+        return tr("All numbers", "Semua nomor").to_owned();
     }
     let names: Vec<String> = rule
         .sessions
@@ -49,8 +50,11 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
     let mut add = false;
     super::card(
         ui,
-        "Pemicu webhook",
-        "Pesan masuk yang cocok dengan aturan dikirim lewat POST ke REST API tujuan. Aturan dicek dari atas ke bawah; satu pesan bisa memicu lebih dari satu aturan.",
+        tr("Webhook triggers", "Pemicu webhook"),
+        tr(
+            "Incoming messages that match a rule are sent by POST to the target REST API. Rules are checked from top to bottom; one message can trigger more than one rule.",
+            "Pesan masuk yang cocok dengan aturan dikirim lewat POST ke REST API tujuan. Aturan dicek dari atas ke bawah; satu pesan bisa memicu lebih dari satu aturan.",
+        ),
         |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -58,13 +62,13 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
                 let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::hover());
                 widgets::hline(ui, head, head.bottom() - 0.5, p.border);
                 let cols = widgets::columns(head, &widths, 12.0);
-                for (i, title) in ["Aktif", "Aturan & kondisi", "Nomor", "Tujuan", "Hari ini"].iter().enumerate() {
+                for (i, title) in [tr("Active", "Aktif"), tr("Rule & condition", "Aturan & kondisi"), tr("Number", "Nomor"), tr("Target", "Tujuan"), tr("Today", "Hari ini")].iter().enumerate() {
                     let align = if i == 4 { Align::Max } else { Align::Min };
                     widgets::paint_text(ui, cols[i], title, fonts::ui(12.0, Weight::Medium), p.muted, align);
                 }
                 if draft.rules.is_empty() {
                     ui.add_space(14.0);
-                    ui.label(rich("Belum ada aturan. Contoh: teks diawali \"REGISTER\" → POST ke sistem pendaftaran Anda.", 13.0, Weight::Regular, p.muted));
+                    ui.label(rich(tr("No rules yet. Example: text starts with \"REGISTER\" → POST to your registration system.", "Belum ada aturan. Contoh: teks diawali \"REGISTER\" → POST ke sistem pendaftaran Anda."), 13.0, Weight::Regular, p.muted));
                     ui.add_space(6.0);
                 }
                 for (i, rule) in draft.rules.iter_mut().enumerate() {
@@ -99,10 +103,10 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
                 }
             });
             ui.horizontal(|ui| {
-                if widgets::button(ui, Some("plus"), "Tambah aturan", widgets::Kind::Secondary).clicked() {
+                if widgets::button(ui, Some("plus"), tr("Add rule", "Tambah aturan"), widgets::Kind::Secondary).clicked() {
                     add = true;
                 }
-                ui.label(rich("Hitungan \"Hari ini\" dimulai sejak aplikasi dibuka.", 12.0, Weight::Regular, p.muted));
+                ui.label(rich(tr("The \"Today\" count starts when the app is opened.", "Hitungan \"Hari ini\" dimulai sejak aplikasi dibuka."), 12.0, Weight::Regular, p.muted));
             });
         },
     );
@@ -122,14 +126,14 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
     let mut remove = false;
     let mut moved: Option<isize> = None;
     let rule = &mut draft.rules[index];
-    super::card(ui, &format!("Edit aturan · {}", rule.name), "", |ui| {
+    super::card(ui, &crate::trf!("Edit rule · {}", "Edit aturan · {}", rule.name), "", |ui| {
         let width = ui.available_width();
         ui.horizontal(|ui| {
-            ui.label(rich("Nama", 13.0, Weight::Medium, p.text_2));
-            widgets::field(ui, &mut rule.name, "Pendaftaran member", (width - 60.0).min(420.0), false);
+            ui.label(rich(tr("Name", "Nama"), 13.0, Weight::Medium, p.text_2));
+            widgets::field(ui, &mut rule.name, tr("Member registration", "Pendaftaran member"), (width - 60.0).min(420.0), false);
         });
 
-        step(ui, p, 1, "Jika pesan masuk");
+        step(ui, p, 1, tr("If an incoming message", "Jika pesan masuk"));
         ui.horizontal(|ui| {
             egui::ComboBox::from_id_salt(("rule_kind", &rule.id))
                 .selected_text(rule.kind.label())
@@ -151,15 +155,15 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
             }
         });
         ui.horizontal(|ui| {
-            widgets::toggle(ui, &mut rule.ignore_case, "Abaikan huruf besar/kecil");
+            widgets::toggle(ui, &mut rule.ignore_case, tr("Ignore upper/lower case", "Abaikan huruf besar/kecil"));
             ui.add_space(12.0);
-            widgets::toggle(ui, &mut rule.private_only, "Hanya chat pribadi, bukan grup");
+            widgets::toggle(ui, &mut rule.private_only, tr("Private chats only, not groups", "Hanya chat pribadi, bukan grup"));
         });
 
-        step(ui, p, 2, "Berlaku untuk nomor");
+        step(ui, p, 2, tr("Applies to numbers", "Berlaku untuk nomor"));
         let mut mode = usize::from(!rule.sessions.is_empty());
         let before = mode;
-        widgets::tabs(ui, &["Semua nomor", "Nomor tertentu"], &mut mode);
+        widgets::tabs(ui, &[tr("All numbers", "Semua nomor"), tr("Specific numbers", "Nomor tertentu")], &mut mode);
         if mode != before {
             rule.sessions = if mode == 1 { sessions.first().map(|s| vec![s.id.clone()]).unwrap_or_default() } else { Vec::new() };
         }
@@ -178,17 +182,25 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
                 }
             });
         } else {
-            ui.label(rich("Nomor yang baru ditautkan nanti ikut otomatis.", 12.0, Weight::Regular, p.muted));
+            ui.label(rich(tr("Numbers linked later are included automatically.", "Nomor yang baru ditautkan nanti ikut otomatis."), 12.0, Weight::Regular, p.muted));
         }
 
-        step(ui, p, 3, "Kirim ke REST API");
+        step(ui, p, 3, tr("Send to REST API", "Kirim ke REST API"));
         ui.horizontal(|ui| {
             let mut method = usize::from(rule.method == "PUT");
             widgets::tabs(ui, &["POST", "PUT"], &mut method);
             rule.method = if method == 1 { "PUT" } else { "POST" }.to_owned();
-            widgets::field(ui, &mut rule.url, "https://crm.anda.com/api/member/register", (ui.available_width() - 4.0).min(460.0), true);
+            widgets::field(ui, &mut rule.url, tr("https://crm.example.com/api/member/register", "https://crm.anda.com/api/member/register"), (ui.available_width() - 4.0).min(460.0), true);
         });
-        ui.label(rich("Body JSON · {{...}} diisi otomatis dari pesan, dan ditandatangani seperti webhook (X-Warust-Signature).", 12.0, Weight::Regular, p.muted));
+        ui.label(rich(
+            tr(
+                "JSON body · {{...}} is filled in automatically from the message, and signed like the webhook (X-Warust-Signature).",
+                "Body JSON · {{...}} diisi otomatis dari pesan, dan ditandatangani seperti webhook (X-Warust-Signature).",
+            ),
+            12.0,
+            Weight::Regular,
+            p.muted,
+        ));
         Frame::NONE
             .fill(p.raised)
             .corner_radius(theme::r_inner())
@@ -204,20 +216,23 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
             });
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = vec2(10.0, 4.0);
-            for (key, meaning) in rules::PLACEHOLDERS {
-                ui.label(rich_mono(key, 11.0, p.text_2)).on_hover_text(*meaning);
+            for (key, meaning) in rules::placeholders() {
+                ui.label(rich_mono(key, 11.0, p.text_2)).on_hover_text(meaning);
             }
         });
 
-        step(ui, p, 4, "Balas otomatis ke pengirim");
-        widgets::toggle(ui, &mut rule.reply_enabled, "Kirim balasan setelah REST API menjawab 2xx");
+        step(ui, p, 4, tr("Auto-reply to the sender", "Balas otomatis ke pengirim"));
+        widgets::toggle(ui, &mut rule.reply_enabled, tr("Send a reply after the REST API answers 2xx", "Kirim balasan setelah REST API menjawab 2xx"));
         if rule.reply_enabled {
-            widgets::field(ui, &mut rule.reply, "Terima kasih {{nama}}, pendaftaranmu sedang kami proses.", (width - 4.0).min(620.0), false);
+            widgets::field(ui, &mut rule.reply, tr("Thank you {{nama}}, your registration is being processed.", "Terima kasih {{nama}}, pendaftaranmu sedang kami proses."), (width - 4.0).min(620.0), false);
         }
         ui.horizontal(|ui| {
             icons::show(ui, "lock", 12.0, p.muted);
             ui.label(rich(
-                "Selalu dibalas dari nomor yang menerima chat, lewat antrean anti-ban. API yang gagal dicoba ulang 3 kali.",
+                tr(
+                    "Always replied from the number that received the chat, through the anti-ban queue. A failed API call is retried 3 times.",
+                    "Selalu dibalas dari nomor yang menerima chat, lewat antrean anti-ban. API yang gagal dicoba ulang 3 kali.",
+                ),
                 12.0,
                 Weight::Regular,
                 p.muted,
@@ -227,11 +242,11 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
         // Dry run with a sample message: nothing is sent.
         widgets::hline(ui, ui.max_rect(), ui.cursor().top(), p.border);
         ui.add_space(4.0);
-        ui.label(rich("Uji dengan pesan contoh (tidak mengirim apa pun)", 13.0, Weight::SemiBold, p.text));
+        ui.label(rich(tr("Test with a sample message (nothing is sent)", "Uji dengan pesan contoh (tidak mengirim apa pun)"), 13.0, Weight::SemiBold, p.text));
         if state.rule_test.is_empty() {
             state.rule_test = Incoming::sample().text;
         }
-        widgets::field(ui, &mut state.rule_test, "Tulis pesan contoh", (width - 4.0).min(620.0), false);
+        widgets::field(ui, &mut state.rule_test, tr("Write a sample message", "Tulis pesan contoh"), (width - 4.0).min(620.0), false);
         let sample = Incoming {
             text: state.rule_test.clone(),
             kind: match rule.kind {
@@ -240,15 +255,19 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
                 _ => "text",
             }
             .to_owned(),
-            session: rule.sessions.first().cloned().unwrap_or_else(|| "contoh".to_owned()),
+            session: rule.sessions.first().cloned().unwrap_or_else(|| tr("sample", "contoh").to_owned()),
             ..Incoming::sample()
         };
         let enabled = rule.enabled;
         let check = Rule { enabled: true, ..rule.clone() };
         let (icon, verdict, color) = if check.matches(&sample) {
-            ("check", if enabled { "Cocok: aturan ini akan terpicu" } else { "Cocok, tapi aturan sedang nonaktif" }, p.green)
+            ("check", if enabled {
+                    tr("Match: this rule will fire", "Cocok: aturan ini akan terpicu")
+                } else {
+                    tr("Match, but the rule is turned off", "Cocok, tapi aturan sedang nonaktif")
+                }, p.green)
         } else {
-            ("x", "Tidak cocok: aturan tidak terpicu", p.muted)
+            ("x", tr("No match: the rule does not fire", "Tidak cocok: aturan tidak terpicu"), p.muted)
         };
         ui.horizontal(|ui| {
             icons::show(ui, icon, 14.0, color);
@@ -270,21 +289,21 @@ pub fn tab(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]
                 ui.label(rich_mono(&rules::render(&rule.body, &sample, true), 12.0, p.text));
                 if rule.reply_enabled {
                     ui.add_space(4.0);
-                    ui.label(rich(&format!("Balasan: {}", rules::render(&rule.reply, &sample, false)), 12.0, Weight::Regular, p.text_2));
+                    ui.label(rich(&crate::trf!("Reply: {}", "Balasan: {}", rules::render(&rule.reply, &sample, false)), 12.0, Weight::Regular, p.text_2));
                 }
             });
 
         ui.horizontal(|ui| {
-            if widgets::button(ui, Some("x"), "Hapus aturan", widgets::Kind::Secondary).clicked() {
+            if widgets::button(ui, Some("x"), tr("Delete rule", "Hapus aturan"), widgets::Kind::Secondary).clicked() {
                 remove = true;
             }
-            if widgets::button(ui, None, "Naikkan", widgets::Kind::Secondary).clicked() {
+            if widgets::button(ui, None, tr("Move up", "Naikkan"), widgets::Kind::Secondary).clicked() {
                 moved = Some(-1);
             }
-            if widgets::button(ui, None, "Turunkan", widgets::Kind::Secondary).clicked() {
+            if widgets::button(ui, None, tr("Move down", "Turunkan"), widgets::Kind::Secondary).clicked() {
                 moved = Some(1);
             }
-            ui.label(rich("Perubahan berlaku setelah \"Simpan perubahan\".", 12.0, Weight::Regular, p.muted));
+            ui.label(rich(tr("Changes take effect after \"Save changes\".", "Perubahan berlaku setelah \"Simpan perubahan\"."), 12.0, Weight::Regular, p.muted));
         });
     });
     if remove {

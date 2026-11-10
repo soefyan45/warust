@@ -17,6 +17,7 @@ mod macos;
 mod windows;
 
 use super::Updater;
+use crate::i18n::tr;
 use super::session::mask_phone;
 use super::store::Book;
 
@@ -73,26 +74,27 @@ pub(crate) fn content(book: &Book, chat: &str, sender: &str, push_name: &str, te
     let person = |jid: &str| book.name_of(jid).map(str::to_owned).filter(|n| !n.is_empty()).unwrap_or_else(|| {
         if push_name.is_empty() { mask_phone(jid) } else { push_name.to_owned() }
     });
-    let mut title = if group { book.name_of(chat).map(str::to_owned).unwrap_or_else(|| "Grup".to_owned()) } else { person(chat) };
+    let mut title = if group { book.name_of(chat).map(str::to_owned).unwrap_or_else(|| tr("Group", "Grup").to_owned()) } else { person(chat) };
     if let Some(via) = via {
         title = format!("{title} · via {via}");
     }
-    let mut body = if show_text { preview(text) } else { "Pesan baru".to_owned() };
+    let mut body = if show_text { preview(text) } else { tr("New message", "Pesan baru").to_owned() };
     if group {
         body = format!("{}: {body}", person(sender));
     }
     if unread > 1 {
-        body = format!("{body}\n{} pesan belum dibaca", unread);
+        body = crate::trf!("{body}\n{unread} unread messages", "{body}\n{unread} pesan belum dibaca");
     }
     (title, body)
 }
 
 /// Shows (or updates) the chat's notification for a message that just came in.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, sender: &str, push_name: &str, text: &str, group: bool) {
+pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, sender: &str, push_name: &str, text: &str, group: bool, mentioned: bool) {
     let settings = state.settings();
     let notify = &settings.notify;
-    if !notify.enabled || (group && !notify.groups) {
+    // A mention gets through even when group notifications are off.
+    if !notify.enabled || (group && !notify.groups && !mentioned) {
         return;
     }
     let jid = book.normalize(chat);
@@ -102,7 +104,10 @@ pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, 
     }
     let (via, several) = state.session_name(session).unwrap_or_default();
     let unread = book.chats.iter().find(|c| c.jid == jid).map(|c| c.unread).unwrap_or(1);
-    let (title, body) = content(book, &jid, sender, push_name, text, group, several.then_some(via.as_str()), notify.preview, unread);
+    let (title, mut body) = content(book, &jid, sender, push_name, text, group, several.then_some(via.as_str()), notify.preview, unread);
+    if mentioned {
+        body = crate::trf!("Mentioned you: {body}", "Menyebut kamu: {body}");
+    }
     if notify.sound {
         play_sound();
     }
@@ -183,7 +188,8 @@ fn show(state: &Updater, key: &str, session: &str, jid: &str, title: &str, body:
         command
             .args(prefix)
             .args(["--app-name=warust", "--icon=warust", "--category=im.received"])
-            .args(["--hint=string:desktop-entry:warust", "--print-id", "--wait", "--action=default=Buka chat"]);
+            .args(["--hint=string:desktop-entry:warust", "--print-id", "--wait"])
+            .arg(format!("--action=default={}", tr("Open chat", "Buka chat")));
         if let Some(id) = replace {
             command.arg(format!("--replace-id={id}"));
         }
@@ -250,9 +256,9 @@ mod tests {
         assert_eq!(title, "Budi · via CS Utama");
         assert_eq!(body, "Sudah transfer, mohon dicek");
         let (_, body) = content(&book, chat, chat, "", "rahasia", false, None, false, 3);
-        assert_eq!(body, "Pesan baru\n3 pesan belum dibaca");
+        assert_eq!(body, "New message\n3 unread messages");
         let (title, body) = content(&book, "123@g.us", chat, "", "halo", true, None, true, 1);
-        assert_eq!(title, "Grup");
+        assert_eq!(title, "Group");
         assert_eq!(body, "+62 812-****-7890: halo");
         assert_eq!(escape("a<b>&c"), "a&lt;b&gt;&amp;c");
         assert!(preview(&"x".repeat(300)).ends_with('…'));

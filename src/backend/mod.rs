@@ -28,7 +28,7 @@ pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
 pub use registry::{NAME_MAX, clean_name};
 pub use session::mask_phone;
 pub use settings::Settings;
-pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost};
+pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost, short_jid};
 use store::Store;
 use webhook::Delivery as HookDelivery;
 
@@ -57,6 +57,8 @@ pub struct SessionView {
     pub phone: Option<String>,
     /// The full number, digits only; for triggers, never shown in the UI.
     pub own_number: Option<String>,
+    /// The LID user part, digits only; groups that mention by LID use it.
+    pub own_lid: Option<String>,
     pub status: Status,
     /// Current QR payload and when it rotates.
     pub qr: Option<(String, Instant)>,
@@ -78,6 +80,7 @@ impl SessionView {
             name: name.to_owned(),
             phone: None,
             own_number: None,
+            own_lid: None,
             status: Status::Starting,
             qr: None,
             pair_code: None,
@@ -123,6 +126,18 @@ pub struct Shared {
     pub open_chat: Option<(String, String)>,
     /// Contacts typing now, by `session|chat` (normalized JID).
     pub typing: Arc<HashMap<String, Typing>>,
+    /// Group members by `session|group` (normalized JID), from `Command::GroupMembers`.
+    pub members: Arc<HashMap<String, Vec<Member>>>,
+}
+
+/// A group member, for the `@` mention picker.
+#[derive(Clone, Debug)]
+pub struct Member {
+    /// The JID to mention, as the group addresses it (`…@lid` in LID groups).
+    /// Its user part is what goes after `@` in the sent text.
+    pub jid: String,
+    /// Phone-number JID when known: for `Book::name_of` and display.
+    pub phone: Option<String>,
 }
 
 /// A contact typing (or recording a voice note) in a chat.
@@ -187,9 +202,14 @@ pub enum Command {
     /// A new name for a number (already checked with `registry::clean_name`).
     Rename { id: String, name: String },
     /// Queue a text message. `chat` is a JID from the session's book.
-    Send { id: String, chat: String, text: String },
-    /// Queue a text that quotes message `reply_to` of `chat`.
-    Reply { id: String, chat: String, text: String, reply_to: String },
+    /// `mentions` are member JIDs (`Member::jid`) whose `@<user part>` is in `text`.
+    Send { id: String, chat: String, text: String, mentions: Vec<String> },
+    /// Fetch a group's members into `Shared::members` (and learn their LID ↔
+    /// phone mappings). Sent when a group chat is opened.
+    GroupMembers { id: String, chat: String },
+    /// Queue a text that quotes message `reply_to` of `chat`, mentioning
+    /// `mentions` like `Send`.
+    Reply { id: String, chat: String, text: String, reply_to: String, mentions: Vec<String> },
     /// Queue a photo or document with an optional caption.
     SendFile { id: String, chat: String, path: PathBuf, caption: String },
     /// The user opened a chat: clear its unread count and, unless "Kirim
@@ -244,6 +264,7 @@ impl Backend {
     pub fn start(ctx: egui::Context, data_dir: PathBuf) -> Self {
         let (commands, receiver) = unbounded_channel();
         let settings = Settings::load(&data_dir);
+        crate::i18n::set(&settings.language);
         let shared = Arc::new(Mutex::new(Shared { settings: Arc::new(settings), ..Shared::default() }));
         let (hooks, hook_events) = unbounded_channel();
         let state = Updater { shared: shared.clone(), ctx, data_dir: data_dir.clone(), hooks, commands: commands.clone() };
@@ -426,6 +447,19 @@ impl Updater {
                     }
                 }
             }
+        }
+        self.ctx.request_repaint();
+    }
+
+    /// Stores a group's members for the mention picker.
+    pub(crate) fn set_members(&self, session: &str, group: &str, members: Vec<Member>) {
+        let key = {
+            let book = self.book(session);
+            let jid = book.map(|b| b.normalize(group)).unwrap_or_else(|| store::bare(group));
+            Typing::key(session, &jid)
+        };
+        if let Ok(mut shared) = self.shared.lock() {
+            Arc::make_mut(&mut shared.members).insert(key, members);
         }
         self.ctx.request_repaint();
     }
@@ -643,17 +677,20 @@ async fn run(
                 let _ = std::fs::remove_file(Store::path(&data_dir, &id));
                 state.remove(&id);
             }
-            Command::Send { id, chat, text } => match (running.get(&id), stores.get(&id)) {
-                (Some(r), Some(store)) => r.enqueue(&id, chat, Body::Text(text), &state, store),
+            Command::Send { id, chat, text, mentions } => match (running.get(&id), stores.get(&id)) {
+                (Some(r), Some(store)) => {
+                    let body = if mentions.is_empty() { Body::Text(text) } else { Body::Mention { text, mentions } };
+                    r.enqueue(&id, chat, body, &state, store)
+                }
                 _ => log::warn!("send: session {id} is not running"),
             },
-            Command::Reply { id, chat, text, reply_to } => {
-                // A quote that is gone (or never in this number's book) goes out as plain text.
-                let quoted = state.book(&id).and_then(|book| session::reply_body(&book, &chat, text.clone(), &reply_to));
+            Command::Reply { id, chat, text, reply_to, mentions } => {
+                // A quote that is gone (or never in this number's book) goes out without it.
+                let quoted = state.book(&id).and_then(|book| session::reply_body(&book, &chat, text.clone(), &reply_to, mentions.clone()));
                 if quoted.is_none() {
                     log::warn!("reply: session {id} has no message {reply_to} in {chat}; sending without the quote");
                 }
-                let body = quoted.unwrap_or(Body::Text(text));
+                let body = quoted.unwrap_or(if mentions.is_empty() { Body::Text(text) } else { Body::Mention { text, mentions } });
                 match (running.get(&id), stores.get(&id)) {
                     (Some(r), Some(store)) => r.enqueue(&id, chat, body, &state, store),
                     _ => log::warn!("reply: session {id} is not running"),
@@ -703,6 +740,11 @@ async fn run(
                     api_server = api::start(&api_context, &state);
                 }
                 state.ctx.request_repaint();
+            }
+            Command::GroupMembers { id, chat } => {
+                if let (Some(r), Some(store)) = (running.get(&id), stores.get(&id)) {
+                    r.group_members(&id, &chat, &state, store.clone());
+                }
             }
             Command::TestWebhook => {
                 let _ = state.hooks.send(webhook::Event {

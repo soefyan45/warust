@@ -7,6 +7,7 @@ use std::path::Path;
 use egui::{Align, Color32, CornerRadius, Frame, Margin, Panel, Rect, Response, Sense, Stroke, Theme, Ui, pos2, vec2};
 
 use super::fonts::{self, Weight};
+use crate::i18n::tr;
 use super::theme::{self, Palette, Template};
 use super::widgets::{self, rich};
 use super::{Screen, icons, window};
@@ -39,6 +40,8 @@ pub fn title_bar(ui: &mut Ui) {
             window::drag_area(ui, rect, "m_titlebar");
             ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
             ui.horizontal_centered(|ui| {
+                // Past the macOS window buttons (the bar's margin is 14).
+                ui.add_space((window::buttons_inset(ui.ctx()) - 14.0).max(0.0));
                 ui.label(rich("Warust", 13.0, Weight::Medium, p.text_2));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), window::controls);
             });
@@ -60,11 +63,11 @@ fn tab_of(screen: Screen) -> usize {
 pub fn tab_bar(ui: &mut Ui, screen: Screen, unread: u32, unseen: usize) -> Option<Screen> {
     let p = theme::palette(ui.ctx());
     let items = [
-        (Screen::Ringkasan, "house", "Beranda", 0),
+        (Screen::Ringkasan, "house", tr("Home", "Beranda"), 0),
         (Screen::Inbox, "message-circle", "Inbox", unread as usize),
         (Screen::Status, "circle-dashed", "Status", unseen),
-        (Screen::Nomor, "smartphone", "Perangkat", 0),
-        (Screen::More, "menu", "Lainnya", 0),
+        (Screen::Nomor, "smartphone", tr("Devices", "Perangkat"), 0),
+        (Screen::More, "menu", tr("More", "Lainnya"), 0),
     ];
     let current = tab_of(screen);
     let mut picked = None;
@@ -129,7 +132,7 @@ pub fn back_bar(ui: &mut Ui, title: &str) -> bool {
             let rect = ui.max_rect().expand2(vec2(8.0, 0.0));
             ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
             ui.horizontal_centered(|ui| {
-                back = widgets::icon_button(ui, "chevron-left", 36.0, false).on_hover_text("Kembali").clicked();
+                back = widgets::icon_button(ui, "chevron-left", 36.0, false).on_hover_text(tr("Back", "Kembali")).clicked();
                 ui.label(rich(title, 16.0, Weight::SemiBold, p.text));
             });
         });
@@ -203,12 +206,12 @@ pub fn avatar(ui: &Ui, rect: Rect, initials: &str, picture: Option<&Path>, accen
 pub fn status_tag(p: &Palette, status: &Status) -> (&'static str, Color32, Color32) {
     let dark = p.bg == theme::DARK.bg;
     match status {
-        Status::Connected if forest() => ("Terhubung", p.accent_soft, p.accent_text),
-        Status::Connected => ("Terhubung", p.raised, p.text_2),
-        Status::Starting => ("Memulai", p.raised, p.text_2),
+        Status::Connected if forest() => (tr("Connected", "Terhubung"), p.accent_soft, p.accent_text),
+        Status::Connected => (tr("Connected", "Terhubung"), p.raised, p.text_2),
+        Status::Starting => (tr("Starting", "Memulai"), p.raised, p.text_2),
         Status::Pairing => ("Pairing", if dark { p.raised } else { p.orange_soft }, p.amber),
-        Status::Reconnecting | Status::Replaced | Status::Locked => ("Tersendat", if dark { p.raised } else { p.orange_soft }, p.amber),
-        Status::LoggedOut | Status::Banned(_) | Status::Failed(_) => ("Terputus", if dark { p.raised } else { p.red_soft }, p.red_text),
+        Status::Reconnecting | Status::Replaced | Status::Locked => (tr("Interrupted", "Tersendat"), if dark { p.raised } else { p.orange_soft }, p.amber),
+        Status::LoggedOut | Status::Banned(_) | Status::Failed(_) => (tr("Disconnected", "Terputus"), if dark { p.raised } else { p.red_soft }, p.red_text),
     }
 }
 
@@ -243,7 +246,7 @@ pub fn device_row(ui: &mut Ui, session: &SessionView, divider: bool) -> Response
     widgets::paint_text(ui, Rect::from_min_max(pos2(left, rect.top() + 14.0), pos2(right, rect.top() + 36.0)), &session.name, fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
     let sub = match &session.phone {
         Some(phone) => phone.clone(),
-        None if session.status == Status::Pairing => "Belum dipindai".to_owned(),
+        None if session.status == Status::Pairing => tr("Not scanned yet", "Belum dipindai").to_owned(),
         None => super::screens::nomor::describe(&p, &session.status).2,
     };
     widgets::paint_text(ui, Rect::from_min_max(pos2(left, rect.top() + 37.0), pos2(right, rect.top() + 56.0)), &sub, fonts::mono(13.0), p.muted, Align::Min);
@@ -266,16 +269,25 @@ pub fn more(ui: &mut Ui, api_on: bool, failed_hooks: usize) -> Option<More> {
     let mut picked = None;
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         Frame::NONE.inner_margin(Margin { left: PAD as i8, right: PAD as i8, top: 12, bottom: 20 }).show(ui, |ui| {
-            page_title(ui, "Lainnya", |_| {});
+            page_title(ui, tr("More", "Lainnya"), |_| {});
             ui.add_space(12.0);
             card(ui.ctx()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let hooks = if failed_hooks > 0 { format!("{failed_hooks} pengiriman gagal") } else { "Endpoint, pemicu dan riwayat".to_owned() };
+                let hooks = if failed_hooks > 0 {
+                    crate::trf!("{failed_hooks} deliveries failed", "{failed_hooks} pengiriman gagal")
+                } else {
+                    tr("Endpoints, triggers and history", "Endpoint, pemicu dan riwayat").to_owned()
+                };
                 let rows: [(&str, &str, String, Screen); 3] = [
-                    ("scroll-text", "Log pesan", "Semua pesan keluar dan masuk".to_owned(), Screen::Log),
-                    ("webhook", "Webhook & API", format!("API {} · {hooks}", if api_on { "berjalan" } else { "mati" }), Screen::Integrations),
-                    ("settings", "Pengaturan", "Tampilan, jeda kirim, stiker".to_owned(), Screen::Settings),
+                    ("scroll-text", tr("Message log", "Log pesan"), tr("All outgoing and incoming messages", "Semua pesan keluar dan masuk").to_owned(), Screen::Log),
+                    (
+                        "webhook",
+                        "Webhook & API",
+                        format!("API {} · {hooks}", if api_on { tr("running", "berjalan") } else { tr("off", "mati") }),
+                        Screen::Integrations,
+                    ),
+                    ("settings", tr("Settings", "Pengaturan"), tr("Appearance, send delay, stickers", "Tampilan, jeda kirim, stiker").to_owned(), Screen::Settings),
                 ];
                 for (i, (icon, title, desc, screen)) in rows.into_iter().enumerate() {
                     if menu_row(ui, &p, icon, title, &desc, i < 2).clicked() {
@@ -288,8 +300,8 @@ pub fn more(ui: &mut Ui, api_on: bool, failed_hooks: usize) -> Option<More> {
                 card(ui.ctx()).show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     let dark = ui.ctx().theme() == Theme::Dark;
-                    let (icon, title) = if dark { ("sun", "Tema terang") } else { ("moon", "Tema gelap") };
-                    if menu_row(ui, &p, icon, title, "Disimpan untuk pembukaan berikutnya", false).clicked() {
+                    let (icon, title) = if dark { ("sun", tr("Light theme", "Tema terang")) } else { ("moon", tr("Dark theme", "Tema gelap")) };
+                    if menu_row(ui, &p, icon, title, tr("Saved for the next launch", "Disimpan untuk pembukaan berikutnya"), false).clicked() {
                         picked = Some(More::ToggleTheme);
                     }
                 });

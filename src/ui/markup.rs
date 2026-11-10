@@ -104,44 +104,129 @@ fn inline(text: &str, out: &mut Vec<(String, Style)>) {
     push(out, &run, style);
 }
 
+/// A mention shown in a bubble: the `@<token>` WhatsApp put in the text is
+/// drawn as `@<name>`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MentionRef {
+    /// The user part of the mentioned JID, without the `@`.
+    pub token: String,
+    /// The name to show instead of the number.
+    pub name: String,
+    /// The mention is of this number: drawn with a soft highlight.
+    pub me: bool,
+}
+
+/// Splits `text` at `@<token>` of each mention, as `(piece, mention index)`.
+/// A token counts only at a word boundary on both sides, so `@6281` does not
+/// match inside `@628123` or `a@6281`; a bare `@` stays plain text.
+pub fn split_mentions(text: &str, mentions: &[MentionRef]) -> Vec<(String, Option<usize>)> {
+    if mentions.is_empty() || !text.contains('@') {
+        return vec![(text.to_owned(), None)];
+    }
+    let mut out: Vec<(String, Option<usize>)> = Vec::new();
+    let mut plain = String::new();
+    let mut prev: Option<char> = None;
+    let mut rest = text;
+    while let Some(c) = rest.chars().next() {
+        let found = (c == '@' && prev.is_none_or(|p| !p.is_alphanumeric()))
+            .then(|| {
+                mentions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| !m.token.is_empty())
+                    .filter_map(|(i, m)| {
+                        let after = rest[1..].strip_prefix(m.token.as_str())?;
+                        after.chars().next().is_none_or(|n| !n.is_alphanumeric()).then_some((i, m.token.len()))
+                    })
+                    .max_by_key(|(_, len)| *len)
+            })
+            .flatten();
+        match found {
+            Some((i, len)) => {
+                if !plain.is_empty() {
+                    out.push((std::mem::take(&mut plain), None));
+                }
+                out.push((rest[..1 + len].to_owned(), Some(i)));
+                rest = &rest[1 + len..];
+                prev = mentions[i].token.chars().last();
+            }
+            None => {
+                plain.push(c);
+                prev = Some(c);
+                rest = &rest[c.len_utf8()..];
+            }
+        }
+    }
+    if !plain.is_empty() {
+        out.push((plain, None));
+    }
+    out
+}
+
 /// Lays out formatted text for a bubble, wrapped at `wrap_width`.
 pub fn job(text: &str, size: f32, color: Color32, code_bg: Color32, wrap_width: f32) -> LayoutJob {
+    job_with_mentions(text, size, color, code_bg, wrap_width, &[], color)
+}
+
+/// Like `job`, with each `@<token>` of `mentions` drawn as bold `@<name>` in
+/// `accent`. Code runs stay as typed.
+pub fn job_with_mentions(
+    text: &str,
+    size: f32,
+    color: Color32,
+    code_bg: Color32,
+    wrap_width: f32,
+    mentions: &[MentionRef],
+    accent: Color32,
+) -> LayoutJob {
     let mut job = LayoutJob::default();
     job.wrap.max_width = wrap_width;
     for (run, style) in spans(text) {
-        let font_id = if style.code {
-            fonts::mono(size - 1.0)
-        } else {
-            fonts::ui(size, if style.bold { Weight::SemiBold } else { Weight::Regular })
-        };
-        let format = TextFormat {
-            font_id,
-            color,
-            italics: style.italic,
-            strikethrough: if style.strike {
-                Stroke::new(1.0, color)
+        let pieces = if style.code { vec![(run, None)] } else { split_mentions(&run, mentions) };
+        for (piece, mention) in pieces {
+            let mention = mention.map(|i| &mentions[i]);
+            let bold = style.bold || mention.is_some();
+            let font_id = if style.code {
+                fonts::mono(size - 1.0)
             } else {
-                Stroke::NONE
-            },
-            background: if style.code { code_bg } else { Color32::TRANSPARENT },
-            ..TextFormat::default()
-        };
-        if style.code {
-            emoji::append(&mut job, &run, format);
-            continue;
+                fonts::ui(size, if bold { Weight::SemiBold } else { Weight::Regular })
+            };
+            let fg = if mention.is_some() { accent } else { color };
+            let format = TextFormat {
+                font_id,
+                color: fg,
+                italics: style.italic,
+                strikethrough: if style.strike { Stroke::new(1.0, fg) } else { Stroke::NONE },
+                background: if style.code {
+                    code_bg
+                } else if mention.is_some_and(|m| m.me) {
+                    accent.gamma_multiply(0.18)
+                } else {
+                    Color32::TRANSPARENT
+                },
+                ..TextFormat::default()
+            };
+            match mention {
+                Some(m) => emoji::append(&mut job, &format!("@{}", m.name), format),
+                None if style.code => emoji::append(&mut job, &piece, format),
+                None => append_linked(&mut job, &piece, format, fg),
+            }
         }
-        // Links are underlined; the bubble opens them on click.
-        let chars: Vec<char> = run.chars().collect();
-        let mut at = 0;
-        for (range, _) in links(&run) {
-            emoji::append(&mut job, &chars[at..range.start].iter().collect::<String>(), format.clone());
-            let underline = TextFormat { underline: Stroke::new(1.0, color), ..format.clone() };
-            emoji::append(&mut job, &chars[range.clone()].iter().collect::<String>(), underline);
-            at = range.end;
-        }
-        emoji::append(&mut job, &chars[at..].iter().collect::<String>(), format);
     }
     job
+}
+
+/// Appends `text`, with its web links underlined; the bubble opens them on click.
+fn append_linked(job: &mut LayoutJob, text: &str, format: TextFormat, color: Color32) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut at = 0;
+    for (range, _) in links(text) {
+        emoji::append(job, &chars[at..range.start].iter().collect::<String>(), format.clone());
+        let underline = TextFormat { underline: Stroke::new(1.0, color), ..format.clone() };
+        emoji::append(job, &chars[range.clone()].iter().collect::<String>(), underline);
+        at = range.end;
+    }
+    emoji::append(job, &chars[at..].iter().collect::<String>(), format);
 }
 
 /// Web links in `text`: their char range and the URL to open (`www.` gets
@@ -251,5 +336,58 @@ mod tests {
                 (" ya".into(), Style::default()),
             ]
         );
+    }
+
+    fn mention(token: &str, name: &str) -> MentionRef {
+        MentionRef { token: token.into(), name: name.into(), me: false }
+    }
+
+    fn section_text<'a>(job: &'a LayoutJob, s: &egui::text::LayoutSection) -> &'a str {
+        &job.text[s.byte_range.start.0..s.byte_range.end.0]
+    }
+
+    fn texts(job: &LayoutJob) -> String {
+        job.text.clone()
+    }
+
+    #[test]
+    fn mention_token_is_replaced_and_colored() {
+        let accent = Color32::from_rgb(1, 2, 3);
+        let job = job_with_mentions("halo @6281234 apa kabar", 14.0, Color32::WHITE, Color32::BLACK, 300.0, &[mention("6281234", "Budi")], accent);
+        assert_eq!(texts(&job), "halo @Budi apa kabar");
+        let colored: Vec<&str> = job.sections.iter().filter(|s| s.format.color == accent).map(|s| section_text(&job, s)).collect();
+        assert_eq!(colored, ["@Budi"]);
+    }
+
+    #[test]
+    fn unbacked_at_number_is_untouched() {
+        let job = job_with_mentions("hubungi @6289999 atau @", 14.0, Color32::WHITE, Color32::BLACK, 300.0, &[mention("6281234", "Budi")], Color32::RED);
+        assert_eq!(texts(&job), "hubungi @6289999 atau @");
+        assert!(job.sections.iter().all(|s| s.format.color == Color32::WHITE));
+    }
+
+    #[test]
+    fn token_needs_word_boundaries() {
+        let m = [mention("6281", "Ani")];
+        assert_eq!(split_mentions("@628123", &m), vec![("@628123".to_owned(), None)]);
+        assert_eq!(split_mentions("x@6281", &m), vec![("x@6281".to_owned(), None)]);
+        assert_eq!(split_mentions("@6281, ok", &m), vec![("@6281".to_owned(), Some(0)), (", ok".to_owned(), None)]);
+    }
+
+    #[test]
+    fn mention_inside_bold_still_works() {
+        let accent = Color32::from_rgb(9, 9, 9);
+        let job = job_with_mentions("*cek @6281234 ya*", 14.0, Color32::WHITE, Color32::BLACK, 300.0, &[mention("6281234", "Budi")], accent);
+        assert_eq!(texts(&job), "cek @Budi ya");
+        let section = job.sections.iter().find(|s| s.format.color == accent).expect("colored mention");
+        assert_eq!(section_text(&job, section), "@Budi");
+        // Bold text around the mention keeps the bold font, in the normal color.
+        assert!(job.sections.iter().any(|s| s.format.color == Color32::WHITE && s.format.font_id == fonts::ui(14.0, Weight::SemiBold)));
+    }
+
+    #[test]
+    fn mentions_in_code_stay_literal() {
+        let job = job_with_mentions("`@6281234`", 14.0, Color32::WHITE, Color32::BLACK, 300.0, &[mention("6281234", "Budi")], Color32::RED);
+        assert_eq!(texts(&job), "@6281234");
     }
 }

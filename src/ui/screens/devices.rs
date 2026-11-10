@@ -4,6 +4,7 @@
 use egui::{Align, Color32, Rect, Sense, Ui, pos2, vec2};
 
 use crate::backend::{SessionView, Status};
+use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette};
 use crate::ui::widgets::{self, Kind, rich};
@@ -82,10 +83,10 @@ fn item(
 /// Right-click on a number: its inbox in a window of its own, or a new name.
 fn number_menu(row: &egui::Response, state: &mut State, session: &SessionView) {
     row.context_menu(|ui| {
-        if ui.button("Buka di jendela baru").clicked() {
+        if ui.button(tr("Open in new window", "Buka di jendela baru")).clicked() {
             state.open_window_requested = Some(session.id.clone());
         }
-        if ui.button("Ganti nama…").clicked() {
+        if ui.button(tr("Rename…", "Ganti nama…")).clicked() {
             state.rename = Some((session.id.clone(), session.name.clone()));
         }
     });
@@ -96,8 +97,8 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
     let connected: Vec<&SessionView> = sessions.iter().filter(|s| s.status == Status::Connected).collect();
     let others: Vec<&SessionView> = sessions.iter().filter(|s| s.status != Status::Connected).collect();
     ui.add_space(14.0);
-    ui.label(rich("Perangkat", 18.0, Weight::SemiBold, p.text));
-    ui.label(rich(&format!("{} dari {} nomor terhubung", connected.len(), sessions.len()), 12.0, Weight::Regular, p.muted));
+    ui.label(rich(tr("Devices", "Perangkat"), 18.0, Weight::SemiBold, p.text));
+    ui.label(rich(&crate::trf!("{} of {} numbers connected", "{} dari {} nomor terhubung", connected.len(), sessions.len()), 12.0, Weight::Regular, p.muted));
     ui.add_space(10.0);
 
     let total: u32 = sessions.iter().map(unread).sum();
@@ -105,8 +106,8 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
         ui,
         p,
         "inbox",
-        "Semua nomor",
-        &format!("Gabungan {} nomor", sessions.len()),
+        tr("All numbers", "Semua nomor"),
+        &crate::trf!("{} numbers together", "Gabungan {} nomor", sessions.len()),
         p.accent_text,
         false,
         None,
@@ -127,11 +128,11 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
     }
     if !others.is_empty() {
         ui.add_space(10.0);
-        ui.label(rich("TIDAK BISA MEMBALAS", 11.0, Weight::SemiBold, p.muted));
+        ui.label(rich(tr("CANNOT REPLY", "TIDAK BISA MEMBALAS"), 11.0, Weight::SemiBold, p.muted));
         for s in &others {
             let (icon, _, label, _) = super::nomor::describe(p, &s.status);
             let chats = s.book.chats.len();
-            let detail = if chats > 0 { format!("{label} · {chats} chat lama") } else { label };
+            let detail = if chats > 0 { crate::trf!("{label} · {chats} old chats", "{label} · {chats} chat lama") } else { label };
             let selected = state.inbox_scope.as_deref() == Some(s.id.as_str());
             let dot = status_dot(p, &s.status);
             let row = item(ui, p, icon, &s.name, &detail, dot, false, Some(dot), unread(s), selected);
@@ -153,7 +154,10 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
                 icons::show(ui, "lock", 14.0, p.text_2);
                 ui.add(
                     egui::Label::new(rich(
-                        "Balasan selalu dikirim dari nomor yang menerima chat. Nomor pengirim tidak bisa diganti.",
+                        tr(
+                            "Replies are always sent from the number that received the chat. The sending number cannot be changed.",
+                            "Balasan selalu dikirim dari nomor yang menerima chat. Nomor pengirim tidak bisa diganti.",
+                        ),
                         12.0,
                         Weight::Regular,
                         p.text_2,
@@ -163,7 +167,7 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
             });
         });
     ui.add_space(8.0);
-    if widgets::button(ui, Some("plus"), "Tautkan nomor", Kind::Secondary).clicked() {
+    if widgets::button(ui, Some("plus"), tr("Link number", "Tautkan nomor"), Kind::Secondary).clicked() {
         state.add_number_requested = true;
     }
 }
@@ -178,7 +182,7 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView]) -> Option<super::nomor::Ac
     egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         egui::Frame::NONE.inner_margin(egui::Margin { left: PAD as i8, right: PAD as i8, top: 12, bottom: 24 }).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 0.0;
-            compact::page_title(ui, "Perangkat", |_| {});
+            compact::page_title(ui, tr("Devices", "Perangkat"), |_| {});
             ui.add_space(16.0);
             let forest = theme::template().top_nav();
             let (fill, color) = if forest { (p.accent_soft, p.accent_text) } else { (p.raised, p.text_2) };
@@ -187,12 +191,12 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView]) -> Option<super::nomor::Ac
                 ui.horizontal_top(|ui| {
                     ui.spacing_mut().item_spacing.x = 12.0;
                     icons::show(ui, "lock", 18.0, color);
-                    ui.add(egui::Label::new(rich("Balasan selalu dikirim dari nomor yang menerima chat. Nomor pembalas tidak bisa diganti.", 14.0, Weight::Regular, color)).wrap());
+                    ui.add(egui::Label::new(rich(tr("Replies are always sent from the number that received the chat. The replying number cannot be changed.", "Balasan selalu dikirim dari nomor yang menerima chat. Nomor pembalas tidak bisa diganti."), 14.0, Weight::Regular, color)).wrap());
                 });
             });
             let groups: [(&str, Vec<&SessionView>); 2] = [
-                ("Bisa membalas", sessions.iter().filter(|s| s.status == Status::Connected).collect()),
-                ("Tidak bisa membalas", sessions.iter().filter(|s| s.status != Status::Connected).collect()),
+                (tr("Can reply", "Bisa membalas"), sessions.iter().filter(|s| s.status == Status::Connected).collect()),
+                (tr("Cannot reply", "Tidak bisa membalas"), sessions.iter().filter(|s| s.status != Status::Connected).collect()),
             ];
             for (label, group) in groups {
                 if group.is_empty() {
@@ -214,13 +218,13 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView]) -> Option<super::nomor::Ac
             }
             if sessions.is_empty() {
                 ui.add_space(24.0);
-                ui.label(rich("Belum ada nomor. Tautkan nomor WhatsApp untuk mulai.", 14.0, Weight::Regular, p.muted));
+                ui.label(rich(tr("No numbers yet. Link a WhatsApp number to start.", "Belum ada nomor. Tautkan nomor WhatsApp untuk mulai."), 14.0, Weight::Regular, p.muted));
             }
             ui.add_space(24.0);
             let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
             let hover = if response.hovered() { 0.92 } else { 1.0 };
             ui.painter().rect_filled(rect, 26.0, p.primary.gamma_multiply(hover));
-            let label = ui.painter().layout_no_wrap("Tambah nomor".to_owned(), fonts::ui(16.0, Weight::SemiBold), p.on_primary);
+            let label = ui.painter().layout_no_wrap(tr("Add number", "Tambah nomor").to_owned(), fonts::ui(16.0, Weight::SemiBold), p.on_primary);
             let total = label.size().x + 28.0;
             let left = rect.center().x - total / 2.0;
             icons::paint(ui, Rect::from_center_size(pos2(left + 9.0, rect.center().y), vec2(18.0, 18.0)), "plus", 18.0, p.on_primary);

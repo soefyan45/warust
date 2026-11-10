@@ -14,9 +14,9 @@ use egui::{Margin, Ui};
 use super::fonts::Weight;
 use super::icons;
 use super::theme::{self, Palette};
+use crate::i18n::tr;
 use super::widgets::rich;
 use crate::backend::{Book, Chat, mask_phone};
-use crate::backend::store::bare;
 
 /// Page title and one-line description, shared by the screens.
 pub fn page_head(ui: &mut Ui, title: &str, desc: &str) {
@@ -39,7 +39,7 @@ pub fn webhook_label(state: &super::State, session: &str) -> String {
             let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
             rest.split('/').next().unwrap_or(rest).to_owned()
         }
-        None => "Tidak diatur".to_owned(),
+        None => tr("Not set", "Tidak diatur").to_owned(),
     }
 }
 
@@ -74,20 +74,7 @@ pub fn empty_state(ui: &mut Ui, p: &Palette, icon: &str, title: &str, desc: &str
     });
 }
 
-/// Short, masked form of a JID for small labels.
-pub fn short_jid(jid: &str) -> String {
-    let jid = bare(jid);
-    let jid = jid.as_str();
-    let user = jid.split('@').next().unwrap_or(jid);
-    let tail: String = user.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
-    if jid.ends_with("@s.whatsapp.net") {
-        mask_phone(jid)
-    } else if jid.ends_with("@g.us") {
-        format!("grup …{tail}")
-    } else {
-        format!("lid …{tail}")
-    }
-}
+pub use crate::backend::short_jid;
 
 /// Contact or group name, else the masked number.
 pub fn chat_title(book: &Book, chat: &Chat) -> String {
@@ -95,11 +82,11 @@ pub fn chat_title(book: &Book, chat: &Chat) -> String {
         return name.to_owned();
     }
     if chat.is_group() {
-        "Grup tanpa nama".to_owned()
+        tr("Unnamed group", "Grup tanpa nama").to_owned()
     } else if chat.jid.ends_with("@s.whatsapp.net") {
         mask_phone(&chat.jid)
     } else {
-        format!("Kontak {}", short_jid(&chat.jid))
+        crate::trf!("Contact {}", "Kontak {}", short_jid(&chat.jid))
     }
 }
 
@@ -109,7 +96,7 @@ pub fn sender_label(book: &Book, jid: &str) -> String {
 }
 
 pub fn chat_subtitle(chat: &Chat) -> String {
-    if chat.is_group() { "Grup".to_owned() } else { short_jid(&chat.jid) }
+    if chat.is_group() { tr("Group", "Grup").to_owned() } else { short_jid(&chat.jid) }
 }
 
 /// Two letters for an avatar tile.

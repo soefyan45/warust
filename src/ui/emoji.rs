@@ -11,6 +11,7 @@ use egui::{Id, PopupCloseBehavior, Response, ScrollArea, Sense, Ui, vec2};
 use super::fonts::{self, Weight};
 use super::theme::{self, R_SM};
 use super::widgets::{self, rich};
+use crate::i18n::tr;
 
 const CATEGORIES: &[(&str, &str)] = &[
     ("Wajah", "😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 🫠 😉 😊 😇 🥰 😍 🤩 😘 😗 ☺️ 😚 😙 🥲 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🫢 🫣 🤫 🤔 🫡 🤐 🤨 😐 😑 😶 🫥 😏 😒 🙄 😬 🤥 🫨 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🤧 🥵 🥶 🥴 😵 🤯 🤠 🥳 🥸 😎 🤓 🧐 😕 🫤 😟 🙁 😮 😯 😲 😳 🥺 🥹 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 ☠️ 💩 🤡 👹 👺 👻 👽 👾 🤖 😺 😸 😹 😻 😼 😽 🙀 😿 😾 🙈 🙉 🙊"),
@@ -25,6 +26,24 @@ const CATEGORIES: &[(&str, &str)] = &[
     ("Simbol", "✅️ ☑️ ✔️ ❌️ ❎️ ➕️ ➖️ ➗️ ✖️ 🟰 ❓️ ❔️ ❕️ ❗️ ‼️ ⁉️ 〰️ 💱 💲 ⚕️ ♻️ ⚜️ 🔱 📛 🔰 ⭕️ ⛔️ 🚫 📵 🔞 ☢️ ☣️ ⚠️ 🚸 ⬆️ ↗️ ➡️ ↘️ ⬇️ ↙️ ⬅️ ↖️ ↕️ ↔️ ↩️ ↪️ ⤴️ ⤵️ 🔃 🔄 🔙 🔚 🔛 🔜 🔝 🛐 ⚛️ 🕉 ✡️ ☸️ ☯️ ✝️ ☦️ ☪️ ☮️ 🕎 🔯 ♈️ ♉️ ♊️ ♋️ ♌️ ♍️ ♎️ ♏️ ♐️ ♑️ ♒️ ♓️ ⛎️ 🔀 🔁 🔂 ▶️ ⏩️ ⏭️ ⏯️ ◀️ ⏪️ ⏮️ 🔼 ⏫️ 🔽 ⏬️ ⏸️ ⏹️ ⏺️ ⏏️ 🎦 🔅 🔆 📶 🛜 📳 📴 ♀️ ♂️ ⚧️ ✳️ ❇️ ✴️ 🆗 🆕 🆓 🆙 🆒 🆘 🆚 🔴 🟠 🟡 🟢 🔵 🟣 🟤 ⚫️ ⚪️ 🟥 🟧 🟨 🟩 🟦 🟪 🟫 ⬛️ ⬜️ 🔶 🔷 🔸 🔹 🔺 🔻 💠 🔘 🔳 🔲 🎵 🎶 ©️ ®️ ™️ 🔔 🔕 📣 📢 💤 🏁 🚩 🎌 🏴 🏳"),
     ("Bendera", "🇮🇩 🇲🇾 🇸🇬 🇧🇳 🇹🇱 🇵🇭 🇹🇭 🇻🇳 🇯🇵 🇰🇷 🇨🇳 🇭🇰 🇹🇼 🇮🇳 🇵🇰 🇧🇩 🇸🇦 🇦🇪 🇶🇦 🇰🇼 🇪🇬 🇹🇷 🇺🇸 🇨🇦 🇲🇽 🇧🇷 🇦🇷 🇬🇧 🇩🇪 🇫🇷 🇳🇱 🇮🇹 🇪🇸 🇵🇹 🇷🇺 🇦🇺 🇳🇿 🇿🇦 🇳🇬 🏳️‍🌈"),
 ];
+
+/// A category's name in the language that is on, keyed by its Indonesian name above.
+fn category_name(name: &str) -> &'static str {
+    match name {
+        "Wajah" => tr("Faces", "Wajah"),
+        "Gestur" => tr("Gestures", "Gestur"),
+        "Orang" => tr("People", "Orang"),
+        "Hati" => tr("Hearts", "Hati"),
+        "Alam" => tr("Nature", "Alam"),
+        "Makanan" => tr("Food", "Makanan"),
+        "Aktivitas" => tr("Activities", "Aktivitas"),
+        "Perjalanan" => tr("Travel", "Perjalanan"),
+        "Benda" => tr("Objects", "Benda"),
+        "Simbol" => tr("Symbols", "Simbol"),
+        "Bendera" => tr("Flags", "Bendera"),
+        _ => "",
+    }
+}
 
 const CELL: f32 = 34.0;
 const COLUMNS: usize = 9;
@@ -93,14 +112,14 @@ pub fn picker(ui: &Ui, button: &Response, editor: Id, text: &mut String) {
                     }
                     let first = list.split(' ').next().unwrap_or_default();
                     widgets::paint_text(ui, rect, first, fonts::ui(16.0, Weight::Regular), p.text, egui::Align::Center);
-                    if response.on_hover_text(*name).clicked() {
+                    if response.on_hover_text(category_name(name)).clicked() {
                         tab = i;
                     }
                 }
             });
             ui.data_mut(|d| d.insert_temp(tab_id, tab));
             let (name, list) = CATEGORIES[tab.min(CATEGORIES.len() - 1)];
-            widgets::section_label(ui, name);
+            widgets::section_label(ui, category_name(name));
             ScrollArea::vertical().id_salt(("emoji", tab)).max_height(300.0).show(ui, |ui| {
                 ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                 let emoji: Vec<&str> = list.split(' ').collect();
@@ -124,7 +143,7 @@ pub fn picker(ui: &Ui, button: &Response, editor: Id, text: &mut String) {
                 }
             });
             ui.add_space(4.0);
-            ui.label(rich("Klik di luar untuk menutup", 11.0, Weight::Regular, p.muted));
+            ui.label(rich(tr("Click outside to close", "Klik di luar untuk menutup"), 11.0, Weight::Regular, p.muted));
         });
 }
 

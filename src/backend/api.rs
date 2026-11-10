@@ -42,7 +42,7 @@ pub fn start(context: &Context, state: &Updater) -> Option<JoinHandle<()>> {
             Ok(listener) => listener,
             Err(e) => {
                 log::warn!("REST API cannot listen on {address}: {e}");
-                state.set_api(ApiState::Failed(format!("Port {} tidak bisa dipakai: {e}", api.port)));
+                state.set_api(ApiState::Failed(crate::trf!("Port {} cannot be used: {e}", "Port {} tidak bisa dipakai: {e}", api.port)));
                 return;
             }
         };
@@ -72,7 +72,7 @@ fn router(context: Context) -> Router {
         .route("/sessions/{id}/messages/{msg_id}/forward", post(forward_message))
         .route("/sessions/{id}/messages/{msg_id}/pin", post(pin_message))
         .route("/sessions/{id}/webhook", put(put_webhook))
-        .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "Endpoint tidak ada") })
+        .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "Endpoint not found") })
         .with_state(context)
 }
 
@@ -103,7 +103,7 @@ impl FromRequestParts<Context> for Authed {
         if same {
             Ok(Authed)
         } else {
-            Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "API key salah atau tidak ada (Authorization: Bearer <key>)"))
+            Err(error(StatusCode::UNAUTHORIZED, "unauthorized", "API key is wrong or missing (Authorization: Bearer <key>)"))
         }
     }
 }
@@ -115,7 +115,7 @@ fn session(context: &Context, id: &str) -> Result<SessionView, Response> {
         .iter()
         .find(|s| s.id == id)
         .cloned()
-        .ok_or_else(|| error(StatusCode::NOT_FOUND, "session_not_found", format!("Sesi {id} tidak ada")))
+        .ok_or_else(|| error(StatusCode::NOT_FOUND, "session_not_found", format!("Session {id} not found")))
 }
 
 fn session_json(view: &SessionView, shared_webhook: Option<&str>) -> Value {
@@ -139,7 +139,7 @@ fn send(context: &Context, command: Command) -> Result<(), Response> {
     context
         .commands
         .send(command)
-        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "backend_stopped", "Backend berhenti"))
+        .map_err(|_| error(StatusCode::SERVICE_UNAVAILABLE, "backend_stopped", "Backend stopped"))
 }
 
 async fn healthz() -> Response {
@@ -180,9 +180,9 @@ async fn create_session(_: Authed, State(context): State<Context>, body: Option<
         .and_then(|Json(b)| b.name)
         .map(|n| n.trim().to_owned())
         .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| format!("Nomor {}", count + 1));
+        .unwrap_or_else(|| crate::trf!("Number {}", "Nomor {}", count + 1));
     send(&context, Command::Add { id: id.clone(), name: name.clone() })?;
-    let next = format!("GET /sessions/{id}/qr untuk QR, atau POST /sessions/{id}/pair-code");
+    let next = format!("GET /sessions/{id}/qr for the QR, or POST /sessions/{id}/pair-code");
     Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": name, "status": "starting", "next": next }))).into_response())
 }
 
@@ -205,11 +205,11 @@ struct PairCode {
 async fn pair_code(_: Authed, State(context): State<Context>, Path(id): Path<String>, Json(body): Json<PairCode>) -> Answer {
     let view = session(&context, &id)?;
     if view.status == Status::Connected {
-        return Err(error(StatusCode::CONFLICT, "already_linked", "Nomor ini sudah tertaut"));
+        return Err(error(StatusCode::CONFLICT, "already_linked", "This number is already linked"));
     }
     let phone: String = body.phone.chars().filter(char::is_ascii_digit).collect();
     if phone.len() < 8 || phone.starts_with('0') {
-        return Err(error(StatusCode::BAD_REQUEST, "invalid_phone", "Nomor harus dengan kode negara, mis. 628123456789"));
+        return Err(error(StatusCode::BAD_REQUEST, "invalid_phone", "The number must include the country code, e.g. 628123456789"));
     }
     send(&context, Command::PairCode { id: id.clone(), phone })?;
     Ok((StatusCode::ACCEPTED, Json(json!({ "status": "requested", "next": format!("GET /sessions/{id}/qr → pair_code") })))
@@ -277,13 +277,13 @@ async fn list_chats(
 fn known_chat(view: &SessionView, jid: &str) -> Result<String, Response> {
     if view.status != Status::Connected {
         let (status, _) = view.status.code();
-        return Err(error(StatusCode::CONFLICT, "not_connected", format!("Sesi tidak terhubung ({status})")));
+        return Err(error(StatusCode::CONFLICT, "not_connected", format!("Session is not connected ({status})")));
     }
     let chat = view.book.normalize(jid);
     if view.book.chats.iter().any(|c| c.jid == chat) {
         Ok(chat)
     } else {
-        Err(error(StatusCode::NOT_FOUND, "chat_not_found", format!("Chat {jid} tidak ada")))
+        Err(error(StatusCode::NOT_FOUND, "chat_not_found", format!("Chat {jid} not found")))
     }
 }
 
@@ -365,7 +365,7 @@ fn to_jid(to: &str) -> Result<String, Response> {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "invalid_to",
-            "`to` harus nomor dengan kode negara (mis. 628123456789) atau JID lengkap",
+            "`to` must be a number with country code (e.g. 628123456789) or a full JID",
         ));
     }
     Ok(format!("{digits}@s.whatsapp.net"))
@@ -376,7 +376,7 @@ fn to_jid(to: &str) -> Result<String, Response> {
 fn check_target(view: &SessionView, jid: &str, allow_cold: bool) -> Result<String, Response> {
     if view.status != Status::Connected {
         let (status, _) = view.status.code();
-        return Err(error(StatusCode::CONFLICT, "not_connected", format!("Sesi tidak terhubung ({status})")));
+        return Err(error(StatusCode::CONFLICT, "not_connected", format!("Session is not connected ({status})")));
     }
     let book: &Book = &view.book;
     let chat = book.normalize(jid);
@@ -385,7 +385,7 @@ fn check_target(view: &SessionView, jid: &str, allow_cold: bool) -> Result<Strin
         return Err(error(
             StatusCode::FORBIDDEN,
             "cold_contact",
-            "Nomor ini belum pernah mengirim pesan ke nomor Anda. Kirim `allow_cold: true` bila memang disengaja.",
+            "This number has never messaged your number. Send `allow_cold: true` if that is intended.",
         ));
     }
     Ok(chat)
@@ -420,7 +420,7 @@ struct SendText {
 async fn send_text(_: Authed, State(context): State<Context>, Path(id): Path<String>, Json(body): Json<SendText>) -> Answer {
     let view = session(&context, &id)?;
     if body.text.trim().is_empty() || body.text.len() > 65_536 {
-        return Err(error(StatusCode::BAD_REQUEST, "invalid_text", "`text` kosong atau terlalu panjang"));
+        return Err(error(StatusCode::BAD_REQUEST, "invalid_text", "`text` is empty or too long"));
     }
     let chat = check_target(&view, &to_jid(&body.to)?, body.allow_cold)?;
     let message = match body.reply_to.as_deref().filter(|r| !r.is_empty()) {
@@ -428,10 +428,10 @@ async fn send_text(_: Authed, State(context): State<Context>, Path(id): Path<Str
         Some(reply_to) => {
             let real = view.book.aliases.get(reply_to).map(String::as_str).unwrap_or(reply_to);
             if real.starts_with("local-") {
-                return Err(error(StatusCode::CONFLICT, "reply_not_sent", "`reply_to` masih di antrean, belum terkirim"));
+                return Err(error(StatusCode::CONFLICT, "reply_not_sent", "`reply_to` is still queued, not sent yet"));
             }
-            reply_body(&view.book, &chat, body.text, reply_to)
-                .ok_or_else(|| error(StatusCode::NOT_FOUND, "reply_not_found", "`reply_to` tidak ditemukan di chat ini"))?
+            reply_body(&view.book, &chat, body.text, reply_to, Vec::new())
+                .ok_or_else(|| error(StatusCode::NOT_FOUND, "reply_not_found", "`reply_to` not found in this chat"))?
         }
     };
     let local_id = new_local_id();
@@ -456,13 +456,13 @@ struct SendMedia {
 
 /// Fetches a URL into `data/uploads/`, at most `media::MAX_BYTES`.
 fn fetch(url: &str, dir: &std::path::Path) -> Result<PathBuf, String> {
-    let mut response = ureq::get(url).call().map_err(|e| format!("Gagal mengambil URL: {e}"))?;
+    let mut response = ureq::get(url).call().map_err(|e| format!("Failed to fetch the URL: {e}"))?;
     let bytes = response
         .body_mut()
         .with_config()
         .limit(media::MAX_BYTES)
         .read_to_vec()
-        .map_err(|e| format!("Gagal membaca URL: {e}"))?;
+        .map_err(|e| format!("Failed to read the URL: {e}"))?;
     let name = url
         .split(['?', '#'])
         .next()
@@ -485,7 +485,7 @@ async fn send_media(_: Authed, State(context): State<Context>, Path(id): Path<St
         (Some(path), _) => {
             let path = PathBuf::from(path);
             if !path.is_file() {
-                return Err(error(StatusCode::BAD_REQUEST, "file_not_found", "`path` bukan file yang ada"));
+                return Err(error(StatusCode::BAD_REQUEST, "file_not_found", "`path` is not an existing file"));
             }
             path
         }
@@ -496,10 +496,10 @@ async fn send_media(_: Authed, State(context): State<Context>, Path(id): Path<St
                 .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?
                 .map_err(|e| error(StatusCode::BAD_GATEWAY, "fetch_failed", e))?
         }
-        _ => return Err(error(StatusCode::BAD_REQUEST, "no_file", "Isi `path` (file lokal) atau `url` (http/https)")),
+        _ => return Err(error(StatusCode::BAD_REQUEST, "no_file", "Provide `path` (local file) or `url` (http/https)")),
     };
     if std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0) > media::MAX_BYTES {
-        return Err(error(StatusCode::PAYLOAD_TOO_LARGE, "too_large", format!("File lebih dari {} MB", media::MAX_BYTES / 1024 / 1024)));
+        return Err(error(StatusCode::PAYLOAD_TOO_LARGE, "too_large", format!("File is larger than {} MB", media::MAX_BYTES / 1024 / 1024)));
     }
     let message = if body.as_sticker { Body::Sticker(path) } else { Body::File { path, caption: body.caption } };
     let local_id = new_local_id();
@@ -516,7 +516,7 @@ async fn get_message(_: Authed, State(context): State<Context>, Path((id, msg_id
         .iter()
         .find_map(|c| c.messages.iter().find(|m| m.id == real || m.id == msg_id).map(|m| (c, m)));
     let Some((chat, m)) = found else {
-        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Pesan tidak ditemukan"));
+        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Message not found"));
     };
     let code = m.status.code();
     let (status, failure) = match code.split_once(':') {
@@ -559,19 +559,19 @@ async fn forward_message(
         return Err(error(
             StatusCode::BAD_REQUEST,
             "invalid_to",
-            format!("`to` harus berisi 1 sampai {MAX_FORWARD_TARGETS} tujuan"),
+            format!("`to` must contain 1 to {MAX_FORWARD_TARGETS} targets"),
         ));
     }
     let real = view.book.aliases.get(&msg_id).cloned().unwrap_or_else(|| msg_id.clone());
     let found = view.book.chats.iter().flat_map(|c| &c.messages).find(|m| m.id == real || m.id == msg_id);
     let Some(message) = found else {
-        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Pesan tidak ditemukan"));
+        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Message not found"));
     };
     if !message.forwardable() {
         return Err(error(
             StatusCode::BAD_REQUEST,
             "not_forwardable",
-            "Hanya pesan teks yang bisa diteruskan (media belum didukung)",
+            "Only text messages can be forwarded (media is not supported yet)",
         ));
     }
     // Check every target first so a bad one queues nothing.
@@ -609,19 +609,19 @@ async fn pin_message(
 ) -> Answer {
     let view = session(&context, &id)?;
     if view.status != Status::Connected {
-        return Err(error(StatusCode::CONFLICT, "not_connected", "Nomor belum terhubung"));
+        return Err(error(StatusCode::CONFLICT, "not_connected", "Number is not connected"));
     }
     let length = match body.duration.as_deref() {
         None => store::PinLength::Days7,
         Some(code) => store::PinLength::parse(code)
-            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_duration", "duration harus 24h, 7d atau 30d"))?,
+            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_duration", "duration must be 24h, 7d or 30d"))?,
     };
     let real = view.book.aliases.get(&msg_id).cloned().unwrap_or_else(|| msg_id.clone());
     let Some(chat) = view.book.chats.iter().find(|c| c.messages.iter().any(|m| m.id == real)) else {
-        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Pesan tidak ditemukan"));
+        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Message not found"));
     };
     if real.starts_with("local-") {
-        return Err(error(StatusCode::CONFLICT, "not_sent_yet", "Pesan masih dalam antrean"));
+        return Err(error(StatusCode::CONFLICT, "not_sent_yet", "Message is still queued"));
     }
     let chat = chat.jid.clone();
     send(&context, Command::Pin { id: id.clone(), chat: chat.clone(), msg_id: real.clone(), pinned: body.pinned, length })?;
@@ -648,7 +648,7 @@ async fn put_webhook(_: Authed, State(context): State<Context>, Path(id): Path<S
     let url = body.url.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
     if let Some(url) = &url {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(error(StatusCode::BAD_REQUEST, "invalid_url", "URL harus http:// atau https://"));
+            return Err(error(StatusCode::BAD_REQUEST, "invalid_url", "URL must be http:// or https://"));
         }
     }
     let mut settings = context.shared.lock().map(|s| (*s.settings).clone()).unwrap_or_default();

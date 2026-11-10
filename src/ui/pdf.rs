@@ -14,6 +14,7 @@ use super::fonts::{self, Weight};
 use super::icons;
 use super::theme::{self, R_LG, R_MD};
 use super::widgets::{self, Kind, rich};
+use crate::i18n::tr;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Info {
@@ -223,7 +224,7 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                     icons::show(ui, "file-text", 16.0, p.text_2);
                     ui.add_space(6.0);
                     // The page count first, so the title takes what is left and truncates.
-                    let pages = info.filter(|_| !narrow).map(|info| format!("{} halaman", info.pages));
+                    let pages = info.filter(|_| !narrow).map(|info| crate::trf!("{} pages", "{} halaman", info.pages));
                     let pages_width = pages
                         .as_ref()
                         .map(|text| ui.painter().layout_no_wrap(text.clone(), fonts::ui(12.0, Weight::Regular), p.muted).size().x + 8.0)
@@ -237,30 +238,30 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                     }
                 },
                 |ui| {
-                    close = widgets::icon_button(ui, "x", 28.0, false).on_hover_text("Tutup (Esc)").clicked();
+                    close = widgets::icon_button(ui, "x", 28.0, false).on_hover_text(tr("Close (Esc)", "Tutup (Esc)")).clicked();
                     ui.add_space(8.0);
                     let open_elsewhere = if narrow {
-                        widgets::icon_button(ui, "arrow-up-right", 28.0, false).on_hover_text("Buka di aplikasi lain")
+                        widgets::icon_button(ui, "arrow-up-right", 28.0, false).on_hover_text(tr("Open in another app", "Buka di aplikasi lain"))
                     } else {
-                        widgets::button(ui, None, "Buka di aplikasi lain", Kind::Secondary)
+                        widgets::button(ui, None, tr("Open in another app", "Buka di aplikasi lain"), Kind::Secondary)
                     };
                     if open_elsewhere.clicked() {
                         crate::platform::open(&viewer.file);
                     }
                     ui.add_space(8.0);
                     let at = ZOOMS.iter().position(|z| *z == viewer.zoom).unwrap_or(2);
-                    if widgets::button(ui, None, "+", Kind::Secondary).on_hover_text("Perbesar").clicked() {
+                    if widgets::button(ui, None, "+", Kind::Secondary).on_hover_text(tr("Zoom in", "Perbesar")).clicked() {
                         viewer.zoom = ZOOMS[(at + 1).min(ZOOMS.len() - 1)];
                     }
                     ui.label(rich_zoom(viewer.zoom, &p));
-                    if widgets::button(ui, None, "−", Kind::Secondary).on_hover_text("Perkecil").clicked() {
+                    if widgets::button(ui, None, "−", Kind::Secondary).on_hover_text(tr("Zoom out", "Perkecil")).clicked() {
                         viewer.zoom = ZOOMS[at.saturating_sub(1)];
                     }
                 },
             );
             ui.add_space(8.0);
             let Some(info) = info else {
-                ui.label(rich("Membaca PDF…", 13.0, Weight::Regular, p.muted));
+                ui.label(rich(tr("Reading PDF…", "Membaca PDF…"), 13.0, Weight::Regular, p.muted));
                 return;
             };
             let width = (ui.available_width() - 24.0) * viewer.zoom;
@@ -282,7 +283,7 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                         None => widgets::paint_text(
                             ui,
                             rect,
-                            &format!("Memuat halaman {number}…"),
+                            &crate::trf!("Loading page {number}…", "Memuat halaman {number}…"),
                             fonts::ui(13.0, Weight::Regular),
                             egui::Color32::GRAY,
                             Align::Center,

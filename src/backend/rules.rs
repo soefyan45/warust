@@ -3,6 +3,7 @@
 //! built from a template, and on a 2xx answer an optional reply goes back to
 //! the sender from the number that received the message.
 
+use crate::i18n::tr;
 use regex::RegexBuilder;
 use serde::{Deserialize, Serialize};
 use whatsapp_rust::serde_json::{self, Value};
@@ -25,11 +26,11 @@ impl Op {
 
     pub fn label(self) -> &'static str {
         match self {
-            Op::StartsWith => "diawali dengan",
-            Op::Contains => "berisi",
-            Op::Equals => "sama dengan",
-            Op::Regex => "cocok regex",
-            Op::Any => "apa saja",
+            Op::StartsWith => tr("starts with", "diawali dengan"),
+            Op::Contains => tr("contains", "berisi"),
+            Op::Equals => tr("equals", "sama dengan"),
+            Op::Regex => tr("matches regex", "cocok regex"),
+            Op::Any => tr("anything", "apa saja"),
         }
     }
 }
@@ -50,10 +51,10 @@ impl Kind {
 
     pub fn label(self) -> &'static str {
         match self {
-            Kind::Any => "Semua pesan",
-            Kind::Text => "Teks pesan",
-            Kind::Image => "Gambar + keterangan",
-            Kind::Document => "Dokumen",
+            Kind::Any => tr("All messages", "Semua pesan"),
+            Kind::Text => tr("Message text", "Teks pesan"),
+            Kind::Image => tr("Image + caption", "Gambar + keterangan"),
+            Kind::Document => tr("Document", "Dokumen"),
         }
     }
 }
@@ -75,7 +76,7 @@ pub struct Rule {
     /// `POST` or `PUT`.
     pub method: String,
     pub url: String,
-    /// JSON with `{{placeholders}}`; see `PLACEHOLDERS`.
+    /// JSON with `{{placeholders}}`; see `placeholders()`.
     pub body: String,
     pub reply_enabled: bool,
     /// Plain text with the same placeholders.
@@ -86,7 +87,7 @@ impl Default for Rule {
     fn default() -> Self {
         Self {
             id: String::new(),
-            name: "Aturan baru".to_owned(),
+            name: tr("New rule", "Aturan baru").to_owned(),
             enabled: true,
             kind: Kind::Text,
             op: Op::StartsWith,
@@ -98,23 +99,25 @@ impl Default for Rule {
             url: String::new(),
             body: "{\n  \"teks\": \"{{teks}}\",\n  \"pengirim\": \"{{pengirim.nomor}}\",\n  \"nama\": \"{{pengirim.nama}}\",\n  \"masuk_ke\": \"{{perangkat.nomor}}\"\n}".to_owned(),
             reply_enabled: false,
-            reply: "Terima kasih {{nama}}, pesanmu sedang kami proses.".to_owned(),
+            reply: tr("Thank you {{nama}}, we are processing your message.", "Terima kasih {{nama}}, pesanmu sedang kami proses.").to_owned(),
         }
     }
 }
 
-pub const PLACEHOLDERS: &[(&str, &str)] = &[
-    ("{{teks}}", "isi pesan (keterangan untuk gambar/dokumen)"),
-    ("{{teks.setelah_kata}}", "isi pesan tanpa kata pertama"),
-    ("{{pengirim.nomor}}", "nomor pengirim, mis. 628123456789"),
-    ("{{pengirim.jid}}", "JID pengirim"),
-    ("{{pengirim.nama}}", "nama kontak atau nama profil; {{nama}} sama"),
-    ("{{perangkat.nomor}}", "nomor warust yang menerima"),
-    ("{{perangkat.id}}", "id sesi nomor itu"),
-    ("{{pesan.id}}", "id pesan WhatsApp"),
-    ("{{pesan.jenis}}", "teks, gambar, dokumen, ..."),
-    ("{{waktu}}", "Unix detik"),
-];
+pub fn placeholders() -> [(&'static str, &'static str); 10] {
+    [
+        ("{{teks}}", tr("message text (caption for images/documents)", "isi pesan (keterangan untuk gambar/dokumen)")),
+        ("{{teks.setelah_kata}}", tr("message text without the first word", "isi pesan tanpa kata pertama")),
+        ("{{pengirim.nomor}}", tr("sender number, e.g. 628123456789", "nomor pengirim, mis. 628123456789")),
+        ("{{pengirim.jid}}", tr("sender JID", "JID pengirim")),
+        ("{{pengirim.nama}}", tr("contact name or profile name; {{nama}} is the same", "nama kontak atau nama profil; {{nama}} sama")),
+        ("{{perangkat.nomor}}", tr("the warust number that received it", "nomor warust yang menerima")),
+        ("{{perangkat.id}}", tr("session id of that number", "id sesi nomor itu")),
+        ("{{pesan.id}}", tr("WhatsApp message id", "id pesan WhatsApp")),
+        ("{{pesan.jenis}}", tr("text, image, document, ...", "teks, gambar, dokumen, ...")),
+        ("{{waktu}}", tr("Unix seconds", "Unix detik")),
+    ]
+}
 
 /// An incoming message, as rules see it.
 #[derive(Clone, Debug, Default)]
@@ -174,21 +177,21 @@ impl Rule {
     /// Why the rule cannot be saved, if it cannot.
     pub fn problem(&self) -> Option<String> {
         if self.name.trim().is_empty() {
-            return Some("Nama aturan kosong".to_owned());
+            return Some(tr("The rule name is empty", "Nama aturan kosong").to_owned());
         }
         if !(self.url.starts_with("http://") || self.url.starts_with("https://")) {
-            return Some(format!("{}: URL tujuan harus http:// atau https://", self.name));
+            return Some(crate::trf!("{}: the target URL must be http:// or https://", "{}: URL tujuan harus http:// atau https://", self.name));
         }
         if self.op != Op::Any && self.op != Op::Equals && self.value.trim().is_empty() {
-            return Some(format!("{}: isi kata/pola kondisi", self.name));
+            return Some(crate::trf!("{}: fill in the condition word/pattern", "{}: isi kata/pola kondisi", self.name));
         }
         if self.op == Op::Regex {
             if let Err(e) = RegexBuilder::new(self.value.trim()).size_limit(1 << 20).build() {
-                return Some(format!("{}: regex tidak valid ({e})", self.name));
+                return Some(crate::trf!("{}: invalid regex ({e})", "{}: regex tidak valid ({e})", self.name));
             }
         }
         if let Err(e) = serde_json::from_str::<Value>(&render(&self.body, &Incoming::sample(), true)) {
-            return Some(format!("{}: body bukan JSON yang valid ({e})", self.name));
+            return Some(crate::trf!("{}: the body is not valid JSON ({e})", "{}: body bukan JSON yang valid ({e})", self.name));
         }
         None
     }
@@ -196,13 +199,13 @@ impl Rule {
     /// One line for the rule list: `teks diawali "REGISTER"`.
     pub fn summary(&self) -> String {
         let what = match self.kind {
-            Kind::Any => "pesan",
-            Kind::Text => "teks",
-            Kind::Image => "gambar",
-            Kind::Document => "dokumen",
+            Kind::Any => tr("message", "pesan"),
+            Kind::Text => tr("text", "teks"),
+            Kind::Image => tr("image", "gambar"),
+            Kind::Document => tr("document", "dokumen"),
         };
         match self.op {
-            Op::Any => format!("setiap {what} masuk"),
+            Op::Any => crate::trf!("every incoming {what}", "setiap {what} masuk"),
             op => format!("{what} {} \"{}\"", op.label(), self.value.trim()),
         }
     }
