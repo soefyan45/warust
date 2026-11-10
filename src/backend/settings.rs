@@ -134,6 +134,9 @@ pub struct Settings {
     pub notify: Notify,
     /// Let contacts see "sedang mengetik" while a reply is being typed.
     pub typing: bool,
+    /// Opening a chat sends read receipts (blue ticks) and syncs "read" to
+    /// the phone. Off by default (it only clears the local badge).
+    pub send_read: bool,
 }
 
 impl Default for Settings {
@@ -149,6 +152,7 @@ impl Default for Settings {
             status_seen_off: Vec::new(),
             notify: Notify::default(),
             typing: true,
+            send_read: false,
         }
     }
 }
@@ -245,5 +249,14 @@ mod tests {
         assert!(!old.api.enabled && old.api.key.starts_with("wr_"));
         assert_eq!(old.sending.gap(), Duration::from_secs(4));
         assert_eq!(Sending { gap_secs: 1, jitter_secs: 0 }.gap(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn send_read_is_off_unless_set() {
+        assert!(!Settings::default().send_read);
+        let old: Settings = serde_json::from_str(r#"{"typing":false}"#).unwrap();
+        assert!(!old.send_read);
+        let on: Settings = serde_json::from_str(r#"{"send_read":true}"#).unwrap();
+        assert!(on.send_read);
     }
 }
