@@ -1053,7 +1053,7 @@ enum MediaClick {
 
 const PREVIEW_HEIGHT: f32 = 140.0;
 
-const CARD: egui::Vec2 = egui::Vec2::new(260.0, 48.0);
+const CARD: egui::Vec2 = egui::Vec2::new(260.0, 52.0);
 const STICKER: egui::Vec2 = egui::Vec2::new(150.0, 150.0);
 
 impl MediaBox {
@@ -1388,26 +1388,99 @@ fn open_file(path: &Path) {
     crate::platform::open(path);
 }
 
-/// Paints the media part of a bubble at `rect`; returns true when the user
-/// asked to download it.
-/// The icon, name and detail row of a file in a bubble.
-fn paint_card(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, detail: &str) {
+/// What sort of file a message carries, for its tile (Pego: the icon's color
+/// follows the file type).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum FileType {
+    Pdf,
+    Sheet,
+    Picture,
+    Video,
+    Archive,
+    Other,
+}
+
+/// The file's extension in lower case, from its name or its saved file.
+fn file_extension(media: &Media) -> Option<String> {
+    let from = |path: &Path| path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase);
+    media.name.as_deref().map(Path::new).and_then(from).or_else(|| media.file.as_deref().and_then(from))
+}
+
+fn file_type(media: &Media) -> FileType {
+    match media.kind.as_str() {
+        "image" | "sticker" => return FileType::Picture,
+        "video" => return FileType::Video,
+        _ => {}
+    }
+    match file_extension(media).as_deref() {
+        Some("pdf") => FileType::Pdf,
+        Some("xls" | "xlsx" | "xlsm" | "csv" | "ods" | "numbers") => FileType::Sheet,
+        Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "bmp" | "svg") => FileType::Picture,
+        Some("mp4" | "mov" | "mkv" | "webm" | "avi" | "3gp") => FileType::Video,
+        Some("zip" | "rar" | "7z" | "tar" | "gz" | "tgz" | "bz2" | "xz") => FileType::Archive,
+        _ => FileType::Other,
+    }
+}
+
+/// The tile behind a file's icon: the icon and its fill and glyph colors.
+/// An outgoing file sits on the dark bubble, so its tile is the accent.
+fn file_tile(p: &Palette, kind: FileType, from_me: bool) -> (&'static str, Color32, Color32) {
+    let icon = match kind {
+        FileType::Sheet => "file-spreadsheet",
+        FileType::Picture => "image",
+        FileType::Video => "video",
+        FileType::Archive => "file-archive",
+        FileType::Pdf | FileType::Other => "file-text",
+    };
+    if from_me {
+        return (icon, p.accent, p.primary);
+    }
+    let (fill, glyph) = match kind {
+        FileType::Pdf => (p.red_soft, p.red),
+        FileType::Sheet => (p.accent_soft, p.accent_text),
+        FileType::Picture | FileType::Video => (p.blue_soft, p.blue),
+        FileType::Archive => (p.orange_soft, p.amber),
+        FileType::Other => (p.raised, p.text_2),
+    };
+    (icon, fill, glyph)
+}
+
+/// The start of a file's detail line: its extension in capitals.
+fn file_label(media: &Media) -> Option<String> {
+    file_extension(media).filter(|e| e.len() <= 5).map(|e| e.to_ascii_uppercase())
+}
+
+/// A file in a bubble (Pego `FM/File/Bubble`): a tile colored by file type,
+/// the name and the detail line, and a round download button while the file
+/// isn't saved yet.
+fn paint_card(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, detail: &str, state: MediaState) {
     let (fg, sub) = if m.from_me { (p.on_primary, p.on_primary_muted) } else { (p.text, p.muted) };
     let back = if m.from_me { p.on_primary_muted.gamma_multiply(0.25) } else { p.panel };
-    ui.painter().rect_filled(rect, R_MD, back);
-    let icon = match media.kind.as_str() {
-        "image" => "image",
-        "video" => "video",
-        "sticker" => "sticker",
-        _ => "file-text",
-    };
-    let icon_rect = Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 10.0), vec2(20.0, 20.0));
-    icons::paint(ui, icon_rect, icon, 20.0, fg);
-    let text_left = rect.left() + 40.0;
-    let name = Rect::from_min_max(pos2(text_left, rect.top() + 7.0), pos2(rect.right() - 10.0, rect.top() + 25.0));
-    widgets::paint_text(ui, name, &media_title(media), fonts::ui(13.0, Weight::Medium), fg, Align::Min);
-    let line = Rect::from_min_max(pos2(text_left, rect.top() + 25.0), pos2(rect.right() - 10.0, rect.bottom() - 5.0));
+    ui.painter().rect_filled(rect, 10.0, back);
+    let (icon, fill, glyph) = file_tile(p, file_type(media), m.from_me);
+    let tile = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 20.0), vec2(40.0, 40.0));
+    ui.painter().rect_filled(tile, 4.0, fill);
+    icons::paint(ui, tile, icon, 20.0, glyph);
+    let button = matches!(state, MediaState::Download | MediaState::Downloading | MediaState::Retry);
+    let text_left = tile.right() + 10.0;
+    let text_right = rect.right() - if button { 48.0 } else { 10.0 };
+    let name = Rect::from_min_max(pos2(text_left, rect.center().y - 18.0), pos2(text_right, rect.center().y));
+    widgets::paint_text(ui, name, &media_title(media), fonts::ui(13.0, Weight::SemiBold), fg, Align::Min);
+    let line = Rect::from_min_max(pos2(text_left, rect.center().y + 1.0), pos2(text_right, rect.center().y + 18.0));
     widgets::paint_text(ui, line, detail, fonts::ui(12.0, Weight::Regular), sub, Align::Min);
+    if button {
+        let center = pos2(rect.right() - 22.0, rect.center().y);
+        let hovered = ui.rect_contains_pointer(rect);
+        let radius = if hovered { 16.8 } else { 16.0 };
+        let (disc, mark) = if m.from_me { (p.primary, p.on_primary) } else { (p.bubble_in, p.primary) };
+        ui.painter().circle_filled(center, radius, disc);
+        let at = Rect::from_center_size(center, vec2(16.0, 16.0));
+        match state {
+            MediaState::Downloading => icons::paint(ui, at, "loader-circle", 16.0, mark),
+            MediaState::Retry => icons::paint(ui, at, "rotate-cw", 16.0, p.red),
+            _ => icons::paint(ui, at, "download", 16.0, mark),
+        }
+    }
 }
 
 /// The top of a document's first page, filling `rect` edge to edge.
@@ -1474,11 +1547,14 @@ fn paint_media(
             }
         }
         MediaBox::Card => {
-            let detail = match media.size {
-                Some(size) => format!("{} · {action}", human_size(size)),
-                None => action.to_owned(),
-            };
-            paint_card(ui, p, rect, m, media, &detail);
+            let mut parts: Vec<String> = file_label(media).into_iter().collect();
+            if let Some(size) = media.size {
+                parts.push(human_size(size));
+            }
+            if state == MediaState::Unavailable || parts.is_empty() {
+                parts.push(action.to_owned());
+            }
+            paint_card(ui, p, rect, m, media, &parts.join(" · "), state);
         }
         MediaBox::Voice(_) => unreachable!("drawn by paint_voice above"),
         MediaBox::Call => unreachable!("drawn by paint_call_log above"),
@@ -1509,8 +1585,10 @@ fn paint_media(
             if let Some(size) = media.size {
                 parts.push(human_size(size));
             }
-            parts.push(if state == MediaState::Open && file.is_some() { tr("View", "Lihat").to_owned() } else { action.to_owned() });
-            paint_card(ui, p, card, m, media, &parts.join(" · "));
+            if state == MediaState::Unavailable {
+                parts.push(action.to_owned());
+            }
+            paint_card(ui, p, card, m, media, &parts.join(" · "), state);
         }
     }
     let hint = match downloads.get(&m.id) {
@@ -3509,6 +3587,33 @@ mod wave_tests {
 #[cfg(test)]
 mod finder_paste_tests {
     use super::*;
+
+    fn document(name: &str) -> Media {
+        Media {
+            kind: "document".into(),
+            name: Some(name.into()),
+            size: None,
+            width: None,
+            height: None,
+            thumb: None,
+            file: None,
+            seconds: None,
+            waveform: Vec::new(),
+            voice: false,
+            raw: whatsapp_rust::serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn file_tiles_follow_the_file_type() {
+        assert_eq!(file_type(&document("Daftar-pesanan.PDF")), FileType::Pdf);
+        assert_eq!(file_type(&document("Katalog-produk-2026.xlsx")), FileType::Sheet);
+        assert_eq!(file_type(&document("Bukti-transfer.jpg")), FileType::Picture);
+        assert_eq!(file_type(&document("Foto-produk.zip")), FileType::Archive);
+        assert_eq!(file_type(&document("notes")), FileType::Other);
+        assert_eq!(file_label(&document("Katalog.xlsx")).as_deref(), Some("XLSX"));
+        assert_eq!(file_label(&document("notes")), None);
+    }
 
     #[test]
     fn finder_copy_is_a_file_not_its_name() {
