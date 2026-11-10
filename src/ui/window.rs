@@ -26,13 +26,19 @@ const BUTTONS_X: f64 = 18.0;
 /// from the window's left edge: past the buttons; 0 in full screen (the
 /// buttons hide) and on other systems.
 pub fn buttons_inset(ctx: &Context) -> f32 {
-    let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-    if NATIVE && !fullscreen { 92.0 } else { 0.0 }
+    if NATIVE && !is_fullscreen(ctx) { 92.0 } else { 0.0 }
+}
+
+/// Whether the window is in full screen, where AppKit moves the title bar
+/// into a window of its own and the buttons must be left to it.
+pub fn is_fullscreen(ctx: &Context) -> bool {
+    ctx.input(|i| i.viewport().fullscreen.unwrap_or(false))
 }
 
 /// Centres the macOS window buttons in the app's top bar (`bar` points tall)
 /// and moves them to `BUTTONS_X`. AppKit lays them out again on resize and
-/// full screen, so this runs every frame and only writes what changed.
+/// full screen, so this runs every frame and only writes what changed. Not
+/// called in full screen (see `is_fullscreen`).
 #[cfg(target_os = "macos")]
 pub fn place_buttons(frame: &eframe::Frame, bar: f32) {
     use objc2_app_kit::{NSView, NSWindowButton};

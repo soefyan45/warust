@@ -692,7 +692,10 @@ impl eframe::App for App {
         }
         // Heights of compact::title_bar, topnav and the sidebar/topbar row.
         let bar = if compact { 40.0 } else if theme::template().top_nav() { 72.0 } else { 52.0 };
-        window::place_buttons(frame, bar);
+        // In full screen the title bar lives in AppKit's own toolbar window.
+        if !window::is_fullscreen(ui.ctx()) {
+            window::place_buttons(frame, bar);
+        }
         let p = theme::palette(ui.ctx());
         let mut action = None;
         let mut pairing_action = None;
