@@ -66,11 +66,14 @@ pub struct VoiceNote {
     /// What was recorded so far, on its way from the recording thread to be
     /// heard while paused.
     pub preview: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+    /// Phone layout: the mic is held down (Pego `m5/VN 1`). Letting go sends,
+    /// sliding left cancels, sliding up locks it into the normal recorder.
+    pub held: bool,
 }
 
 impl VoiceNote {
     pub fn new(session: &str, chat: &str, step: VoiceStep) -> Self {
-        Self { session: session.to_owned(), chat: chat.to_owned(), step, wave: Vec::new(), sampled: None, preview: None }
+        Self { session: session.to_owned(), chat: chat.to_owned(), step, wave: Vec::new(), sampled: None, preview: None, held: false }
     }
 }
 
