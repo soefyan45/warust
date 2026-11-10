@@ -73,6 +73,11 @@ pub struct ChatMsg {
     pub media: Option<Media>,
     /// What this message replies to; for now only our replies to a status.
     pub quote: Option<Quote>,
+    /// JIDs it mentions, as WhatsApp sent them (`…@s.whatsapp.net` or
+    /// `…@lid`); the text holds `@<user part>` for each. Record key `men`.
+    pub mentions: Vec<String>,
+    /// An incoming group message that mentions this number. Record key `mme`.
+    pub mentions_me: bool,
     /// Shown as "Diteruskan": it came in forwarded, or we forwarded it.
     pub forwarded: bool,
 }
@@ -227,9 +232,31 @@ impl Chat {
     }
 
     /// A private chat whose last message is from the contact and that is not
-    /// marked done ("Perlu balas").
+    /// marked done ("Perlu balas"); a group only while `mention_pending`.
     pub fn needs_reply(&self) -> bool {
-        !self.is_group() && self.messages.last().is_some_and(|m| !m.from_me) && !self.is_done()
+        if self.is_group() {
+            return self.mention_pending();
+        }
+        self.messages.last().is_some_and(|m| !m.from_me) && !self.is_done()
+    }
+
+    /// A group message mentioning this number came after our last message in
+    /// the chat and after it was marked done (the `@` badge).
+    pub fn mention_pending(&self) -> bool {
+        if !self.is_group() {
+            return false;
+        }
+        // Newest first: stop at our own message or at anything already done.
+        let done_at = self.done_at.unwrap_or(0);
+        for m in self.messages.iter().rev() {
+            if m.from_me || m.ts <= done_at {
+                return false;
+            }
+            if m.mentions_me {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn last_ts(&self) -> i64 {
@@ -314,6 +341,53 @@ impl Book {
             .get(&jid)
             .or_else(|| self.push_names.get(&jid))
             .map(String::as_str)
+    }
+
+    /// `text` with each `@<user part>` of `mentions` shown as `@<name>`. A
+    /// token only counts at a word boundary on both sides (`@6281` is not in
+    /// `@62812`); a mention with no known name shows the masked number.
+    pub fn with_mention_names(&self, text: &str, mentions: &[String]) -> String {
+        if mentions.is_empty() || !text.contains('@') {
+            return text.to_owned();
+        }
+        let user = |jid: &str| {
+            let u = jid.split('@').next().unwrap_or(jid);
+            u.split(':').next().unwrap_or(u).to_owned()
+        };
+        let named: Vec<(String, String)> = mentions
+            .iter()
+            .map(|jid| (user(jid), self.name_of(jid).filter(|n| !n.is_empty()).map(str::to_owned).unwrap_or_else(|| short_jid(jid))))
+            .filter(|(token, _)| !token.is_empty())
+            .collect();
+        let mut out = String::with_capacity(text.len());
+        let mut prev: Option<char> = None;
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            let hit = (c == '@' && prev.is_none_or(|p| !p.is_alphanumeric()))
+                .then(|| {
+                    named
+                        .iter()
+                        .filter(|(token, _)| {
+                            rest[1..].strip_prefix(token.as_str()).is_some_and(|after| after.chars().next().is_none_or(|n| !n.is_alphanumeric()))
+                        })
+                        .max_by_key(|(token, _)| token.len())
+                })
+                .flatten();
+            match hit {
+                Some((token, name)) => {
+                    out.push('@');
+                    out.push_str(name);
+                    prev = name.chars().next_back();
+                    rest = &rest[1 + token.len()..];
+                }
+                None => {
+                    out.push(c);
+                    prev = Some(c);
+                    rest = &rest[c.len_utf8()..];
+                }
+            }
+        }
+        out
     }
 
     /// Status updates of the last 24 hours by poster (normalized JID, or
@@ -426,6 +500,12 @@ impl Book {
                             status: q.get("st").and_then(Value::as_bool).unwrap_or(false),
                         })
                     }),
+                    mentions: record
+                        .get("men")
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(|j| j.as_str().map(str::to_owned)).collect())
+                        .unwrap_or_default(),
+                    mentions_me: record.get("mme").and_then(Value::as_bool).unwrap_or(false),
                     forwarded: record.get("fw").and_then(Value::as_bool).unwrap_or(false),
                 };
                 let unread = record.get("unread").and_then(Value::as_bool).unwrap_or(false);
@@ -562,6 +642,21 @@ impl Book {
     }
 }
 
+/// Short, masked form of a JID for small labels; never a full number.
+pub fn short_jid(jid: &str) -> String {
+    let jid = bare(jid);
+    let jid = jid.as_str();
+    let user = jid.split('@').next().unwrap_or(jid);
+    let tail: String = user.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    if jid.ends_with("@s.whatsapp.net") {
+        super::session::mask_phone(jid)
+    } else if jid.ends_with("@g.us") {
+        format!("grup …{tail}")
+    } else {
+        format!("lid …{tail}")
+    }
+}
+
 /// `user:device@server` → `user@server`.
 pub fn bare(jid: &str) -> String {
     match jid.split_once('@') {
@@ -627,6 +722,20 @@ pub fn msg_record(chat: &str, id: &str, from_me: bool, from: &str, text: &str, t
 pub fn with_media(mut record: Value, media: Option<Value>) -> Value {
     if let (Some(media), Some(object)) = (media, record.as_object_mut()) {
         object.insert("media".to_owned(), media);
+    }
+    record
+}
+
+/// Adds who the message mentions (`men`) and whether it mentions this number
+/// (`mme`); keys are left out when empty/false so old files stay the same.
+pub fn with_mentions(mut record: Value, mentions: &[String], mentions_me: bool) -> Value {
+    if let Some(object) = record.as_object_mut() {
+        if !mentions.is_empty() {
+            object.insert("men".to_owned(), json!(mentions));
+        }
+        if mentions_me {
+            object.insert("mme".to_owned(), true.into());
+        }
     }
     record
 }
@@ -810,6 +919,52 @@ mod tests {
     }
 
     #[test]
+    fn mentions_round_trip_and_old_records_load() {
+        let chat = "123@g.us";
+        let men = vec!["628111@s.whatsapp.net".to_owned(), "99@lid".to_owned()];
+        let rec = with_mentions(msg_record(chat, "a", false, "5@lid", "@628111 @99", 10, &Delivery::Received, false), &men, true);
+        let b = book(&[rec, msg_record(chat, "b", false, "5@lid", "plain", 11, &Delivery::Received, false)]);
+        let (a, plain) = (&b.chats[0].messages[0], &b.chats[0].messages[1]);
+        assert_eq!(a.mentions, men);
+        assert!(a.mentions_me);
+        assert!(plain.mentions.is_empty() && !plain.mentions_me);
+        let bare_rec = with_mentions(msg_record(chat, "c", true, "", "x", 1, &Delivery::Sent, false), &[], false);
+        assert!(bare_rec.get("men").is_none() && bare_rec.get("mme").is_none());
+    }
+
+    #[test]
+    fn mention_pending_until_we_reply_or_mark_done() {
+        let chat = "123@g.us";
+        let m = |id: &str, ts: i64| with_mentions(msg_record(chat, id, false, "5@lid", "@me", ts, &Delivery::Received, false), &[], true);
+        let other = |id: &str, ts: i64| msg_record(chat, id, false, "5@lid", "obrolan", ts, &Delivery::Received, false);
+        let mine = |id: &str, ts: i64| msg_record(chat, id, true, "", "ok", ts, &Delivery::Sent, false);
+        let b = book(&[other("o", 5), m("a", 10), other("o2", 12)]);
+        assert!(b.chats[0].mention_pending() && b.chats[0].needs_reply());
+        let b = book(&[other("o", 5)]);
+        assert!(!b.chats[0].mention_pending() && !b.chats[0].needs_reply(), "plain group chatter is not a reply");
+        let b = book(&[m("a", 10), mine("r", 15)]);
+        assert!(!b.chats[0].mention_pending(), "we replied");
+        let b = book(&[m("a", 10), done_record(chat, 10)]);
+        assert!(!b.chats[0].mention_pending(), "done at the mention's time");
+        let b = book(&[m("a", 10), done_record(chat, 20), m("b", 30)]);
+        assert!(b.chats[0].mention_pending(), "a newer mention reopens it");
+        let b = book(&[m("a", 10), mine("r", 15), m("b", 20)]);
+        assert!(b.chats[0].mention_pending());
+        // A mention that mentions_me only counts when incoming.
+        let own = with_mentions(msg_record(chat, "x", true, "", "@me", 40, &Delivery::Sent, false), &[], true);
+        assert!(!book(&[own]).chats[0].mention_pending());
+    }
+
+    #[test]
+    fn private_chat_ignores_mentions() {
+        let chat = "628111000001@s.whatsapp.net";
+        let rec = with_mentions(msg_record(chat, "a", false, chat, "x", 10, &Delivery::Received, false), &[], true);
+        let b = book(&[rec]);
+        assert!(!b.chats[0].mention_pending());
+        assert!(b.chats[0].needs_reply(), "private rule unchanged");
+    }
+
+    #[test]
     fn pins_expire_and_unpin() {
         let chat = "628111@s.whatsapp.net";
         let msg = |id: &str, ts: i64| msg_record(chat, id, false, chat, "x", ts, &Delivery::Received, false);
@@ -886,6 +1041,34 @@ mod tests {
         assert_eq!(b.chats.len(), 1);
         assert_eq!(b.name_of("9@s.whatsapp.net"), Some("Budi Kantor"));
         assert_eq!(b.name_of("9:2@s.whatsapp.net"), Some("Budi Kantor"));
+    }
+
+    #[test]
+    fn mention_tokens_become_names() {
+        let b = book(&[push_record("6281@s.whatsapp.net", "Budi"), push_record("6282@s.whatsapp.net", "Ani")]);
+        let men = vec!["6281@s.whatsapp.net".to_owned()];
+        assert_eq!(b.with_mention_names("halo @6281 apa", &men), "halo @Budi apa");
+        assert_eq!(b.with_mention_names("@6281", &men), "@Budi");
+        let two = vec!["6281@s.whatsapp.net".to_owned(), "6282@s.whatsapp.net".to_owned()];
+        assert_eq!(b.with_mention_names("@6281 @6282 cek", &two), "@Budi @Ani cek");
+    }
+
+    #[test]
+    fn mention_names_respect_word_boundaries() {
+        let b = book(&[push_record("6281@s.whatsapp.net", "Budi")]);
+        let men = vec!["6281@s.whatsapp.net".to_owned()];
+        assert_eq!(b.with_mention_names("@62812 dan a@6281", &men), "@62812 dan a@6281");
+        assert_eq!(b.with_mention_names("@6281, ok", &men), "@Budi, ok");
+    }
+
+    #[test]
+    fn unknown_mention_name_is_masked() {
+        let b = book(&[push_record("6281@s.whatsapp.net", "Budi")]);
+        let men = vec!["628121234410@s.whatsapp.net".to_owned(), "6281@s.whatsapp.net".to_owned()];
+        let out = b.with_mention_names("@628121234410 @6281", &men);
+        assert_eq!(out, "@+62 812-****-4410 @Budi");
+        assert!(!out.contains("628121234410"));
+        assert_eq!(b.with_mention_names("tanpa mention", &men), "tanpa mention");
     }
 
     #[test]

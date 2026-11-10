@@ -16,7 +16,6 @@ use super::icons;
 use super::theme::{self, Palette};
 use super::widgets::rich;
 use crate::backend::{Book, Chat, mask_phone};
-use crate::backend::store::bare;
 
 /// Page title and one-line description, shared by the screens.
 pub fn page_head(ui: &mut Ui, title: &str, desc: &str) {
@@ -74,20 +73,7 @@ pub fn empty_state(ui: &mut Ui, p: &Palette, icon: &str, title: &str, desc: &str
     });
 }
 
-/// Short, masked form of a JID for small labels.
-pub fn short_jid(jid: &str) -> String {
-    let jid = bare(jid);
-    let jid = jid.as_str();
-    let user = jid.split('@').next().unwrap_or(jid);
-    let tail: String = user.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
-    if jid.ends_with("@s.whatsapp.net") {
-        mask_phone(jid)
-    } else if jid.ends_with("@g.us") {
-        format!("grup …{tail}")
-    } else {
-        format!("lid …{tail}")
-    }
-}
+pub use crate::backend::short_jid;
 
 /// Contact or group name, else the masked number.
 pub fn chat_title(book: &Book, chat: &Chat) -> String {

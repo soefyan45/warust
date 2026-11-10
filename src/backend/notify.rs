@@ -89,10 +89,11 @@ pub(crate) fn content(book: &Book, chat: &str, sender: &str, push_name: &str, te
 
 /// Shows (or updates) the chat's notification for a message that just came in.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, sender: &str, push_name: &str, text: &str, group: bool) {
+pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, sender: &str, push_name: &str, text: &str, group: bool, mentioned: bool) {
     let settings = state.settings();
     let notify = &settings.notify;
-    if !notify.enabled || (group && !notify.groups) {
+    // A mention gets through even when group notifications are off.
+    if !notify.enabled || (group && !notify.groups && !mentioned) {
         return;
     }
     let jid = book.normalize(chat);
@@ -102,7 +103,10 @@ pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, 
     }
     let (via, several) = state.session_name(session).unwrap_or_default();
     let unread = book.chats.iter().find(|c| c.jid == jid).map(|c| c.unread).unwrap_or(1);
-    let (title, body) = content(book, &jid, sender, push_name, text, group, several.then_some(via.as_str()), notify.preview, unread);
+    let (title, mut body) = content(book, &jid, sender, push_name, text, group, several.then_some(via.as_str()), notify.preview, unread);
+    if mentioned {
+        body = format!("Menyebut kamu: {body}");
+    }
     if notify.sound {
         play_sound();
     }
