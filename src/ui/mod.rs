@@ -82,6 +82,8 @@ pub struct State {
     pub qr: Option<qr::Qr>,
     /// Session waiting for the user to confirm its removal.
     pub confirm_remove: Option<String>,
+    /// "Tautkan ulang" waiting for a yes: it deletes the number's keys.
+    pub confirm_relink: Option<String>,
     /// The saved settings, for screens that show them (webhook per number).
     pub settings: std::sync::Arc<backend::Settings>,
     /// Settings being edited on the Pengaturan and Webhook & API screens.
@@ -470,57 +472,97 @@ impl App {
         self.screen = Screen::Nomor;
     }
 
+    fn relink(&mut self, id: String) {
+        self.backend.send(Command::Relink { id: id.clone() });
+        self.open_pairing(id);
+    }
+
     fn confirm_remove(&mut self, ctx: &egui::Context) {
         let Some(id) = self.state.confirm_remove.clone() else {
             return;
         };
-        let Some(session) = self.sessions.iter().find(|s| s.id == id).cloned() else {
+        let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
             self.state.confirm_remove = None;
             return;
         };
-        let p = theme::palette(ctx);
-        let mut close = false;
-        egui::Modal::new(egui::Id::unique("confirm_remove"))
-            .frame(
-                Frame::NONE
-                    .fill(p.panel)
-                    .stroke(Stroke::new(1.0, p.border_strong))
-                    .corner_radius(theme::R_LG)
-                    .inner_margin(Margin::same(24)),
-            )
-            .show(ctx, |ui| {
-                ui.set_width(380.0);
-                ui.spacing_mut().item_spacing.y = 12.0;
-                ui.label(rich(&format!("Hapus {}?", session.name), 16.0, Weight::SemiBold, p.text));
-                ui.add(
-                    egui::Label::new(rich(
-                        "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus. Tidak bisa dibatalkan; untuk memakai nomor ini lagi harus pairing ulang.",
-                        13.0,
-                        Weight::Regular,
-                        p.text_2,
-                    ))
-                    .wrap(),
-                );
-                ui.add_space(4.0);
-                widgets::row(
-                    ui,
-                    32.0,
-                    |_| {},
-                    |ui| {
-                        if widgets::button(ui, Some("x"), "Hapus", Kind::Primary).clicked() {
-                            self.backend.send(Command::Remove { id: id.clone() });
-                            close = true;
-                        }
-                        if widgets::button(ui, None, "Batal", Kind::Secondary).clicked() {
-                            close = true;
-                        }
-                    },
-                );
-            });
-        if close {
+        let answer = confirm(
+            ctx,
+            "confirm_remove",
+            &format!("Hapus {}?", session.name),
+            "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus. Tidak bisa dibatalkan; untuk memakai nomor ini lagi harus pairing ulang.",
+            "x",
+            "Hapus",
+        );
+        if answer == Some(true) {
+            self.backend.send(Command::Remove { id });
+        }
+        if answer.is_some() {
             self.state.confirm_remove = None;
         }
     }
+
+    fn confirm_relink(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.state.confirm_relink.clone() else {
+            return;
+        };
+        let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
+            self.state.confirm_relink = None;
+            return;
+        };
+        let answer = confirm(
+            ctx,
+            "confirm_relink",
+            &format!("Tautkan ulang {}?", session.name),
+            "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus, lalu QR baru ditampilkan. Nomor ini terputus sampai dipindai lagi dari HP. Chat tetap tersimpan.",
+            "rotate-cw",
+            "Tautkan ulang",
+        );
+        if answer == Some(true) {
+            self.relink(id);
+        }
+        if answer.is_some() {
+            self.state.confirm_relink = None;
+        }
+    }
+}
+
+/// A yes/no dialog for a step that cannot be undone: `Some(true)` when
+/// confirmed, `Some(false)` when cancelled, `None` while it is open.
+fn confirm(ctx: &egui::Context, salt: &str, title: &str, text: &str, icon: &str, label: &str) -> Option<bool> {
+    let p = theme::palette(ctx);
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::unique(salt))
+        .frame(
+            Frame::NONE
+                .fill(p.panel)
+                .stroke(Stroke::new(1.0, p.border_strong))
+                .corner_radius(theme::R_LG)
+                .inner_margin(Margin::same(24)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.spacing_mut().item_spacing.y = 12.0;
+            ui.label(rich(title, 16.0, Weight::SemiBold, p.text));
+            ui.add(egui::Label::new(rich(text, 13.0, Weight::Regular, p.text_2)).wrap());
+            ui.add_space(4.0);
+            widgets::row(
+                ui,
+                32.0,
+                |_| {},
+                |ui| {
+                    if widgets::button(ui, Some(icon), label, Kind::Primary).clicked() {
+                        answer = Some(true);
+                    }
+                    if widgets::button(ui, None, "Batal", Kind::Secondary).clicked() {
+                        answer = Some(false);
+                    }
+                },
+            );
+        });
+    if answer.is_none() && modal.should_close() {
+        answer = Some(false);
+    }
+    answer
 }
 
 /// "API berjalan v0.1.0" in a white pill (Forest top bar).
@@ -784,8 +826,12 @@ impl eframe::App for App {
             Some(screens::nomor::Action::Add) => self.add_number(),
             Some(screens::nomor::Action::Open(id)) => self.open_pairing(id),
             Some(screens::nomor::Action::Relink(id)) => {
-                self.backend.send(Command::Relink { id: id.clone() });
-                self.open_pairing(id);
+                // A linked number loses its keys, so that asks first.
+                if self.sessions.iter().any(|s| s.id == id && s.phone.is_some()) {
+                    self.state.confirm_relink = Some(id);
+                } else {
+                    self.relink(id);
+                }
             }
             Some(screens::nomor::Action::Logout(id)) => self.backend.send(Command::Logout { id }),
             Some(screens::nomor::Action::Remove(id)) => self.state.confirm_remove = Some(id),
@@ -800,6 +846,7 @@ impl eframe::App for App {
             }
         }
         self.confirm_remove(ui.ctx());
+        self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
         // "Sedang mengetik" for the chat on screen while its reply is typed.
         let open_chat = if self.screen == Screen::Inbox {
