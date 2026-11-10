@@ -26,7 +26,7 @@ const BUTTONS_X: f64 = 18.0;
 /// buttons hide) and on other systems.
 pub fn buttons_inset(ctx: &Context) -> f32 {
     let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
-    if NATIVE && !fullscreen { 84.0 } else { 0.0 }
+    if NATIVE && !fullscreen { 92.0 } else { 0.0 }
 }
 
 /// Centres the macOS window buttons in the app's top bar (`bar` points tall)
