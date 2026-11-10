@@ -75,11 +75,8 @@ Unduh dari [Releases](https://github.com/soefyan45/warust/releases/latest):
 | Windows 10/11 (x86_64) | `warust-<versi>-windows-x86_64.zip` | Ekstrak, jalankan `warust.exe` |
 | macOS 11+ (Apple Silicon dan Intel) | `warust-<versi>-macos-universal.dmg` | Buka, seret **warust** ke Applications |
 
-Aplikasi belum ditandatangani sertifikat pengembang:
-
-- **macOS** menyebut "pengembang tidak dikenal". Klik kanan warust di Applications → **Buka** → **Buka**
-  (sekali saja), atau jalankan `xattr -dr com.apple.quarantine /Applications/warust.app`.
-- **Windows** SmartScreen: klik **Info selengkapnya** → **Tetap jalankan**.
+Versi macOS ditandatangani Developer ID dan dinotarisasi Apple, jadi langsung bisa dibuka.
+Versi Windows belum ditandatangani: di SmartScreen klik **Info selengkapnya** → **Tetap jalankan**.
 
 Data (kunci sesi, chat, media, pengaturan, API key) disimpan di folder per pengguna:
 `~/.local/share/warust` (Linux), `~/Library/Application Support/warust` (macOS), atau
