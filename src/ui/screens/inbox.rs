@@ -168,7 +168,7 @@ pub fn show(
             let to = super::chat_title(&book, chat);
             let (id, jid) = (session.id.clone(), chat.jid.clone());
             match composer(ui, &p, state, &to, session, &book, several, false) {
-                Some(Outgoing::Text(text)) => commands.push(Command::Send { id, chat: jid, text }),
+                Some(Outgoing::Text(text)) => commands.push(Command::Send { id, chat: jid, text, mentions: Vec::new() }),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
                 None => {}
@@ -1690,7 +1690,7 @@ fn compact_chat(
             }
             let (id, jid) = (session.id.clone(), chat.jid.clone());
             match composer(ui, &p, state, &title, session, book, several, true) {
-                Some(Outgoing::Text(text)) => commands.push(Command::Send { id, chat: jid, text }),
+                Some(Outgoing::Text(text)) => commands.push(Command::Send { id, chat: jid, text, mentions: Vec::new() }),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
                 None => {}

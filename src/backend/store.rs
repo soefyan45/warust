@@ -73,6 +73,11 @@ pub struct ChatMsg {
     pub media: Option<Media>,
     /// What this message replies to; for now only our replies to a status.
     pub quote: Option<Quote>,
+    /// JIDs it mentions, as WhatsApp sent them (`…@s.whatsapp.net` or
+    /// `…@lid`); the text holds `@<user part>` for each. Record key `men`.
+    pub mentions: Vec<String>,
+    /// An incoming group message that mentions this number. Record key `mme`.
+    pub mentions_me: bool,
 }
 
 /// The message a reply quotes.
@@ -147,9 +152,15 @@ impl Chat {
     }
 
     /// A private chat whose last message is from the contact and that is not
-    /// marked done ("Perlu balas").
+    /// marked done ("Perlu balas"); a group only while `mention_pending`.
     pub fn needs_reply(&self) -> bool {
         !self.is_group() && self.messages.last().is_some_and(|m| !m.from_me) && !self.is_done()
+    }
+
+    /// A group message mentioning this number came after our last message in
+    /// the chat and after it was marked done (the `@` badge).
+    pub fn mention_pending(&self) -> bool {
+        false // TODO(#16): backend slice
     }
 
     pub fn last_ts(&self) -> i64 {
@@ -333,6 +344,8 @@ impl Book {
                             status: q.get("st").and_then(Value::as_bool).unwrap_or(false),
                         })
                     }),
+                    mentions: Vec::new(), // TODO(#16): backend slice
+                    mentions_me: false,
                 };
                 let unread = record.get("unread").and_then(Value::as_bool).unwrap_or(false);
                 let chat = self.chat_mut(&jid);

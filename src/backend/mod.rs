@@ -121,6 +121,18 @@ pub struct Shared {
     pub open_chat: Option<(String, String)>,
     /// Contacts typing now, by `session|chat` (normalized JID).
     pub typing: Arc<HashMap<String, Typing>>,
+    /// Group members by `session|group` (normalized JID), from `Command::GroupMembers`.
+    pub members: Arc<HashMap<String, Vec<Member>>>,
+}
+
+/// A group member, for the `@` mention picker.
+#[derive(Clone, Debug)]
+pub struct Member {
+    /// The JID to mention, as the group addresses it (`…@lid` in LID groups).
+    /// Its user part is what goes after `@` in the sent text.
+    pub jid: String,
+    /// Phone-number JID when known: for `Book::name_of` and display.
+    pub phone: Option<String>,
 }
 
 /// A contact typing (or recording a voice note) in a chat.
@@ -183,7 +195,11 @@ pub enum Command {
     /// Unlink (if linked) and delete the session.
     Remove { id: String },
     /// Queue a text message. `chat` is a JID from the session's book.
-    Send { id: String, chat: String, text: String },
+    /// `mentions` are member JIDs (`Member::jid`) whose `@<user part>` is in `text`.
+    Send { id: String, chat: String, text: String, mentions: Vec<String> },
+    /// Fetch a group's members into `Shared::members` (and learn their LID ↔
+    /// phone mappings). Sent when a group chat is opened.
+    GroupMembers { id: String, chat: String },
     /// Queue a photo or document with an optional caption.
     SendFile { id: String, chat: String, path: PathBuf, caption: String },
     /// The user opened a chat: clear its unread count.
@@ -561,7 +577,7 @@ async fn run(
                 let _ = std::fs::remove_file(Store::path(&data_dir, &id));
                 state.remove(&id);
             }
-            Command::Send { id, chat, text } => match (running.get(&id), stores.get(&id)) {
+            Command::Send { id, chat, text, mentions: _ } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::Text(text), &state, store),
                 _ => log::warn!("send: session {id} is not running"),
             },
@@ -602,6 +618,7 @@ async fn run(
                 }
                 state.ctx.request_repaint();
             }
+            Command::GroupMembers { id: _, chat: _ } => {} // TODO(#16): backend slice
             Command::TestWebhook => {
                 let _ = state.hooks.send(webhook::Event {
                     session: "test".to_owned(),
