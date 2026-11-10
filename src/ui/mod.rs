@@ -7,6 +7,7 @@ mod emoji;
 mod fonts;
 mod forward;
 mod icons;
+mod lists;
 mod mention;
 mod markup;
 mod pdf;
