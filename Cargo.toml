@@ -46,6 +46,9 @@ egui = "0.37"
 # clipboard (text, and images for pasted screenshots) on Linux, Windows and
 # macOS. eframe's own "clipboard" feature would also add smithay-clipboard.
 egui-winit = { version = "0.37", default-features = false, features = ["arboard"] }
+# The same arboard egui-winit pastes through; named directly to read the file
+# list Finder puts on the clipboard, so a copied file pastes as an attachment.
+arboard = { version = "3.7", default-features = false }
 # Already in the tree through egui; color_fonts draws the colour bitmaps of the
 # bundled Noto Color Emoji (assets/fonts) instead of missing-glyph boxes.
 epaint = { version = "0.37", features = ["color_fonts"] }
