@@ -1754,6 +1754,13 @@ enum Outgoing {
     Voice { session: String, chat: String, path: PathBuf },
 }
 
+/// Enter alone sends. `consume_key` ignores extra Shift and Alt, so without
+/// this check Shift+Enter would send too instead of reaching the text box as a
+/// new line.
+fn enter_sends(input: &mut egui::InputState) -> bool {
+    !input.modifiers.shift && !input.modifiers.alt && input.consume_key(Modifiers::NONE, Key::Enter)
+}
+
 /// What the recording bar asks for.
 enum Recording {
     Keep,
@@ -1778,7 +1785,7 @@ fn recording_bar(ui: &mut Ui, p: &Palette, recorder: Option<&crate::backend::voi
     let mut action = ui.input_mut(|i| {
         if recorder.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
             Recording::Cancel
-        } else if recording.is_some() && i.consume_key(Modifiers::NONE, Key::Enter) {
+        } else if recording.is_some() && enter_sends(i) {
             Recording::Send
         } else {
             Recording::Keep
@@ -1987,9 +1994,7 @@ fn composer(
             Err(e) => log::warn!("cannot keep a pasted image: {e}"),
         }
     }
-    let mut send = connected
-        && ui.memory(|m| m.has_focus(id))
-        && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter));
+    let mut send = connected && ui.memory(|m| m.has_focus(id)) && ui.input_mut(enter_sends);
     let mut sendable = true;
     let mut sticker_sent = None;
     let text = &mut state.composer;
@@ -2659,5 +2664,27 @@ mod member_color_tests {
         let distinct: std::collections::HashSet<_> =
             (0..40).map(|n| member_color(&format!("62812{n:04}@s.whatsapp.net"), true)).collect();
         assert!(distinct.len() >= 8, "members spread over the palette: {}", distinct.len());
+    }
+}
+
+#[cfg(test)]
+mod enter_tests {
+    use super::*;
+
+    /// Whether one frame with Enter pressed under `modifiers` asks to send.
+    fn sends(modifiers: Modifiers) -> bool {
+        let ctx = egui::Context::default();
+        let event = egui::Event::Key { key: Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers };
+        let input = egui::RawInput { events: vec![egui::Event::ModifiersChanged(modifiers), event], ..Default::default() };
+        let mut sent = false;
+        ctx.run_ui(input, |ui| sent = ui.input_mut(enter_sends)).textures_delta.clear();
+        sent
+    }
+
+    #[test]
+    fn only_plain_enter_sends() {
+        assert!(sends(Modifiers::NONE));
+        assert!(!sends(Modifiers::SHIFT), "Shift+Enter is a new line");
+        assert!(!sends(Modifiers::ALT));
     }
 }
