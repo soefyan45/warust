@@ -1971,7 +1971,7 @@ mod typing_tests {
     fn contact_typing_label() {
         use crate::backend::{Book, Chat, Typing};
         use std::time::{Duration, Instant};
-        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None };
+        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new() };
         let book = Book::default();
         let mut state = State::default();
         assert_eq!(typing_label(&state, "s1", &book, &chat), None);
