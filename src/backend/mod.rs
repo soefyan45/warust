@@ -184,15 +184,22 @@ pub enum Command {
     Remove { id: String },
     /// Queue a text message. `chat` is a JID from the session's book.
     Send { id: String, chat: String, text: String },
+    /// Queue a text that quotes message `reply_to` of `chat`.
+    Reply { id: String, chat: String, text: String, reply_to: String },
     /// Queue a photo or document with an optional caption.
     SendFile { id: String, chat: String, path: PathBuf, caption: String },
-    /// The user opened a chat: clear its unread count.
+    /// The user opened a chat: clear its unread count and, unless "Kirim
+    /// tanda dibaca" is off, send read receipts and sync "read" to the phone.
     Seen { id: String, chat: String },
     /// Ask to be told when this contact types or comes online (as WhatsApp
     /// Web does when a chat is opened).
     WatchPresence { id: String, chat: String },
     /// Show (or stop showing) "sedang mengetik" in the chat on the contact's side.
     Typing { id: String, chat: String, typing: bool },
+    /// "Tandai belum dibaca": a local unread marker, also synced to the phone.
+    MarkUnread { id: String, chat: String },
+    /// Archive a chat, or take it out of the archive; synced to the phone.
+    Archive { id: String, chat: String, archived: bool },
     /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
     MarkDone { id: String, chat: String, done: bool },
     /// Ask the phone for messages older than the oldest one we have in `chat`.
@@ -208,8 +215,13 @@ pub enum Command {
     /// Comment or react (one emoji) on a contact's status, from the number
     /// that saw it; goes to the poster's chat through the paced queue.
     StatusReply { id: String, msg_id: String, text: String },
+    /// Queue a forwarded text message to each chat (paced like any send).
+    Forward { id: String, chats: Vec<String>, text: String },
     /// Queue a message from the REST API under an id chosen by the caller.
     Enqueue { id: String, chat: String, body: session::Body, local_id: String },
+    /// Pin a message for everyone (for `length`), or unpin it. `msg_id` is a real
+    /// WhatsApp id from `chat`'s messages.
+    Pin { id: String, chat: String, msg_id: String, pinned: bool, length: store::PinLength },
     /// Save new settings; restarts the API server when its part changed.
     SaveSettings(Settings),
     /// Send a `webhook.test` event to the global webhook URL.
@@ -465,6 +477,24 @@ fn open_store(data_dir: &std::path::Path, id: &str, name: &str, state: &Updater)
     Arc::new(Mutex::new(store))
 }
 
+/// `(sender, message id)` of the incoming messages that make up the chat's
+/// unread count (the latest ones; at least one when the chat carries an unread marker).
+fn unread_incoming(book: &Book, chat: &str) -> Vec<(String, String)> {
+    let Some(chat) = book.chats.iter().find(|c| c.jid == book.normalize(chat)) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<(String, String)> = chat
+        .messages
+        .iter()
+        .rev()
+        .filter(|m| !m.from_me && !m.id.starts_with("local-"))
+        .take(chat.unread as usize)
+        .map(|m| (m.sender.clone(), m.id.clone()))
+        .collect();
+    ids.reverse();
+    ids
+}
+
 async fn run(
     data_dir: PathBuf,
     state: Updater,
@@ -566,6 +596,26 @@ async fn run(
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::Text(text), &state, store),
                 _ => log::warn!("send: session {id} is not running"),
             },
+            Command::Reply { id, chat, text, reply_to } => {
+                // A quote that is gone (or never in this number's book) goes out as plain text.
+                let quoted = state.book(&id).and_then(|book| session::reply_body(&book, &chat, text.clone(), &reply_to));
+                if quoted.is_none() {
+                    log::warn!("reply: session {id} has no message {reply_to} in {chat}; sending without the quote");
+                }
+                let body = quoted.unwrap_or(Body::Text(text));
+                match (running.get(&id), stores.get(&id)) {
+                    (Some(r), Some(store)) => r.enqueue(&id, chat, body, &state, store),
+                    _ => log::warn!("reply: session {id} is not running"),
+                }
+            }
+            Command::Forward { id, chats, text } => match (running.get(&id), stores.get(&id)) {
+                (Some(r), Some(store)) => {
+                    for chat in chats {
+                        r.enqueue(&id, chat, Body::Forward(text.clone()), &state, store);
+                    }
+                }
+                _ => log::warn!("forward: session {id} is not running"),
+            },
             Command::SendFile { id, chat, path, caption } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::File { path, caption }, &state, store),
                 _ => log::warn!("send file: session {id} is not running"),
@@ -659,9 +709,51 @@ async fn run(
                     }
                 }
             }
+            Command::Pin { id, chat, msg_id, pinned, length } => {
+                let found = state.book(&id).and_then(|book| {
+                    let jid = book.normalize(&chat);
+                    let c = book.chats.iter().find(|c| c.jid == jid)?;
+                    let m = c.messages.iter().find(|m| m.id == msg_id)?;
+                    Some((c.jid.clone(), m.from_me, m.sender.clone()))
+                });
+                match (running.get(&id), found) {
+                    (Some(r), Some((chat, from_me, sender))) => {
+                        let target = session::PinTarget { chat, msg_id, sender: (!from_me).then_some(sender) };
+                        r.pin(target, pinned.then_some(length));
+                    }
+                    _ => log::warn!("pin: session {id} is not running or the message is gone"),
+                }
+            }
             Command::Seen { id, chat } => {
+                let unread = state.book(&id).map(|book| unread_incoming(&book, &chat)).unwrap_or_default();
                 if let Some(store) = stores.get(&id) {
                     state.record(&id, store, &[store::seen_record(&chat)]);
+                }
+                // Nothing unread: no receipt and no app-state write, so merely
+                // clicking through read chats stays silent.
+                if state.settings().send_read
+                    && !unread.is_empty()
+                    && let Some(r) = running.get(&id)
+                {
+                    r.mark_chat_read(&id, &chat, unread, true, true);
+                }
+            }
+            Command::MarkUnread { id, chat } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::unread_record(&chat)]);
+                }
+                if state.settings().send_read
+                    && let Some(r) = running.get(&id)
+                {
+                    r.mark_chat_read(&id, &chat, Vec::new(), false, false);
+                }
+            }
+            Command::Archive { id, chat, archived } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::archive_record(&chat, archived)]);
+                }
+                if let Some(r) = running.get(&id) {
+                    r.set_archived(&id, &chat, archived);
                 }
             }
             Command::MarkDone { id, chat, done } => {
