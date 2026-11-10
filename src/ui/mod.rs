@@ -82,6 +82,8 @@ pub struct State {
     pub qr: Option<qr::Qr>,
     /// Session waiting for the user to confirm its removal.
     pub confirm_remove: Option<String>,
+    /// "Ganti nama" dialog: the number and the name being typed.
+    pub rename: Option<(String, String)>,
     /// The saved settings, for screens that show them (webhook per number).
     pub settings: std::sync::Arc<backend::Settings>,
     /// Settings being edited on the Pengaturan and Webhook & API screens.
@@ -470,6 +472,76 @@ impl App {
         self.screen = Screen::Nomor;
     }
 
+    /// "Ganti nama": a new name for a number, used everywhere it shows.
+    fn rename_dialog(&mut self, ctx: &egui::Context) {
+        let Some((id, mut draft)) = self.state.rename.clone() else {
+            return;
+        };
+        let p = theme::palette(ctx);
+        let checked = backend::clean_name(&draft);
+        let mut close = false;
+        let mut save = false;
+        let modal = egui::Modal::new(egui::Id::unique("rename_number"))
+            .frame(
+                Frame::NONE
+                    .fill(p.panel)
+                    .stroke(Stroke::new(1.0, p.border_strong))
+                    .corner_radius(theme::R_LG)
+                    .inner_margin(Margin::same(24)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(380.0);
+                ui.spacing_mut().item_spacing.y = 12.0;
+                ui.label(rich("Ganti nama nomor", 16.0, Weight::SemiBold, p.text));
+                ui.add(
+                    egui::Label::new(rich(
+                        "Dipakai di daftar Nomor, Inbox, notifikasi, Ringkasan dan Log. Nama perangkat yang terlihat di HP tidak berubah.",
+                        13.0,
+                        Weight::Regular,
+                        p.text_2,
+                    ))
+                    .wrap(),
+                );
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .desired_width(f32::INFINITY)
+                        .char_limit(backend::NAME_MAX + 10)
+                        .hint_text("mis. CS Utama"),
+                );
+                if !field.has_focus() && !field.lost_focus() {
+                    field.request_focus();
+                }
+                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+                if let Err(why) = &checked {
+                    ui.label(rich(why, 12.0, Weight::Regular, p.red_text));
+                }
+                widgets::row(
+                    ui,
+                    32.0,
+                    |_| {},
+                    |ui| {
+                        let ok = ui.add_enabled_ui(checked.is_ok(), |ui| widgets::button(ui, Some("check"), "Simpan", Kind::Primary));
+                        save |= ok.inner.clicked();
+                        if widgets::button(ui, None, "Batal", Kind::Secondary).clicked() {
+                            close = true;
+                        }
+                    },
+                );
+            });
+        if modal.should_close() {
+            close = true;
+        }
+        if save {
+            if let Ok(name) = backend::clean_name(&draft) {
+                self.backend.send(Command::Rename { id: id.clone(), name });
+                close = true;
+            }
+        }
+        self.state.rename = if close { None } else { Some((id, draft)) };
+    }
+
     fn confirm_remove(&mut self, ctx: &egui::Context) {
         let Some(id) = self.state.confirm_remove.clone() else {
             return;
@@ -789,6 +861,10 @@ impl eframe::App for App {
             }
             Some(screens::nomor::Action::Logout(id)) => self.backend.send(Command::Logout { id }),
             Some(screens::nomor::Action::Remove(id)) => self.state.confirm_remove = Some(id),
+            Some(screens::nomor::Action::Rename(id)) => {
+                let name = self.sessions.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_default();
+                self.state.rename = Some((id, name));
+            }
             None => {}
         }
         if let (Some(id), Some(a)) = (self.pairing_id.clone(), pairing_action) {
@@ -800,6 +876,7 @@ impl eframe::App for App {
             }
         }
         self.confirm_remove(ui.ctx());
+        self.rename_dialog(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
         // "Sedang mengetik" for the chat on screen while its reply is typed.
         let open_chat = if self.screen == Screen::Inbox {

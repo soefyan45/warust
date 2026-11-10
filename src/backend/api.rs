@@ -58,7 +58,7 @@ fn router(context: Context) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
         .route("/sessions", get(list_sessions).post(create_session))
-        .route("/sessions/{id}", get(get_session).delete(delete_session))
+        .route("/sessions/{id}", get(get_session).patch(rename_session).delete(delete_session))
         .route("/sessions/{id}/qr", get(get_qr))
         .route("/sessions/{id}/pair-code", post(pair_code))
         .route("/sessions/{id}/logout", post(logout))
@@ -216,6 +216,18 @@ async fn logout(_: Authed, State(context): State<Context>, Path(id): Path<String
     session(&context, &id)?;
     send(&context, Command::Logout { id })?;
     Ok((StatusCode::ACCEPTED, Json(json!({ "status": "logging_out" }))).into_response())
+}
+
+#[derive(Deserialize)]
+struct RenameSession {
+    name: String,
+}
+
+async fn rename_session(_: Authed, State(context): State<Context>, Path(id): Path<String>, Json(body): Json<RenameSession>) -> Answer {
+    session(&context, &id)?;
+    let name = super::registry::clean_name(&body.name).map_err(|why| error(StatusCode::BAD_REQUEST, "invalid_name", why))?;
+    send(&context, Command::Rename { id: id.clone(), name: name.clone() })?;
+    Ok(Json(json!({ "id": id, "name": name })).into_response())
 }
 
 async fn delete_session(_: Authed, State(context): State<Context>, Path(id): Path<String>) -> Answer {

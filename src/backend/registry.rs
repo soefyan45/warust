@@ -69,6 +69,14 @@ impl Registry {
         self.save();
     }
 
+    /// Gives a number a new name; `clean_name` checks it first.
+    pub fn rename(&mut self, id: &str, name: &str) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.name = name.to_owned();
+            self.save();
+        }
+    }
+
     pub fn remove(&mut self, id: &str) {
         self.entries.retain(|e| e.id != id);
         self.save();
@@ -102,5 +110,34 @@ impl Registry {
             Err(TryLockError::WouldBlock) => Ok(None),
             Err(TryLockError::Error(e)) => Err(e),
         }
+    }
+}
+
+/// Longest name a number may have.
+pub const NAME_MAX: usize = 40;
+
+/// A number's name as typed: trimmed, one line, not empty, at most
+/// `NAME_MAX` characters. The error is shown to the user.
+pub fn clean_name(raw: &str) -> Result<String, &'static str> {
+    let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    if name.is_empty() {
+        return Err("Nama tidak boleh kosong");
+    }
+    if name.chars().count() > NAME_MAX {
+        return Err("Nama maksimal 40 karakter");
+    }
+    Ok(name)
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::*;
+
+    #[test]
+    fn names_are_cleaned() {
+        assert_eq!(clean_name("  CS   Utama \n"), Ok("CS Utama".to_owned()));
+        assert!(clean_name("   ").is_err());
+        assert!(clean_name(&"a".repeat(41)).is_err());
+        assert_eq!(clean_name(&"é".repeat(40)).map(|n| n.chars().count()), Ok(40));
     }
 }
