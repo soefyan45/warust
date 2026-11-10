@@ -432,7 +432,7 @@ fn chat_list(
                         && state.chat_selected.as_deref() == Some(chat.jid.as_str());
                     let title = super::chat_title(&s.book, chat);
                     let via_number = via.then_some(*s);
-                    if chat_row(ui, p, rect, &title, chat, picture, selected, via_number, typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
+                    if chat_row(ui, p, rect, &title, chat, picture, selected, &s.id, via_number, typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
                         state.inbox_session = Some(s.id.clone());
                         state.chat_selected = Some(chat.jid.clone());
                         if chat.unread > 0 {
@@ -536,10 +536,12 @@ fn chat_row(
     chat: &Chat,
     picture: Option<&Path>,
     selected: bool,
+    session: &str,
     via: Option<&SessionView>,
     typing: Option<&str>,
 ) -> egui::Response {
-    let resp = ui.interact(row, ui.scope_id().with(("chat_row", via.map(|s| s.id.as_str()), &chat.jid)), Sense::click());
+    // The same contact can chat with several numbers, so the id holds both.
+    let resp = ui.interact(row, ui.scope_id().with(("chat_row", session, &chat.jid)), Sense::click());
     if selected {
         ui.painter().rect_filled(row, theme::r_inner(), p.selected);
     } else if resp.hovered() {
@@ -1626,7 +1628,7 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                         }
                         let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
                         let title = super::chat_title(&s.book, chat);
-                        if compact_row(ui, &p, rect, &title, chat, picture, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
+                        if compact_row(ui, &p, rect, &title, chat, picture, &s.id, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
                             state.inbox_session = Some(s.id.clone());
                             state.chat_selected = Some(chat.jid.clone());
                             if chat.unread > 0 {
@@ -1661,9 +1663,9 @@ fn scope_chip(ui: &mut Ui, p: &Palette, label: &str, active: bool) -> egui::Resp
 /// A chat row of the phone list: round avatar, name, time, preview, unread
 /// badge, and "ke CS Utama · 4410" when every number is combined.
 #[allow(clippy::too_many_arguments)]
-fn compact_row(ui: &Ui, p: &Palette, row: Rect, title: &str, chat: &Chat, picture: Option<&Path>, via: Option<&SessionView>, typing: Option<&str>) -> egui::Response {
+fn compact_row(ui: &Ui, p: &Palette, row: Rect, title: &str, chat: &Chat, picture: Option<&Path>, session: &str, via: Option<&SessionView>, typing: Option<&str>) -> egui::Response {
     use crate::ui::compact::{self as phone, PAD};
-    let resp = ui.interact(row, ui.scope_id().with(("m_chat_row", via.map(|s| s.id.as_str()), &chat.jid)), Sense::click());
+    let resp = ui.interact(row, ui.scope_id().with(("m_chat_row", session, &chat.jid)), Sense::click());
     if resp.hovered() {
         ui.painter().rect_filled(row, 0.0, p.raised);
     }
