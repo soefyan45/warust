@@ -1,6 +1,10 @@
 //! Own window chrome. The OS title bar is turned off (`with_decorations(false)`)
 //! so there is one bar only: the app's topbar carries the window controls,
 //! moves the window by drag and maximizes on double click.
+//!
+//! macOS keeps its own chrome instead (`NATIVE`): a transparent title bar under
+//! the app's topbar, with the system's window buttons moved into that bar
+//! (`place_buttons`), and the system's corners, shadow and resize edges.
 
 use egui::{
     Context, CursorIcon, Id, LayerId, Order, Rect, ResizeDirection, Sense, Stroke, StrokeKind,
@@ -10,6 +14,82 @@ use egui::{
 use super::theme;
 
 const EDGE: f32 = 5.0;
+
+/// The OS draws the window buttons, edges and border (macOS).
+pub const NATIVE: bool = cfg!(target_os = "macos");
+
+/// Left edge of the macOS window buttons, in points from the window's left.
+const BUTTONS_X: f64 = 18.0;
+
+/// Where the content of the bar holding the macOS window buttons may start,
+/// from the window's left edge: past the buttons; 0 in full screen (the
+/// buttons hide) and on other systems.
+pub fn buttons_inset(ctx: &Context) -> f32 {
+    let fullscreen = ctx.input(|i| i.viewport().fullscreen.unwrap_or(false));
+    if NATIVE && !fullscreen { 84.0 } else { 0.0 }
+}
+
+/// Centres the macOS window buttons in the app's top bar (`bar` points tall)
+/// and moves them to `BUTTONS_X`. AppKit lays them out again on resize and
+/// full screen, so this runs every frame and only writes what changed.
+#[cfg(target_os = "macos")]
+pub fn place_buttons(frame: &eframe::Frame, bar: f32) {
+    use objc2_app_kit::{NSView, NSWindowButton};
+    use objc2_foundation::NSRect;
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+    let Ok(handle) = frame.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return;
+    };
+    // SAFETY: winit's content view, alive as long as the window; eframe calls
+    // `App::ui` on the main thread, where AppKit objects may be used.
+    let view: &NSView = unsafe { handle.ns_view.cast().as_ref() };
+    let Some(window) = view.window() else {
+        return;
+    };
+    let buttons = [NSWindowButton::CloseButton, NSWindowButton::MiniaturizeButton, NSWindowButton::ZoomButton]
+        .map(|kind| window.standardWindowButton(kind));
+    let [Some(close), Some(minimize), Some(zoom)] = buttons else {
+        return;
+    };
+    // close → NSTitlebarView → NSTitlebarContainerView.
+    // SAFETY: plain view-hierarchy getters on the main thread.
+    let Some(titlebar) = (unsafe { close.superview() }) else {
+        return;
+    };
+    let Some(container) = (unsafe { titlebar.superview() }) else {
+        return;
+    };
+    let near = |a: f64, b: f64| (a - b).abs() < 0.5;
+    let bar = f64::from(bar);
+    let window_height = window.frame().size.height;
+    let frame = container.frame();
+    if !near(frame.size.height, bar) || !near(frame.origin.y, window_height - bar) {
+        let mut frame = frame;
+        frame.size.height = bar;
+        frame.origin.y = window_height - bar;
+        container.setFrame(frame);
+    }
+    let inner = titlebar.frame();
+    if !near(inner.size.height, bar) || !near(inner.origin.y, 0.0) {
+        titlebar.setFrame(NSRect::new(objc2_foundation::NSPoint::new(inner.origin.x, 0.0), objc2_foundation::NSSize::new(inner.size.width, bar)));
+    }
+    let step = minimize.frame().origin.x - close.frame().origin.x;
+    for (i, button) in [close, minimize, zoom].iter().enumerate() {
+        let frame = button.frame();
+        // Centred either way up, so the view's flippedness does not matter.
+        let (x, y) = (BUTTONS_X + i as f64 * step, ((bar - frame.size.height) / 2.0).round());
+        if !near(frame.origin.x, x) || !near(frame.origin.y, y) {
+            button.setFrameOrigin(objc2_foundation::NSPoint::new(x, y));
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn place_buttons(_frame: &eframe::Frame, _bar: f32) {}
 
 pub fn is_maximized(ctx: &Context) -> bool {
     ctx.input(|i| i.viewport().maximized.unwrap_or(false))
@@ -40,6 +120,9 @@ enum Control {
 /// Minimize, maximize/restore and close, for a right-to-left row: close ends
 /// up rightmost.
 pub fn controls(ui: &mut Ui) {
+    if NATIVE {
+        return;
+    }
     let ctx = ui.ctx().clone();
     ui.spacing_mut().item_spacing.x = 2.0;
     if button(ui, Control::Close).clicked() {
@@ -99,6 +182,9 @@ fn button(ui: &mut Ui, control: Control) -> egui::Response {
 /// Thin areas along the window edges that start an OS resize, plus a 1px
 /// border so the undecorated window stays visible on any background.
 pub fn edges(ui: &Ui) {
+    if NATIVE {
+        return;
+    }
     let ctx = ui.ctx();
     let window = ui.max_rect();
     if !is_maximized(ctx) {

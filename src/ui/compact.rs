@@ -39,6 +39,8 @@ pub fn title_bar(ui: &mut Ui) {
             window::drag_area(ui, rect, "m_titlebar");
             ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
             ui.horizontal_centered(|ui| {
+                // Past the macOS window buttons (the bar's margin is 14).
+                ui.add_space((window::buttons_inset(ui.ctx()) - 14.0).max(0.0));
                 ui.label(rich("Warust", 13.0, Weight::Medium, p.text_2));
                 ui.with_layout(egui::Layout::right_to_left(Align::Center), window::controls);
             });

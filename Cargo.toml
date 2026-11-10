@@ -68,6 +68,13 @@ qrcode = { version = "0.14", default-features = false }
 # webhook secrets on every OS.
 getrandom = "0.3"
 
+# macOS: places the native window buttons in the app's topbar. All already in
+# the tree through winit.
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSResponder", "NSView", "NSWindow", "NSControl", "NSButton"] }
 
 [profile.release]
 # Smaller downloads: no symbol tables in the shipped binary.

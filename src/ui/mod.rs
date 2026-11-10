@@ -214,7 +214,8 @@ impl App {
                     ui,
                     32.0,
                     |ui| {
-                        ui.add_space(6.0);
+                        // Past the macOS window buttons (the panel's margin is 12).
+                        ui.add_space((window::buttons_inset(ui.ctx()) - 12.0).max(6.0));
                         let (mark, _) = ui.allocate_exact_size(egui::Vec2::splat(22.0), egui::Sense::hover());
                         ui.painter().rect_filled(mark, theme::R_SM, p.primary);
                         widgets::paint_text(
@@ -329,10 +330,12 @@ impl App {
                         window::controls(ui);
                         // The window buttons sit tight; everything else gets normal spacing.
                         ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.add_space(6.0);
-                        let (sep, _) = ui.allocate_exact_size(egui::vec2(1.0, 20.0), egui::Sense::hover());
-                        ui.painter().rect_filled(sep, 0.0, p.border);
-                        ui.add_space(6.0);
+                        if !window::NATIVE {
+                            ui.add_space(6.0);
+                            let (sep, _) = ui.allocate_exact_size(egui::vec2(1.0, 20.0), egui::Sense::hover());
+                            ui.painter().rect_filled(sep, 0.0, p.border);
+                            ui.add_space(6.0);
+                        }
                         let dark = ui.ctx().theme() == Theme::Dark;
                         let toggle = widgets::icon_button(ui, if dark { "sun" } else { "moon" }, 32.0, false)
                             .on_hover_text(if dark { "Tema terang" } else { "Tema gelap" });
@@ -356,6 +359,8 @@ impl App {
             .show(ui, |ui| {
                 window::drag_area(ui, ui.max_rect().expand2(egui::vec2(32.0, 0.0)), "topnav");
                 ui.horizontal_centered(|ui| {
+                    // Past the macOS window buttons (the bar's margin is 32).
+                    ui.add_space((window::buttons_inset(ui.ctx()) - 32.0).max(0.0));
                     let (logo, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
                     ui.painter().circle_filled(logo.center(), 17.0, p.primary);
                     widgets::paint_text(ui, logo, "w", fonts::ui(16.0, Weight::SemiBold), p.accent, egui::Align::Center);
@@ -589,7 +594,7 @@ impl eframe::App for App {
         self.backend.close_notifications();
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         // A clicked notification: bring the window up on that chat.
         if let Some(chat) = self.backend.take_open_chat() {
             self.state.open_chat_requested = Some(chat);
@@ -681,6 +686,9 @@ impl eframe::App for App {
             self.sidebar(ui);
             self.topbar(ui);
         }
+        // Heights of compact::title_bar, topnav and the sidebar/topbar row.
+        let bar = if compact { 40.0 } else if theme::template().top_nav() { 72.0 } else { 52.0 };
+        window::place_buttons(frame, bar);
         let p = theme::palette(ui.ctx());
         let mut action = None;
         let mut pairing_action = None;
