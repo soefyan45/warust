@@ -1188,7 +1188,7 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
             ui.add_space(12.0);
             let height = content.max(ui.available_height());
             let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-            let painter = ui.painter();
+            let painter = ui.painter().clone();
             let mut y = area.bottom() - content;
             if start > 0 {
                 let note = Rect::from_min_size(pos2(area.left(), y - 24.0), vec2(area.width(), 16.0));
@@ -1243,11 +1243,6 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
                         if flash.as_deref() == Some(m.id.as_str()) {
                             painter.rect_stroke(rect.expand(2.0), R_LG, Stroke::new(2.0, p.primary), StrokeKind::Outside);
                         }
-                        match action {
-                            Some(MsgAction::Copy) => ui.ctx().copy_text(caption(m)),
-                            Some(action) => clicked = Some(MsgEvent::Menu(action, m.id.clone())),
-                            None => {}
-                        }
                         let mut at = rect.min + vec2(14.0, 10.0);
                         if let Some(quote) = quote {
                             let boxed = Rect::from_min_size(at, vec2(size.x - 28.0, quote.size().y + 10.0));
@@ -1267,8 +1262,17 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
                         }
                         if let Some(text) = text {
                             let height = text.size().y;
-                            painter.galley(at, text, p.text);
+                            // Selectable label (drag to select, Cmd/Ctrl+C copies the selection). It sits above the
+                            // bubble's click area, so it also needs its own context menu for right-click on text.
+                            let label = ui.put(Rect::from_min_size(at, text.size()), egui::Label::new(text).selectable(true));
+                            label.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
                             at.y += height + 4.0;
+                        }
+                        // "Salin" copies the whole caption; egui does not expose the label selection, Cmd/Ctrl+C copies a partial one.
+                        match action {
+                            Some(MsgAction::Copy) => ui.ctx().copy_text(caption(m)),
+                            Some(action) => clicked = Some(MsgEvent::Menu(action, m.id.clone())),
+                            None => {}
                         }
                         let (meta_w, meta_h) = (meta.size().x, meta.size().y);
                         painter.galley(at, meta, p.muted);
