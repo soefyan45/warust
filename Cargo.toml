@@ -67,6 +67,11 @@ qrcode = { version = "0.14", default-features = false }
 # Already in the tree through rustls/ring: OS randomness for API keys and
 # webhook secrets on every OS.
 getrandom = "0.3"
+# Voice notes (issue #14): microphone capture, libopus (built from source with
+# cmake and linked statically) and the Ogg container WhatsApp expects.
+cpal = "0.18"
+opus = "0.4"
+ogg = "0.9"
 
 
 # Clickable notifications (issue #15). macOS: the objc2 family eframe/winit
