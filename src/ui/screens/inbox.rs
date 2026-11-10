@@ -187,7 +187,10 @@ pub fn show(
                     state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                     commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
                 }
-                match messages(ui, &p, &book, chat, downloads, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref()) {
+                let mut want = Vec::new();
+                let clicked = messages(ui, &p, &book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref());
+                ask_avatars(state, &mut commands, &session.id, want);
+                match clicked {
                     Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
                     Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
                     None => {}
@@ -581,6 +584,50 @@ fn chat_row(
 /// WhatsApp's blue "read" ticks.
 const READ_BLUE: Color32 = Color32::from_rgb(0x53, 0xBD, 0xEB);
 
+/// Asks for member pictures not asked yet this run (the backend paces them).
+fn ask_avatars(state: &mut State, commands: &mut Vec<Command>, session: &str, jids: Vec<String>) {
+    for jid in jids {
+        if state.avatar_asked.insert(jid.clone()) {
+            commands.push(Command::Avatar { id: session.to_owned(), jid });
+        }
+    }
+}
+
+/// Name colours for group members, readable on dark and on light bubbles.
+const MEMBER_COLORS: [(u32, u32); 12] = [
+    (0xFF8A80, 0xC62828),
+    (0xFFB74D, 0xB35C00),
+    (0xE6C84F, 0x8A6D00),
+    (0x81C784, 0x2E7D32),
+    (0x4DD0C4, 0x00796B),
+    (0x64B5F6, 0x1565C0),
+    (0x9FA8FF, 0x3F51B5),
+    (0xCE93D8, 0x8E24AA),
+    (0xF48FB1, 0xC2185B),
+    (0xAED581, 0x558B2F),
+    (0x4FC3F7, 0x0277BD),
+    (0xFF9E80, 0xD84315),
+];
+
+/// A member's colour: the same for the same JID, every run and every start.
+fn member_color(jid: &str, dark: bool) -> Color32 {
+    // FNV-1a: stable across runs, unlike `DefaultHasher`.
+    let hash = jid.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193));
+    let (on_dark, on_light) = MEMBER_COLORS[hash as usize % MEMBER_COLORS.len()];
+    let rgb = if dark { on_dark } else { on_light };
+    Color32::from_rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
+}
+
+/// A member's picture beside their bubbles, else their initials in their colour.
+fn paint_member_face(ui: &Ui, rect: Rect, initials: &str, picture: Option<&std::path::Path>, color: Color32) {
+    if picture.is_some() {
+        widgets::paint_avatar(ui, rect, initials, picture, false);
+        return;
+    }
+    ui.painter().rect_filled(rect, R_MD, color.gamma_multiply(0.18));
+    widgets::paint_text(ui, rect, initials, fonts::ui(rect.height() * 0.38, Weight::SemiBold), color, Align::Center);
+}
+
 fn is_dark(c: Color32) -> bool {
     (c.r() as u32 * 299 + c.g() as u32 * 587 + c.b() as u32 * 114) / 1000 < 128
 }
@@ -901,10 +948,31 @@ fn paint_media(
 }
 
 /// Paints the open chat; returns a message whose media the user wants downloaded.
-fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool, typing: Option<&str>) -> Option<MediaClick> {
+/// Draws the conversation. In a group, incoming runs from one member get the
+/// member's picture beside the first bubble and their name, in their colour,
+/// on top of it; `want_avatars` collects pictures to ask the backend for.
+#[allow(clippy::too_many_arguments)]
+fn messages(
+    ui: &mut Ui,
+    p: &Palette,
+    book: &Book,
+    chat: &Chat,
+    downloads: &Downloads,
+    avatars: &Avatars,
+    want_avatars: &mut Vec<String>,
+    auto_stickers: bool,
+    typing: Option<&str>,
+) -> Option<MediaClick> {
     const GAP: f32 = 6.0;
+    /// Extra space before a group run from another member.
+    const RUN_GAP: f32 = 6.0;
     const DIVIDER: f32 = 36.0;
+    /// Member picture beside incoming group bubbles, and the column it takes.
+    const FACE: f32 = 28.0;
+    const GUTTER: f32 = FACE + 8.0;
+    let group = chat.is_group();
     let wrap = (ui.available_width() * 0.7).min(420.0);
+    let dark = is_dark(p.bubble_in);
     let start = chat.messages.len().saturating_sub(SHOWN);
     let shown: &[ChatMsg] = &chat.messages[start..];
     let mut clicked = None;
@@ -918,6 +986,11 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
         /// "Status · …": what the message replies to.
         quote: Option<std::sync::Arc<egui::Galley>>,
         meta: std::sync::Arc<egui::Galley>,
+        /// First bubble of a group member's run: their name (in their colour),
+        /// normalized JID and colour, for the name line and the picture.
+        head: Option<(std::sync::Arc<egui::Galley>, String, Color32)>,
+        /// Space above the bubble that starts a new run.
+        lead: f32,
         size: egui::Vec2,
     }
     enum Item<'a> {
@@ -929,12 +1002,19 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
     const TYPING_ROW: f32 = 36.0;
     let mut items = Vec::new();
     let mut last_day = None;
+    // Who sent the bubble above: `None` for us, a day pill or the top.
+    let mut prev: Option<Option<String>> = None;
     for m in shown {
         let day = time::day(m.ts);
         if last_day != Some(day) {
             items.push(Item::Day(time::day_label(m.ts)));
             last_day = Some(day);
+            prev = None;
         }
+        let who = (!m.from_me).then(|| book.normalize(&m.sender));
+        let new_run = prev.as_ref() != Some(&who);
+        let lead = if new_run && prev.is_some() && group { RUN_GAP } else { 0.0 };
+        prev = Some(who.clone());
         // A failed message shows it with the red mark; the time keeps its colour.
         let (fg, meta_color, code_bg) = if m.from_me {
             (p.on_primary, p.on_primary_muted, p.on_primary_muted.gamma_multiply(0.35))
@@ -947,11 +1027,16 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
         let meta_color = if sticker { p.muted } else { meta_color };
         let caption = caption(m);
         let text = (!caption.is_empty()).then(|| ui.painter().layout_job(markup::job(&caption, 14.0, fg, code_bg, wrap)));
-        let mut meta = time::clock(m.ts);
+        let meta = time::clock(m.ts);
         let tick = if m.from_me { tick(p, &m.status, meta_color, !sticker && is_dark(p.primary)) } else { None };
-        if chat.is_group() && !m.from_me {
-            meta = format!("{} · {meta}", super::sender_label(book, &m.sender));
-        }
+        let head = who.filter(|_| group && new_run).map(|jid| {
+            let color = member_color(&jid, dark);
+            let mut job = egui::text::LayoutJob::simple_singleline(super::sender_label(book, &m.sender), fonts::ui(12.5, Weight::SemiBold), color);
+            job.wrap.max_width = wrap;
+            job.wrap.max_rows = 1;
+            job.wrap.break_anywhere = true;
+            (ui.painter().layout_job(job), jid, color)
+        });
         let meta = ui.painter().layout_no_wrap(meta, fonts::ui(11.0, Weight::Regular), meta_color);
         let quote = m.quote.as_ref().map(|q| {
             let label = if q.status { format!("Status · {}", q.text) } else { q.text.clone() };
@@ -962,11 +1047,12 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
         let text_size = text.as_ref().map(|t| t.size() + vec2(0.0, 4.0)).unwrap_or_default();
         let media_space = media_size.map(|s| s + vec2(0.0, 8.0)).unwrap_or_default();
         let quote_space = quote.as_ref().map(|g| g.size() + vec2(20.0, 18.0)).unwrap_or_default();
+        let head_space = head.as_ref().map(|(g, ..)| g.size() + vec2(0.0, 4.0)).unwrap_or_default();
         let size = vec2(
-            text_size.x.max(meta.size().x + if tick.is_some() { 20.0 } else { 0.0 }).max(media_space.x).max(quote_space.x) + 28.0,
-            quote_space.y + media_space.y + text_size.y + meta.size().y + 20.0,
+            text_size.x.max(meta.size().x + if tick.is_some() { 20.0 } else { 0.0 }).max(media_space.x).max(quote_space.x).max(head_space.x) + 28.0,
+            head_space.y + quote_space.y + media_space.y + text_size.y + meta.size().y + 20.0,
         );
-        items.push(Item::Bubble(Bubble { m, media, text, tick, quote, meta, size }));
+        items.push(Item::Bubble(Bubble { m, media, text, tick, quote, meta, head, lead, size }));
     }
     if let Some(label) = typing {
         items.push(Item::Typing(if label.ends_with("mengetik…") { label.replace("mengetik…", "sedang mengetik") } else { label.to_owned() }));
@@ -975,7 +1061,7 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
         .iter()
         .map(|i| match i {
             Item::Day(_) => DIVIDER,
-            Item::Bubble(b) => b.size.y + GAP,
+            Item::Bubble(b) => b.lead + b.size.y + GAP,
             Item::Typing(_) => TYPING_ROW + GAP,
         })
         .sum();
@@ -1019,18 +1105,36 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
                         painter.galley(pos2(cx - w / 2.0, cy - galley.size().y / 2.0), galley, p.text_2);
                         y += DIVIDER;
                     }
-                    Item::Bubble(Bubble { m, media, text, tick, quote, meta, size }) => {
+                    Item::Bubble(Bubble { m, media, text, tick, quote, meta, head, lead, size }) => {
+                        y += lead;
                         let (fill, stroke) = if m.from_me {
                             (p.primary, Stroke::NONE)
                         } else {
                             (p.bubble_in, Stroke::new(1.0, p.border))
                         };
-                        let left = if m.from_me { area.right() - size.x } else { area.left() };
+                        let left = match (m.from_me, group) {
+                            (true, _) => area.right() - size.x,
+                            (false, true) => area.left() + GUTTER,
+                            (false, false) => area.left(),
+                        };
                         let rect = Rect::from_min_size(pos2(left, y), size);
                         if !matches!(media, Some((_, MediaBox::Sticker(_)))) {
                             painter.rect(rect, R_LG, fill, stroke, StrokeKind::Inside);
                         }
                         let mut at = rect.min + vec2(14.0, 10.0);
+                        if let Some((name, jid, color)) = head {
+                            let face = Rect::from_min_size(pos2(area.left(), y), vec2(FACE, FACE));
+                            match avatars.get(&jid) {
+                                Some(picture) => paint_member_face(ui, face, &super::initials(&super::sender_label(book, &m.sender)), picture.as_deref(), color),
+                                None => {
+                                    want_avatars.push(jid);
+                                    paint_member_face(ui, face, &super::initials(&super::sender_label(book, &m.sender)), None, color);
+                                }
+                            }
+                            let height = name.size().y;
+                            painter.galley(at, name, color);
+                            at.y += height + 4.0;
+                        }
                         if let Some(quote) = quote {
                             let boxed = Rect::from_min_size(at, vec2(size.x - 28.0, quote.size().y + 10.0));
                             let (fill, bar) = if m.from_me { (Color32::from_white_alpha(28), p.on_primary_muted) } else { (p.raised, p.primary) };
@@ -1704,7 +1808,10 @@ fn compact_chat(
                 state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                 commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
             }
-            match messages(ui, &p, book, chat, downloads, auto_stickers, typing_label(state, &session.id, book, chat).as_deref()) {
+            let mut want = Vec::new();
+            let clicked = messages(ui, &p, book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, book, chat).as_deref());
+            ask_avatars(state, &mut commands, &session.id, want);
+            match clicked {
                 Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
                 Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
                 None => {}
@@ -1768,5 +1875,20 @@ mod typing_tests {
         state.composer = "x".to_owned();
         typing_signal(&ctx, &mut state, open());
         assert_eq!(kinds(&typing_signal(&ctx, &mut state, None)), [("a@s.whatsapp.net".to_owned(), false)]);
+    }
+}
+
+#[cfg(test)]
+mod member_color_tests {
+    use super::member_color;
+
+    #[test]
+    fn same_member_same_colour_and_members_differ() {
+        let a = "628111@s.whatsapp.net";
+        assert_eq!(member_color(a, true), member_color(a, true));
+        assert_ne!(member_color(a, true), member_color(a, false), "dark and light variants");
+        let distinct: std::collections::HashSet<_> =
+            (0..40).map(|n| member_color(&format!("62812{n:04}@s.whatsapp.net"), true)).collect();
+        assert!(distinct.len() >= 8, "members spread over the palette: {}", distinct.len());
     }
 }
