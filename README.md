@@ -84,9 +84,11 @@ Data (kunci sesi, chat, media, pengaturan, API key) disimpan di folder per pengg
 tertaut. Folder lain bisa dipilih dengan variabel lingkungan `WARUST_DATA`.
 
 Beberapa fitur memakai alat bawaan OS. Di Linux, paket .deb menyarankan `zenity` (dialog file),
-`poppler-utils` (pratinjau PDF), `libnotify-bin` dan `gnome-session-canberra` (notifikasi dan suara).
+`poppler-utils` (pratinjau PDF), `libnotify-bin` dan `gnome-session-canberra` (notifikasi dan suara),
+serta `ffmpeg` (thumbnail video).
 Pratinjau PDF di macOS dan Windows butuh poppler (`brew install poppler` / Scoop); tanpa itu PDF tetap
-bisa dibuka di aplikasi lain.
+bisa dibuka di aplikasi lain. Tanpa ffmpeg, video tetap terkirim dan bisa diputar, hanya tanpa
+thumbnail (di macOS, Quick Look dipakai sebagai gantinya).
 
 ### Dari source
 

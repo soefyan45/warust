@@ -128,21 +128,58 @@ fn video_info(file: &[u8]) -> Option<VideoInfo> {
     Some(VideoInfo { seconds, width, height })
 }
 
+/// Whether the file starts with an ISO media `ftyp` box (MP4, MOV, M4V).
+fn is_mp4(bytes: &[u8]) -> bool {
+    matches!(mp4_boxes(bytes).next(), Some((kind, _)) if kind == b"ftyp")
+}
+
+/// How long ffmpeg may take for one thumbnail.
+const FFMPEG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A still from the video, as a small JPEG: ffmpeg when installed, else
 /// Quick Look on macOS. `None` without either; the video still sends.
+/// ffmpeg is held to the MOV/MP4 demuxer and local files, with a timeout.
 fn video_thumbnail(path: &Path) -> Option<Vec<u8>> {
     use crate::platform::command;
-    let still = command("ffmpeg")
-        .args(["-v", "error", "-i"])
-        .arg(path)
-        .args(["-vf", "thumbnail", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success() && !o.stdout.is_empty())
-        .map(|o| o.stdout)
-        .or_else(|| quick_look(path))?;
+    // `file:` so a name with a colon is not read as another protocol.
+    let mut input = std::ffi::OsString::from("file:");
+    input.push(path.as_os_str());
+    let mut ffmpeg = command("ffmpeg");
+    ffmpeg
+        .args(["-nostdin", "-v", "error", "-protocol_whitelist", "file", "-f", "mov", "-i"])
+        .arg(&input)
+        .args(["-vf", "thumbnail", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"]);
+    let still = output_within(ffmpeg, FFMPEG_TIMEOUT).filter(|out| !out.is_empty()).or_else(|| quick_look(path))?;
     let decoded = image::load_from_memory(&still).ok()?;
     encode_jpeg(&decoded.thumbnail(THUMBNAIL_SIDE, THUMBNAIL_SIDE), 60).ok()
+}
+
+/// Runs `command` and returns its stdout if it exits successfully within
+/// `limit`; a command that takes longer is killed.
+fn output_within(mut command: std::process::Command, limit: std::time::Duration) -> Option<Vec<u8>> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
+    let mut stdout = child.stdout.take()?;
+    // Read on a thread, so a full pipe cannot stall the process.
+    let reader = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        stdout.read_to_end(&mut out).map(|_| out)
+    });
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < limit => std::thread::sleep(std::time::Duration::from_millis(50)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+        }
+    };
+    let out = reader.join().ok()?.ok()?;
+    status.filter(|s| s.success()).map(|_| out)
 }
 
 #[cfg(target_os = "macos")]
@@ -180,7 +217,10 @@ fn prepare(path: &Path) -> Result<Prepared, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("File tidak terbaca: {e}"))?;
     if is_video(path) {
         let info = video_info(&bytes);
-        return Ok(Prepared::Video { thumbnail: video_thumbnail(path), info, bytes });
+        // Only a real MP4/MOV goes to ffmpeg: a playlist named .mp4 (HLS,
+        // concat) could make it read other files or URLs into the thumbnail.
+        let thumbnail = (is_mp4(&bytes) && info.is_some()).then(|| video_thumbnail(path)).flatten();
+        return Ok(Prepared::Video { thumbnail, info, bytes });
     }
     if !is_picture(path) {
         return Ok(Prepared::Document(bytes));
@@ -596,6 +636,10 @@ mod tests {
     fn not_a_movie() {
         assert_eq!(video_info(b"plain text, not an mp4"), None);
         assert_eq!(video_info(&mp4_box(b"ftyp", b"isom")), None);
+        // Playlists named .mp4 never reach ffmpeg.
+        assert!(is_mp4(&mp4_box(b"ftyp", b"isom")));
+        assert!(!is_mp4(b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:0\nfile:///etc/passwd\n"));
+        assert!(!is_mp4(b"ffconcat version 1.0\nfile /etc/passwd\n"));
     }
 
     #[test]
