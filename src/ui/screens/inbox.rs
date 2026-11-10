@@ -2606,6 +2606,26 @@ fn compact_chat(
 }
 
 #[cfg(test)]
+mod finder_paste_tests {
+    use super::*;
+
+    #[test]
+    fn finder_copy_is_a_file_not_its_name() {
+        let photo = PathBuf::from("/Users/a/Desktop/foto liburan.png");
+        let doc = PathBuf::from("/Users/a/nota.pdf");
+        // Finder puts the names on the clipboard as text, one per file.
+        assert_eq!(copied_file("foto liburan.png", std::slice::from_ref(&photo)), Some(photo.clone()));
+        assert_eq!(copied_file("foto liburan.png\rnota.pdf", &[photo.clone(), doc.clone()]), Some(photo.clone()));
+        // Linux file managers give the full path.
+        assert_eq!(copied_file("/Users/a/nota.pdf\n", std::slice::from_ref(&doc)), Some(doc.clone()));
+        // Text that is not those names stays text.
+        assert_eq!(copied_file("lihat foto liburan.png ya", std::slice::from_ref(&photo)), None);
+        assert_eq!(copied_file("foto liburan.png", &[]), None);
+        assert_eq!(copied_file("", std::slice::from_ref(&photo)), None);
+    }
+}
+
+#[cfg(test)]
 mod paste_tests {
     use super::*;
 
@@ -2692,25 +2712,5 @@ mod member_color_tests {
         let distinct: std::collections::HashSet<_> =
             (0..40).map(|n| member_color(&format!("62812{n:04}@s.whatsapp.net"), true)).collect();
         assert!(distinct.len() >= 8, "members spread over the palette: {}", distinct.len());
-    }
-}
-
-#[cfg(test)]
-mod finder_paste_tests {
-    use super::*;
-
-    #[test]
-    fn finder_copy_is_a_file_not_its_name() {
-        let photo = PathBuf::from("/Users/a/Desktop/foto liburan.png");
-        let doc = PathBuf::from("/Users/a/nota.pdf");
-        // Finder puts the names on the clipboard as text, one per file.
-        assert_eq!(copied_file("foto liburan.png", std::slice::from_ref(&photo)), Some(photo.clone()));
-        assert_eq!(copied_file("foto liburan.png\rnota.pdf", &[photo.clone(), doc.clone()]), Some(photo.clone()));
-        // Linux file managers give the full path.
-        assert_eq!(copied_file("/Users/a/nota.pdf\n", std::slice::from_ref(&doc)), Some(doc.clone()));
-        // Text that is not those names stays text.
-        assert_eq!(copied_file("lihat foto liburan.png ya", std::slice::from_ref(&photo)), None);
-        assert_eq!(copied_file("foto liburan.png", &[]), None);
-        assert_eq!(copied_file("", std::slice::from_ref(&photo)), None);
     }
 }
