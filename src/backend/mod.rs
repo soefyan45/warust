@@ -186,13 +186,18 @@ pub enum Command {
     Send { id: String, chat: String, text: String },
     /// Queue a photo or document with an optional caption.
     SendFile { id: String, chat: String, path: PathBuf, caption: String },
-    /// The user opened a chat: clear its unread count.
+    /// The user opened a chat: clear its unread count and, unless "Kirim
+    /// tanda dibaca" is off, send read receipts and sync "read" to the phone.
     Seen { id: String, chat: String },
     /// Ask to be told when this contact types or comes online (as WhatsApp
     /// Web does when a chat is opened).
     WatchPresence { id: String, chat: String },
     /// Show (or stop showing) "sedang mengetik" in the chat on the contact's side.
     Typing { id: String, chat: String, typing: bool },
+    /// "Tandai belum dibaca": a local unread marker, also synced to the phone.
+    MarkUnread { id: String, chat: String },
+    /// Archive a chat, or take it out of the archive; synced to the phone.
+    Archive { id: String, chat: String, archived: bool },
     /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
     MarkDone { id: String, chat: String, done: bool },
     /// Ask the phone for messages older than the oldest one we have in `chat`.
@@ -464,6 +469,24 @@ fn open_store(data_dir: &std::path::Path, id: &str, name: &str, state: &Updater)
     Arc::new(Mutex::new(store))
 }
 
+/// `(sender, message id)` of the incoming messages that make up the chat's
+/// unread count (the latest ones; at least one when the chat carries an unread marker).
+fn unread_incoming(book: &Book, chat: &str) -> Vec<(String, String)> {
+    let Some(chat) = book.chats.iter().find(|c| c.jid == book.normalize(chat)) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<(String, String)> = chat
+        .messages
+        .iter()
+        .rev()
+        .filter(|m| !m.from_me && !m.id.starts_with("local-"))
+        .take(chat.unread as usize)
+        .map(|m| (m.sender.clone(), m.id.clone()))
+        .collect();
+    ids.reverse();
+    ids
+}
+
 async fn run(
     data_dir: PathBuf,
     state: Updater,
@@ -659,8 +682,35 @@ async fn run(
                 }
             }
             Command::Seen { id, chat } => {
+                let unread = state.book(&id).map(|book| unread_incoming(&book, &chat)).unwrap_or_default();
                 if let Some(store) = stores.get(&id) {
                     state.record(&id, store, &[store::seen_record(&chat)]);
+                }
+                // Nothing unread: no receipt and no app-state write, so merely
+                // clicking through read chats stays silent.
+                if state.settings().send_read
+                    && !unread.is_empty()
+                    && let Some(r) = running.get(&id)
+                {
+                    r.mark_chat_read(&id, &chat, unread, true, true);
+                }
+            }
+            Command::MarkUnread { id, chat } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::unread_record(&chat)]);
+                }
+                if state.settings().send_read
+                    && let Some(r) = running.get(&id)
+                {
+                    r.mark_chat_read(&id, &chat, Vec::new(), false, false);
+                }
+            }
+            Command::Archive { id, chat, archived } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::archive_record(&chat, archived)]);
+                }
+                if let Some(r) = running.get(&id) {
+                    r.set_archived(&id, &chat, archived);
                 }
             }
             Command::MarkDone { id, chat, done } => {

@@ -150,6 +150,54 @@ impl Running {
         });
     }
 
+    /// Read receipts (blue ticks) for incoming messages, given as
+    /// `(sender JID, message id)`, plus the app-state "read" flag so the phone
+    /// clears (or sets) its badge. `receipts` is false for "mark unread".
+    pub fn mark_chat_read(&self, id: &str, chat: &str, messages: Vec<(String, String)>, read: bool, receipts: bool) {
+        let Ok(chat) = chat.parse::<Jid>() else {
+            return;
+        };
+        let group = chat.to_string().ends_with("@g.us");
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            if receipts && read {
+                // One receipt per sender: in a group each member is its own author.
+                let mut by_sender: Vec<(Option<Jid>, Vec<String>)> = Vec::new();
+                for (sender, msg_id) in messages {
+                    let sender = group.then(|| sender.parse::<Jid>().ok()).flatten();
+                    match by_sender.iter_mut().find(|(s, _)| *s == sender) {
+                        Some((_, ids)) => ids.push(msg_id),
+                        None => by_sender.push((sender, vec![msg_id])),
+                    }
+                }
+                for (sender, ids) in by_sender {
+                    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+                    if let Err(e) = client.mark_as_read(&chat, sender.as_ref(), &ids).await {
+                        log::warn!("session {id}: read receipt failed: {e}");
+                    }
+                }
+            }
+            if let Err(e) = client.chat_actions().mark_chat_as_read(&chat, read, None).await {
+                log::warn!("session {id}: mark chat as read failed: {e}");
+            }
+        });
+    }
+
+    /// Archives or unarchives a chat on the phone's app state.
+    pub fn set_archived(&self, id: &str, chat: &str, archived: bool) {
+        let Ok(chat) = chat.parse::<Jid>() else {
+            return;
+        };
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            let actions = client.chat_actions();
+            let result = if archived { actions.archive_chat(&chat, None).await } else { actions.unarchive_chat(&chat, None).await };
+            if let Err(e) = result {
+                log::warn!("session {id}: archive sync failed: {e}");
+            }
+        });
+    }
+
     pub fn request_avatar(&self, jid: String) {
         let _ = self.avatars.send(jid);
     }
@@ -598,6 +646,18 @@ async fn on_event(
             for m in &receipt.message_ids {
                 state.emit(id, "message.status", json!({ "id": m.to_string(), "status": status.code() }));
             }
+        }
+        Event::ArchiveUpdate(update) => {
+            let archived = update.action.archived.unwrap_or(true);
+            state.record(id, chats, &[store::archive_record(&update.jid.to_string(), archived)]);
+        }
+        Event::MarkChatAsReadUpdate(update) => {
+            let record = if update.action.read.unwrap_or(true) {
+                store::seen_record(&update.jid.to_string())
+            } else {
+                store::unread_record(&update.jid.to_string())
+            };
+            state.record(id, chats, &[record]);
         }
         Event::HistorySync(lazy) => {
             let compressed = lazy.compressed_bytes().clone();

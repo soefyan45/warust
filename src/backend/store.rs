@@ -3,7 +3,7 @@
 //! at start). WhatsApp sends the history only once, at pairing, so it has to
 //! be kept here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -133,6 +133,9 @@ pub struct Chat {
     /// When the chat was marked done (Unix seconds); a later incoming message
     /// makes it need a reply again.
     pub done_at: Option<i64>,
+    /// Archived (here or on the phone): hidden from the main list. New
+    /// messages do not bring it back, as in WhatsApp.
+    pub archived: bool,
 }
 
 impl Chat {
@@ -210,6 +213,9 @@ pub struct Book {
     pub aliases: HashMap<String, String>,
     /// Status updates, oldest first; kept apart from the chats.
     pub statuses: Vec<StatusPost>,
+    /// Archived chats (normalized JIDs), also those without messages yet, so
+    /// an archive record that comes before the history still counts.
+    archived: HashSet<String>,
 }
 
 impl Book {
@@ -269,6 +275,7 @@ impl Book {
             unread: 0,
             messages: Vec::new(),
             done_at: None,
+            archived: self.archived.contains(jid),
         });
         self.chats.last_mut().expect("just pushed")
     }
@@ -400,6 +407,30 @@ impl Book {
                     let at = record.get("ts").and_then(Value::as_i64).unwrap_or(0);
                     if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
                         c.done_at = (at > 0).then_some(at);
+                    }
+                }
+            }
+            Some("archive") => {
+                // A missing `v` means archived; `false` takes it out again.
+                if let Some(chat) = text("chat") {
+                    let jid = self.normalize(&chat);
+                    let on = record.get("v").and_then(Value::as_bool).unwrap_or(true);
+                    if on {
+                        self.archived.insert(jid.clone());
+                    } else {
+                        self.archived.remove(&jid);
+                    }
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        c.archived = on;
+                    }
+                }
+            }
+            Some("unread") => {
+                // Local "Tandai belum dibaca": at least one unread until opened.
+                if let Some(chat) = text("chat") {
+                    let jid = self.normalize(&chat);
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        c.unread = c.unread.max(1);
                     }
                 }
             }
@@ -550,9 +581,61 @@ pub fn seen_record(chat: &str) -> Value {
     json!({ "t": "seen", "chat": chat })
 }
 
+/// Archives a chat, or (with `false`) takes it out of the archive.
+pub fn archive_record(chat: &str, archived: bool) -> Value {
+    json!({ "t": "archive", "chat": chat, "v": archived })
+}
+
+/// Marks a chat unread again (at least one unread message).
+pub fn unread_record(chat: &str) -> Value {
+    json!({ "t": "unread", "chat": chat })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replays records through a real file, as a restart does.
+    fn reopen(records: &[Value]) -> Book {
+        let dir = std::env::temp_dir().join(format!("warust-store-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let path = dir.join("s.jsonl");
+        let _ = fs::remove_dir_all(&dir);
+        {
+            let (mut store, mut book) = Store::open(&path);
+            store.write(&mut book, records);
+        }
+        let (_, book) = Store::open(&path);
+        let _ = fs::remove_dir_all(&dir);
+        book
+    }
+
+    #[test]
+    fn archive_state_round_trips_and_survives_new_messages() {
+        let chat = "628111000002@s.whatsapp.net";
+        let msg = |id: &str, ts: i64| msg_record(chat, id, false, chat, "x", ts, &Delivery::Received, true);
+        // Old files have no archive records: not archived.
+        assert!(!reopen(&[msg("a", 1)]).chats[0].archived);
+        let b = reopen(&[msg("a", 1), archive_record(chat, true), msg("b", 2)]);
+        assert!(b.chats[0].archived, "a new message keeps it archived");
+        let b = reopen(&[msg("a", 1), archive_record(chat, true), archive_record(chat, false)]);
+        assert!(!b.chats[0].archived);
+        // The phone may archive before the history brings the chat.
+        let b = reopen(&[archive_record(chat, true), msg("a", 1)]);
+        assert!(b.chats[0].archived);
+    }
+
+    #[test]
+    fn unread_marker_stays_until_seen() {
+        let chat = "628111000003@s.whatsapp.net";
+        let read = msg_record(chat, "a", false, chat, "x", 1, &Delivery::Received, false);
+        let b = reopen(&[read.clone(), unread_record(chat)]);
+        assert_eq!(b.chats[0].unread, 1);
+        let b = reopen(&[read.clone(), unread_record(chat), seen_record(chat)]);
+        assert_eq!(b.chats[0].unread, 0);
+        let more = msg_record(chat, "b", false, chat, "y", 2, &Delivery::Received, true);
+        let b = reopen(&[read, more, unread_record(chat)]);
+        assert_eq!(b.chats[0].unread, 1, "the marker never lowers a real count");
+    }
 
     #[test]
     fn status_reply_keeps_its_quote() {

@@ -134,6 +134,9 @@ pub struct Settings {
     pub notify: Notify,
     /// Let contacts see "sedang mengetik" while a reply is being typed.
     pub typing: bool,
+    /// Opening a chat sends read receipts (blue ticks) and syncs "read" to
+    /// the phone. Off: it only clears the local badge.
+    pub send_read: bool,
 }
 
 impl Default for Settings {
@@ -149,6 +152,7 @@ impl Default for Settings {
             status_seen_off: Vec::new(),
             notify: Notify::default(),
             typing: true,
+            send_read: true,
         }
     }
 }

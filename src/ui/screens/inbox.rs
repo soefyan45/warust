@@ -22,10 +22,11 @@ use crate::ui::widgets::{self, Kind, rich, rich_mono};
 use crate::ui::{State, emoji, icons, markup, pdf, stickers, time};
 
 const ROW: f32 = 60.0;
-/// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai".
+/// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai", "Diarsipkan".
 pub const TAB_REPLY: usize = 0;
 pub const TAB_ALL: usize = 1;
 pub const TAB_DONE: usize = 2;
+pub const TAB_ARCHIVED: usize = 3;
 /// Older messages stay in the store; the view paints the latest ones.
 const SHOWN: usize = 300;
 
@@ -331,7 +332,10 @@ fn chat_list(
     };
     let several = sessions.len() > 1;
     let combined = state.inbox_scope.is_none() && several;
-    let chats: Vec<(&SessionView, &Chat)> = scoped.iter().flat_map(|s| s.book.chats.iter().map(move |c| (*s, c))).collect();
+    let all_chats: Vec<(&SessionView, &Chat)> = scoped.iter().flat_map(|s| s.book.chats.iter().map(move |c| (*s, c))).collect();
+    let archived = all_chats.iter().filter(|(_, c)| c.archived).count();
+    // Archived chats stay out of the counts of the main tabs.
+    let chats: Vec<(&SessionView, &Chat)> = all_chats.into_iter().filter(|(_, c)| !c.archived).collect();
     let unread = chats.iter().filter(|(_, c)| c.unread > 0).count();
     let title = match &state.inbox_scope {
         Some(_) => scoped.first().map(|s| s.name.clone()).unwrap_or_default(),
@@ -365,13 +369,13 @@ fn chat_list(
         });
         ui.add_space(4.0);
     }
-    if state.chat_tab > TAB_DONE {
+    if state.chat_tab > TAB_ARCHIVED {
         state.chat_tab = TAB_REPLY;
     }
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         let waiting = chats.iter().filter(|(_, c)| c.needs_reply()).count();
-        let labels = [format!("Perlu balas · {waiting}"), format!("Semua · {}", chats.len()), "Selesai".to_owned()];
+        let labels = [format!("Perlu balas · {waiting}"), format!("Semua · {}", chats.len()), "Selesai".to_owned(), format!("Diarsipkan · {archived}")];
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         widgets::tabs(ui, &labels, &mut state.chat_tab);
     });
@@ -396,6 +400,7 @@ fn chat_list(
         let empty = match state.chat_tab {
             TAB_REPLY => "Semua chat sudah dibalas.",
             TAB_DONE => "Belum ada chat yang ditandai selesai.",
+            TAB_ARCHIVED => "Belum ada chat yang diarsipkan.",
             _ => "Tidak ada chat di sini.",
         };
         ui.vertical_centered(|ui| ui.label(rich(empty, 13.0, Weight::Regular, p.muted)));
@@ -427,7 +432,9 @@ fn chat_list(
                         && state.chat_selected.as_deref() == Some(chat.jid.as_str());
                     let title = super::chat_title(&s.book, chat);
                     let via_number = via.then_some(*s);
-                    if chat_row(ui, p, rect, &title, chat, picture, selected, via_number, typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
+                    let row = chat_row(ui, p, rect, &title, chat, picture, selected, via_number, typing_label(state, &s.id, &s.book, chat).as_deref());
+                    chat_menu(&row, s, chat, &mut commands);
+                    if row.clicked() {
                         state.inbox_session = Some(s.id.clone());
                         state.chat_selected = Some(chat.jid.clone());
                         if chat.unread > 0 {
@@ -447,6 +454,8 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
     let query = state.chat_search.trim().to_lowercase();
     let keep = |s: &SessionView, c: &Chat| {
         let tab = match tab {
+            TAB_ARCHIVED => c.archived,
+            _ if c.archived => false,
             TAB_REPLY => c.needs_reply(),
             TAB_DONE => c.is_done(),
             _ => true,
@@ -470,6 +479,24 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
         lines.extend(mine.into_iter().map(|(s, c)| Line::Chat(s, c)));
     }
     lines
+}
+
+/// Right-click menu of a chat row (wide and phone lists): read state and archive.
+fn chat_menu(row: &egui::Response, session: &SessionView, chat: &Chat, commands: &mut Vec<Command>) {
+    row.context_menu(|ui| {
+        ui.set_min_width(180.0);
+        let (id, jid) = (session.id.clone(), chat.jid.clone());
+        if chat.unread > 0 {
+            if ui.button("Tandai sudah dibaca").clicked() {
+                commands.push(Command::Seen { id: id.clone(), chat: jid.clone() });
+            }
+        } else if ui.button("Tandai belum dibaca").clicked() {
+            commands.push(Command::MarkUnread { id: id.clone(), chat: jid.clone() });
+        }
+        if ui.button(if chat.archived { "Keluarkan dari arsip" } else { "Arsipkan" }).clicked() {
+            commands.push(Command::Archive { id, chat: jid, archived: !chat.archived });
+        }
+    });
 }
 
 /// "● CS Utama  4410 ........ 3 chat", red when the number cannot reply.
@@ -1531,13 +1558,33 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
         Some(id) => sessions.iter().filter(|s| &s.id == id).collect(),
         None => sessions.iter().collect(),
     };
-    let lines = lines_for(state, &scoped, TAB_ALL, combined && state.inbox_grouped);
+    // The phone list has no tabs: "Diarsipkan" is a switch above the list.
+    let archived_view = state.chat_tab == TAB_ARCHIVED;
+    let archived = scoped.iter().map(|s| s.book.chats.iter().filter(|c| c.archived).count()).sum::<usize>();
+    let lines = lines_for(state, &scoped, if archived_view { TAB_ARCHIVED } else { TAB_ALL }, combined && state.inbox_grouped);
     let via = combined && !state.inbox_grouped;
     CentralPanel::default().frame(Frame::NONE.fill(p.panel)).show(ui, |ui| {
         ui.painter().hline(ui.max_rect().x_range(), ui.max_rect().top(), Stroke::new(1.0, p.border));
+        if archived_view || archived > 0 {
+            let label = if archived_view { "← Kembali ke semua chat".to_owned() } else { format!("Diarsipkan · {archived}") };
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(PAD);
+                let link = ui.add(egui::Button::new(rich(&label, 13.0, Weight::Medium, p.accent_text)).frame(false));
+                if link.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    state.chat_tab = if archived_view { TAB_ALL } else { TAB_ARCHIVED };
+                }
+            });
+        }
         if lines.is_empty() {
             ui.add_space(32.0);
-            let text = if sessions.is_empty() { "Belum ada nomor. Tautkan nomor di tab Perangkat." } else { "Tidak ada chat di sini." };
+            let text = if sessions.is_empty() {
+                "Belum ada nomor. Tautkan nomor di tab Perangkat."
+            } else if archived_view {
+                "Belum ada chat yang diarsipkan."
+            } else {
+                "Tidak ada chat di sini."
+            };
             ui.vertical_centered(|ui| ui.label(rich(text, 14.0, Weight::Regular, p.muted)));
             return;
         }
@@ -1568,7 +1615,9 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                         }
                         let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
                         let title = super::chat_title(&s.book, chat);
-                        if compact_row(ui, &p, rect, &title, chat, picture, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
+                        let row = compact_row(ui, &p, rect, &title, chat, picture, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref());
+                        chat_menu(&row, s, chat, &mut commands);
+                        if row.clicked() {
                             state.inbox_session = Some(s.id.clone());
                             state.chat_selected = Some(chat.jid.clone());
                             if chat.unread > 0 {

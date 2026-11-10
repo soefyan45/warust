@@ -63,6 +63,8 @@ fn router(context: Context) -> Router {
         .route("/sessions/{id}/pair-code", post(pair_code))
         .route("/sessions/{id}/logout", post(logout))
         .route("/sessions/{id}/chats", get(list_chats))
+        .route("/sessions/{id}/chats/{jid}/read", post(mark_read))
+        .route("/sessions/{id}/chats/{jid}/archive", post(archive_chat))
         .route("/sessions/{id}/statuses", get(list_statuses))
         .route("/sessions/{id}/messages/text", post(send_text))
         .route("/sessions/{id}/messages/media", post(send_media))
@@ -248,12 +250,65 @@ async fn list_chats(
                 "name": book.name_of(&c.jid),
                 "is_group": c.is_group(),
                 "unread": c.unread,
+                "archived": c.archived,
                 "last_timestamp": c.last_ts(),
                 "last_text": last.map(|m| &m.text),
             })
         })
         .collect();
     Ok(Json(json!({ "chats": chats })).into_response())
+}
+
+/// The chat in the session's book, for the actions that need a connection.
+fn known_chat(view: &SessionView, jid: &str) -> Result<String, Response> {
+    if view.status != Status::Connected {
+        let (status, _) = view.status.code();
+        return Err(error(StatusCode::CONFLICT, "not_connected", format!("Sesi tidak terhubung ({status})")));
+    }
+    let chat = view.book.normalize(jid);
+    if view.book.chats.iter().any(|c| c.jid == chat) {
+        Ok(chat)
+    } else {
+        Err(error(StatusCode::NOT_FOUND, "chat_not_found", format!("Chat {jid} tidak ada")))
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct MarkRead {
+    /// `false` marks the chat unread; the default is read.
+    read: Option<bool>,
+}
+
+/// Sends read receipts and syncs "read" (or "unread") to the phone.
+async fn mark_read(
+    _: Authed,
+    State(context): State<Context>,
+    Path((id, jid)): Path<(String, String)>,
+    body: Option<Json<MarkRead>>,
+) -> Answer {
+    let view = session(&context, &id)?;
+    let chat = known_chat(&view, &jid)?;
+    let read = body.and_then(|Json(b)| b.read).unwrap_or(true);
+    let command = if read { Command::Seen { id: id.clone(), chat: chat.clone() } } else { Command::MarkUnread { id: id.clone(), chat: chat.clone() } };
+    send(&context, command)?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "session": id, "chat": chat, "read": read }))).into_response())
+}
+
+#[derive(Deserialize)]
+struct ArchiveBody {
+    archived: bool,
+}
+
+async fn archive_chat(
+    _: Authed,
+    State(context): State<Context>,
+    Path((id, jid)): Path<(String, String)>,
+    Json(body): Json<ArchiveBody>,
+) -> Answer {
+    let view = session(&context, &id)?;
+    let chat = known_chat(&view, &jid)?;
+    send(&context, Command::Archive { id: id.clone(), chat: chat.clone(), archived: body.archived })?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "session": id, "chat": chat, "archived": body.archived }))).into_response())
 }
 
 /// Status updates of the last 24 hours, by poster.
