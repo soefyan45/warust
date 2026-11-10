@@ -15,7 +15,7 @@ maintainer = "Soefyan Syah <2637377+soefyan45@users.noreply.github.com>"
 section = "net"
 priority = "optional"
 depends = "$auto"
-recommends = "zenity, poppler-utils, libnotify-bin, gnome-session-canberra"
+recommends = "zenity, poppler-utils, libnotify-bin, gnome-session-canberra, ffmpeg"
 extended-description = """\
 Many WhatsApp numbers in one inbox, a status page, a local REST API, signed \
 webhooks and triggers. Unofficial client, not affiliated with WhatsApp or Meta."""
