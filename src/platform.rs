@@ -68,6 +68,25 @@ pub fn open(target: impl AsRef<OsStr>) {
     }
 }
 
+/// Opens an http(s) link in the default browser. The link is never passed
+/// through a shell (`cmd` would read `&` in a URL as a second command).
+pub fn open_url(url: &str) {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) || url.chars().any(char::is_control) {
+        return;
+    }
+    let spawned = if cfg!(windows) {
+        command("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn()
+    } else if cfg!(target_os = "macos") {
+        command("open").arg(url).spawn()
+    } else {
+        command("xdg-open").arg(url).spawn()
+    };
+    if let Err(e) = spawned {
+        log::warn!("cannot open link: {e}");
+    }
+}
+
 /// Asks for one file with the OS's dialog; blocks, so call it off the UI
 /// thread. `None` when cancelled or when no dialog is available.
 pub fn pick_file(title: &str, images_only: bool) -> Option<PathBuf> {
@@ -128,6 +147,54 @@ pub fn parse_offset(text: &str) -> Option<i64> {
     Some(sign * (hours * 3600 + minutes * 60))
 }
 
+/// Shows `count` unread messages on the app's taskbar or Dock icon; 0 hides
+/// it. Linux: the Unity LauncherEntry signal (Ubuntu Dock, Dash to Dock, Dash
+/// to Panel, Plasma), sent with `gdbus` for the `warust.desktop` entry.
+/// macOS: the Dock badge. Windows: nothing yet; the window title has it.
+pub fn set_unread_badge(count: u32) {
+    #[cfg(target_os = "linux")]
+    {
+        let props = format!("{{'count': <int64 {count}>, 'count-visible': <{}>}}", count > 0);
+        let mut emit = command("gdbus");
+        emit.args([
+            "emit",
+            "--session",
+            "--object-path",
+            "/com/canonical/unity/launcherentry/warust",
+            "--signal",
+            "com.canonical.Unity.LauncherEntry.Update",
+            "'application://warust.desktop'",
+            &props,
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+        // Waited for on its own thread, so no zombie is left behind.
+        std::thread::spawn(move || {
+            if let Err(e) = emit.status() {
+                log::debug!("unread badge not sent: {e}");
+            }
+        });
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::NSString;
+        // AppKit only from the main thread, where the UI runs.
+        if let Some(mtm) = MainThreadMarker::new() {
+            let label = (count > 0).then(|| NSString::from_str(&count.to_string()));
+            NSApplication::sharedApplication(mtm).dockTile().setBadgeLabel(label.as_deref());
+        }
+    }
+    #[cfg(windows)]
+    let _ = count;
+}
+
+/// The window title with the unread count in front, as messaging apps do.
+pub fn window_title(count: u32) -> String {
+    if count == 0 { "warust".to_owned() } else { format!("({count}) warust") }
+}
+
 /// Fills `bytes` from the OS's secure random source.
 pub fn random_bytes(bytes: &mut [u8]) -> bool {
     getrandom::fill(bytes).is_ok()
@@ -154,6 +221,8 @@ mod tests {
         assert_eq!(parse_offset("WIB"), None);
         assert_eq!(powershell_quote("it's"), "it''s");
         assert_eq!(applescript_quote(r#"a "b" \c"#), r#"a \"b\" \\c"#);
+        assert_eq!(window_title(0), "warust");
+        assert_eq!(window_title(12), "(12) warust");
         let mut a = [0u8; 16];
         let mut b = [0u8; 16];
         assert!(random_bytes(&mut a) && random_bytes(&mut b) && a != b);

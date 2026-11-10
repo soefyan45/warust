@@ -1,6 +1,7 @@
 //! WhatsApp text formatting: `*bold*`, `_italic_`, `~strike~`, `` `code` ``
 //! and ```` ```monospace``` ````. The text is sent as typed (the recipient's
-//! WhatsApp renders it); this module only renders it in our bubbles.
+//! WhatsApp renders it); this module only renders it in our bubbles, with
+//! web links underlined (`links` finds them for clicks).
 
 use egui::text::{LayoutJob, TextFormat};
 use egui::{Color32, Stroke};
@@ -207,11 +208,65 @@ pub fn job_with_mentions(
             };
             match mention {
                 Some(m) => emoji::append(&mut job, &format!("@{}", m.name), format),
-                None => emoji::append(&mut job, &piece, format),
+                None if style.code => emoji::append(&mut job, &piece, format),
+                None => append_linked(&mut job, &piece, format, fg),
             }
         }
     }
     job
+}
+
+/// Appends `text`, with its web links underlined; the bubble opens them on click.
+fn append_linked(job: &mut LayoutJob, text: &str, format: TextFormat, color: Color32) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut at = 0;
+    for (range, _) in links(text) {
+        emoji::append(job, &chars[at..range.start].iter().collect::<String>(), format.clone());
+        let underline = TextFormat { underline: Stroke::new(1.0, color), ..format.clone() };
+        emoji::append(job, &chars[range.clone()].iter().collect::<String>(), underline);
+        at = range.end;
+    }
+    emoji::append(job, &chars[at..].iter().collect::<String>(), format);
+}
+
+/// Web links in `text`: their char range and the URL to open (`www.` gets
+/// `https://`). Only http(s), so a message cannot open a local file or app.
+pub fn links(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i].is_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < chars.len() && !chars[i].is_whitespace() {
+            i += 1;
+        }
+        let word: String = chars[start..i].iter().collect();
+        let lower = word.to_ascii_lowercase();
+        let Some(offset) = ["https://", "http://", "www."].iter().filter_map(|p| lower.find(p)).min() else {
+            continue;
+        };
+        // Only at the word start or after an opening bracket/quote.
+        let lead = word[..offset].chars().count();
+        if !word[..offset].chars().all(|c| matches!(c, '(' | '[' | '<' | '"' | '\'')) {
+            continue;
+        }
+        let mut end = i;
+        while end > start + lead && matches!(chars[end - 1], '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '>' | '"' | '\'' | '*' | '_' | '~') {
+            end -= 1;
+        }
+        let shown: String = chars[start + lead..end].iter().collect();
+        let host = shown.split("://").nth(1).unwrap_or(&shown);
+        if host.len() < 4 || !host.contains('.') {
+            continue;
+        }
+        let url = if shown.to_ascii_lowercase().starts_with("www.") { format!("https://{shown}") } else { shown };
+        out.push((start + lead..end, url));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -220,6 +275,17 @@ mod tests {
 
     fn s(bold: bool, italic: bool, strike: bool, code: bool) -> Style {
         Style { bold, italic, strike, code }
+    }
+
+    #[test]
+    fn finds_web_links() {
+        let found = links("lihat https://maps.app.goo.gl/xDm?g_st=aw, atau (www.example.com).");
+        let urls: Vec<&str> = found.iter().map(|(_, u)| u.as_str()).collect();
+        assert_eq!(urls, ["https://maps.app.goo.gl/xDm?g_st=aw", "https://www.example.com"]);
+        let text: Vec<char> = "lihat https://a.co.".chars().collect();
+        let (range, _) = &links("lihat https://a.co.")[0];
+        assert_eq!(text[range.clone()].iter().collect::<String>(), "https://a.co");
+        assert!(links("file:///etc/passwd javascript:alert(1) halo.http://x").is_empty());
     }
 
     #[test]

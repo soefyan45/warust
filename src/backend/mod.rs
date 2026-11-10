@@ -24,6 +24,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use registry::Registry;
 use session::{Body, Running};
 pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
+pub use registry::{NAME_MAX, clean_name};
 pub use session::mask_phone;
 pub use settings::Settings;
 pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost, short_jid};
@@ -197,21 +198,31 @@ pub enum Command {
     Logout { id: String },
     /// Unlink (if linked) and delete the session.
     Remove { id: String },
+    /// A new name for a number (already checked with `registry::clean_name`).
+    Rename { id: String, name: String },
     /// Queue a text message. `chat` is a JID from the session's book.
     /// `mentions` are member JIDs (`Member::jid`) whose `@<user part>` is in `text`.
     Send { id: String, chat: String, text: String, mentions: Vec<String> },
     /// Fetch a group's members into `Shared::members` (and learn their LID ↔
     /// phone mappings). Sent when a group chat is opened.
     GroupMembers { id: String, chat: String },
+    /// Queue a text that quotes message `reply_to` of `chat`, mentioning
+    /// `mentions` like `Send`.
+    Reply { id: String, chat: String, text: String, reply_to: String, mentions: Vec<String> },
     /// Queue a photo or document with an optional caption.
     SendFile { id: String, chat: String, path: PathBuf, caption: String },
-    /// The user opened a chat: clear its unread count.
+    /// The user opened a chat: clear its unread count and, unless "Kirim
+    /// tanda dibaca" is off, send read receipts and sync "read" to the phone.
     Seen { id: String, chat: String },
     /// Ask to be told when this contact types or comes online (as WhatsApp
     /// Web does when a chat is opened).
     WatchPresence { id: String, chat: String },
     /// Show (or stop showing) "sedang mengetik" in the chat on the contact's side.
     Typing { id: String, chat: String, typing: bool },
+    /// "Tandai belum dibaca": a local unread marker, also synced to the phone.
+    MarkUnread { id: String, chat: String },
+    /// Archive a chat, or take it out of the archive; synced to the phone.
+    Archive { id: String, chat: String, archived: bool },
     /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
     MarkDone { id: String, chat: String, done: bool },
     /// Ask the phone for messages older than the oldest one we have in `chat`.
@@ -227,8 +238,13 @@ pub enum Command {
     /// Comment or react (one emoji) on a contact's status, from the number
     /// that saw it; goes to the poster's chat through the paced queue.
     StatusReply { id: String, msg_id: String, text: String },
+    /// Queue a forwarded text message to each chat (paced like any send).
+    Forward { id: String, chats: Vec<String>, text: String },
     /// Queue a message from the REST API under an id chosen by the caller.
     Enqueue { id: String, chat: String, body: session::Body, local_id: String },
+    /// Pin a message for everyone (for `length`), or unpin it. `msg_id` is a real
+    /// WhatsApp id from `chat`'s messages.
+    Pin { id: String, chat: String, msg_id: String, pinned: bool, length: store::PinLength },
     /// Save new settings; restarts the API server when its part changed.
     SaveSettings(Settings),
     /// Send a `webhook.test` event to the global webhook URL.
@@ -310,6 +326,14 @@ pub(crate) struct Updater {
 }
 
 impl Updater {
+    /// Numbers that could not start because another process holds their lock.
+    fn locked(&self) -> Vec<String> {
+        let Ok(shared) = self.shared.lock() else {
+            return Vec::new();
+        };
+        shared.sessions.iter().filter(|s| s.status == Status::Locked).map(|s| s.id.clone()).collect()
+    }
+
     pub(crate) fn update(&self, id: &str, change: impl FnOnce(&mut SessionView)) {
         let mut changed = None;
         if let Ok(mut shared) = self.shared.lock() {
@@ -497,6 +521,27 @@ fn open_store(data_dir: &std::path::Path, id: &str, name: &str, state: &Updater)
     Arc::new(Mutex::new(store))
 }
 
+/// `(sender, message id)` of the incoming messages that make up the chat's
+/// unread count (the latest ones; at least one when the chat carries an unread marker).
+fn unread_incoming(book: &Book, chat: &str) -> Vec<(String, String)> {
+    let Some(chat) = book.chats.iter().find(|c| c.jid == book.normalize(chat)) else {
+        return Vec::new();
+    };
+    let mut ids: Vec<(String, String)> = chat
+        .messages
+        .iter()
+        .rev()
+        .filter(|m| !m.from_me && !m.id.starts_with("local-"))
+        .take(chat.unread as usize)
+        .map(|m| (m.sender.clone(), m.id.clone()))
+        .collect();
+    ids.reverse();
+    ids
+}
+
+/// How often a number locked by another process is tried again.
+const LOCK_RETRY: Duration = Duration::from_secs(5);
+
 async fn run(
     data_dir: PathBuf,
     state: Updater,
@@ -533,7 +578,28 @@ async fn run(
         }
     }
 
-    while let Some(command) = commands.recv().await {
+    // A number locked by another warust (one still closing, say) is tried
+    // again until the lock frees, instead of staying "Dipakai proses lain".
+    let mut retry = tokio::time::interval(LOCK_RETRY);
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        let command = tokio::select! {
+            command = commands.recv() => match command {
+                Some(command) => command,
+                None => break,
+            },
+            _ = retry.tick() => {
+                for id in state.locked() {
+                    if !running.contains_key(&id)
+                        && let Some(store) = stores.get(&id).cloned()
+                        && let Some(r) = session::start(&id, &registry, &state, store).await
+                    {
+                        running.insert(id, r);
+                    }
+                }
+                continue;
+            }
+        };
         match command {
             Command::Add { id, name } => {
                 registry.add(&id, &name);
@@ -556,6 +622,11 @@ async fn run(
                     } else {
                         r.stop().await;
                     }
+                }
+                // Another warust may be using these keys: never delete them under it.
+                if registry.in_use(&id) {
+                    state.update(&id, |v| v.status = Status::Locked);
+                    continue;
                 }
                 registry.delete_store(&id);
                 // Chats stay: re-linking the same number brings the history again,
@@ -581,6 +652,10 @@ async fn run(
                     v.pair_code = None;
                 });
             }
+            Command::Rename { id, name } => {
+                registry.rename(&id, &name);
+                state.update(&id, |v| v.name = name);
+            }
             Command::Remove { id } => {
                 if let Some(r) = running.remove(&id) {
                     if r.is_linked() {
@@ -588,6 +663,10 @@ async fn run(
                     } else {
                         r.stop().await;
                     }
+                }
+                if registry.in_use(&id) {
+                    state.update(&id, |v| v.status = Status::Locked);
+                    continue;
                 }
                 registry.remove(&id);
                 stores.remove(&id);
@@ -600,6 +679,26 @@ async fn run(
                     r.enqueue(&id, chat, body, &state, store)
                 }
                 _ => log::warn!("send: session {id} is not running"),
+            },
+            Command::Reply { id, chat, text, reply_to, mentions } => {
+                // A quote that is gone (or never in this number's book) goes out without it.
+                let quoted = state.book(&id).and_then(|book| session::reply_body(&book, &chat, text.clone(), &reply_to, mentions.clone()));
+                if quoted.is_none() {
+                    log::warn!("reply: session {id} has no message {reply_to} in {chat}; sending without the quote");
+                }
+                let body = quoted.unwrap_or(if mentions.is_empty() { Body::Text(text) } else { Body::Mention { text, mentions } });
+                match (running.get(&id), stores.get(&id)) {
+                    (Some(r), Some(store)) => r.enqueue(&id, chat, body, &state, store),
+                    _ => log::warn!("reply: session {id} is not running"),
+                }
+            }
+            Command::Forward { id, chats, text } => match (running.get(&id), stores.get(&id)) {
+                (Some(r), Some(store)) => {
+                    for chat in chats {
+                        r.enqueue(&id, chat, Body::Forward(text.clone()), &state, store);
+                    }
+                }
+                _ => log::warn!("forward: session {id} is not running"),
             },
             Command::SendFile { id, chat, path, caption } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::File { path, caption }, &state, store),
@@ -699,9 +798,51 @@ async fn run(
                     }
                 }
             }
+            Command::Pin { id, chat, msg_id, pinned, length } => {
+                let found = state.book(&id).and_then(|book| {
+                    let jid = book.normalize(&chat);
+                    let c = book.chats.iter().find(|c| c.jid == jid)?;
+                    let m = c.messages.iter().find(|m| m.id == msg_id)?;
+                    Some((c.jid.clone(), m.from_me, m.sender.clone()))
+                });
+                match (running.get(&id), found) {
+                    (Some(r), Some((chat, from_me, sender))) => {
+                        let target = session::PinTarget { chat, msg_id, sender: (!from_me).then_some(sender) };
+                        r.pin(target, pinned.then_some(length));
+                    }
+                    _ => log::warn!("pin: session {id} is not running or the message is gone"),
+                }
+            }
             Command::Seen { id, chat } => {
+                let unread = state.book(&id).map(|book| unread_incoming(&book, &chat)).unwrap_or_default();
                 if let Some(store) = stores.get(&id) {
                     state.record(&id, store, &[store::seen_record(&chat)]);
+                }
+                // Nothing unread: no receipt and no app-state write, so merely
+                // clicking through read chats stays silent.
+                if state.settings().send_read
+                    && !unread.is_empty()
+                    && let Some(r) = running.get(&id)
+                {
+                    r.mark_chat_read(&id, &chat, unread, true, true);
+                }
+            }
+            Command::MarkUnread { id, chat } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::unread_record(&chat)]);
+                }
+                if state.settings().send_read
+                    && let Some(r) = running.get(&id)
+                {
+                    r.mark_chat_read(&id, &chat, Vec::new(), false, false);
+                }
+            }
+            Command::Archive { id, chat, archived } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::archive_record(&chat, archived)]);
+                }
+                if let Some(r) = running.get(&id) {
+                    r.set_archived(&id, &chat, archived);
                 }
             }
             Command::MarkDone { id, chat, done } => {

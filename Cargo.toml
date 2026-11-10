@@ -42,6 +42,10 @@ env_logger = "0.11"
 eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "x11", "default_fonts", "accesskit"] }
 # Same version eframe pulls in; named directly so the UI code can `use egui::…`.
 egui = "0.37"
+# Already in the tree through eframe: its arboard backend connects the system
+# clipboard (text, and images for pasted screenshots) on Linux, Windows and
+# macOS. eframe's own "clipboard" feature would also add smithay-clipboard.
+egui-winit = { version = "0.37", default-features = false, features = ["arboard"] }
 # Already in the tree through egui; color_fonts draws the colour bitmaps of the
 # bundled Noto Color Emoji (assets/fonts) instead of missing-glyph boxes.
 epaint = { version = "0.37", features = ["color_fonts"] }
@@ -76,6 +80,8 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSBundle", "NSError", "NSObject", "NSSet"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+# The unread count on the Dock icon; already in the tree through winit.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder"] }
 
 # Windows: toasts through WinRT, the same windows crate accesskit already uses.
 [target.'cfg(windows)'.dependencies]

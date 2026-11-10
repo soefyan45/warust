@@ -3,7 +3,7 @@
 //! at start). WhatsApp sends the history only once, at pairing, so it has to
 //! be kept here.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -78,6 +78,16 @@ pub struct ChatMsg {
     pub mentions: Vec<String>,
     /// An incoming group message that mentions this number. Record key `mme`.
     pub mentions_me: bool,
+    /// Shown as "Diteruskan": it came in forwarded, or we forwarded it.
+    pub forwarded: bool,
+}
+
+impl ChatMsg {
+    /// Stage 1 of forwarding: plain text only. Media, locations and
+    /// contacts are only a label here, not something to send again.
+    pub fn forwardable(&self) -> bool {
+        self.media.is_none() && !self.text.trim().is_empty() && !matches!(self.text.as_str(), "[Lokasi]" | "[Kontak]")
+    }
 }
 
 /// The message a reply quotes.
@@ -138,9 +148,79 @@ pub struct Chat {
     /// When the chat was marked done (Unix seconds); a later incoming message
     /// makes it need a reply again.
     pub done_at: Option<i64>,
+    /// Archived (here or on the phone): hidden from the main list. New
+    /// messages do not bring it back, as in WhatsApp.
+    pub archived: bool,
+    /// Pinned messages, oldest pin first; may include expired ones.
+    pub pins: Vec<Pin>,
+}
+
+/// How long a pinned message stays pinned (the choices WhatsApp offers).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PinLength {
+    Hours24,
+    Days7,
+    Days30,
+}
+
+impl PinLength {
+    pub fn secs(self) -> i64 {
+        match self {
+            Self::Hours24 => 86_400,
+            Self::Days7 => 604_800,
+            Self::Days30 => 2_592_000,
+        }
+    }
+
+    /// The API name: `24h`, `7d` or `30d`.
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::Hours24 => "24h",
+            Self::Days7 => "7d",
+            Self::Days30 => "30d",
+        }
+    }
+
+    pub fn parse(code: &str) -> Option<Self> {
+        match code {
+            "24h" => Some(Self::Hours24),
+            "7d" => Some(Self::Days7),
+            "30d" => Some(Self::Days30),
+            _ => None,
+        }
+    }
+
+    /// Nearest choice for a duration that came in a pin message from the phone.
+    pub fn from_secs(secs: i64) -> Self {
+        match secs {
+            s if s <= 0 => Self::Days7,
+            s if s <= Self::Hours24.secs() => Self::Hours24,
+            s if s <= Self::Days7.secs() => Self::Days7,
+            _ => Self::Days30,
+        }
+    }
+}
+
+/// A pinned message.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pin {
+    pub id: String,
+    /// When it was pinned (Unix seconds).
+    pub ts: i64,
+    /// When the pin lapses (Unix seconds).
+    pub expires: i64,
 }
 
 impl Chat {
+    /// Pins that have not lapsed at `now`, oldest pin first (the last is the latest).
+    pub fn active_pins(&self, now: i64) -> Vec<&Pin> {
+        self.pins.iter().filter(|p| p.expires > now).collect()
+    }
+
+    pub fn is_pinned(&self, msg_id: &str, now: i64) -> bool {
+        self.pins.iter().any(|p| p.id == msg_id && p.expires > now)
+    }
+
     /// Time of the contact's latest message, 0 when there is none.
     pub fn last_incoming_ts(&self) -> i64 {
         self.messages.iter().rev().find(|m| !m.from_me).map(|m| m.ts).unwrap_or(0)
@@ -237,6 +317,9 @@ pub struct Book {
     pub aliases: HashMap<String, String>,
     /// Status updates, oldest first; kept apart from the chats.
     pub statuses: Vec<StatusPost>,
+    /// Archived chats (normalized JIDs), also those without messages yet, so
+    /// an archive record that comes before the history still counts.
+    archived: HashSet<String>,
 }
 
 impl Book {
@@ -343,6 +426,8 @@ impl Book {
             unread: 0,
             messages: Vec::new(),
             done_at: None,
+            archived: self.archived.contains(jid),
+            pins: Vec::new(),
         });
         self.chats.last_mut().expect("just pushed")
     }
@@ -356,7 +441,15 @@ impl Book {
         match record.get("t").and_then(Value::as_str) {
             Some("lid") => {
                 if let (Some(lid), Some(pn)) = (text("lid"), text("pn")) {
-                    self.lid_to_pn.insert(bare(&lid), bare(&pn));
+                    let (lid, pn) = (bare(&lid), bare(&pn));
+                    // An archive record may have come before this mapping.
+                    if self.archived.remove(&lid) {
+                        self.archived.insert(pn.clone());
+                        if let Some(c) = self.chats.iter_mut().find(|c| c.jid == pn) {
+                            c.archived = true;
+                        }
+                    }
+                    self.lid_to_pn.insert(lid, pn);
                 }
             }
             Some("name") => {
@@ -413,6 +506,7 @@ impl Book {
                         .map(|a| a.iter().filter_map(|j| j.as_str().map(str::to_owned)).collect())
                         .unwrap_or_default(),
                     mentions_me: record.get("mme").and_then(Value::as_bool).unwrap_or(false),
+                    forwarded: record.get("fw").and_then(Value::as_bool).unwrap_or(false),
                 };
                 let unread = record.get("unread").and_then(Value::as_bool).unwrap_or(false);
                 let chat = self.chat_mut(&jid);
@@ -480,6 +574,51 @@ impl Book {
                     let at = record.get("ts").and_then(Value::as_i64).unwrap_or(0);
                     if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
                         c.done_at = (at > 0).then_some(at);
+                    }
+                }
+            }
+            Some("archive") => {
+                // A missing `v` means archived; `false` takes it out again.
+                if let Some(chat) = text("chat") {
+                    let jid = self.normalize(&chat);
+                    let on = record.get("v").and_then(Value::as_bool).unwrap_or(true);
+                    if on {
+                        self.archived.insert(jid.clone());
+                    } else {
+                        self.archived.remove(&jid);
+                    }
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        c.archived = on;
+                    }
+                }
+            }
+            Some("unread") => {
+                // Local "Tandai belum dibaca": at least one unread until opened.
+                if let Some(chat) = text("chat") {
+                    let jid = self.normalize(&chat);
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        c.unread = c.unread.max(1);
+                    }
+                }
+            }
+            Some("pin") => {
+                // Only for chats we already have; a pin never creates an empty chat.
+                if let (Some(chat), Some(id)) = (text("chat"), text("id")) {
+                    let jid = self.normalize(&chat);
+                    let ts = record.get("ts").and_then(Value::as_i64).unwrap_or(0);
+                    let expires = record.get("exp").and_then(Value::as_i64).unwrap_or(ts + PinLength::Days7.secs());
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        c.pins.retain(|p| p.id != id);
+                        c.pins.push(Pin { id, ts, expires });
+                        c.pins.sort_by_key(|p| p.ts);
+                    }
+                }
+            }
+            Some("unpin") => {
+                if let (Some(chat), Some(id)) = (text("chat"), text("id")) {
+                    let jid = self.normalize(&chat);
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        c.pins.retain(|p| p.id != id);
                     }
                 }
             }
@@ -601,6 +740,14 @@ pub fn with_mentions(mut record: Value, mentions: &[String], mentions_me: bool) 
     record
 }
 
+/// Marks a msg record as forwarded (absent means not).
+pub fn with_forwarded(mut record: Value, forwarded: bool) -> Value {
+    if let (true, Some(object)) = (forwarded, record.as_object_mut()) {
+        object.insert("fw".to_owned(), true.into());
+    }
+    record
+}
+
 /// Adds what the message quotes to its msg record.
 pub fn with_quote(mut record: Value, quote: &Quote) -> Value {
     if let Some(object) = record.as_object_mut() {
@@ -655,13 +802,83 @@ pub fn done_record(chat: &str, ts: i64) -> Value {
     json!({ "t": "done", "chat": chat, "ts": ts })
 }
 
+/// Pins message `id` at `ts` for `secs` seconds.
+pub fn pin_record(chat: &str, id: &str, ts: i64, secs: i64) -> Value {
+    json!({ "t": "pin", "chat": chat, "id": id, "ts": ts, "exp": ts + secs })
+}
+
+pub fn unpin_record(chat: &str, id: &str) -> Value {
+    json!({ "t": "unpin", "chat": chat, "id": id })
+}
+
 pub fn seen_record(chat: &str) -> Value {
     json!({ "t": "seen", "chat": chat })
+}
+
+/// Archives a chat, or (with `false`) takes it out of the archive.
+pub fn archive_record(chat: &str, archived: bool) -> Value {
+    json!({ "t": "archive", "chat": chat, "v": archived })
+}
+
+/// Marks a chat unread again (at least one unread message).
+pub fn unread_record(chat: &str) -> Value {
+    json!({ "t": "unread", "chat": chat })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replays records through a real file, as a restart does.
+    fn reopen(records: &[Value]) -> Book {
+        let dir = std::env::temp_dir().join(format!("warust-store-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let path = dir.join("s.jsonl");
+        let _ = fs::remove_dir_all(&dir);
+        {
+            let (mut store, mut book) = Store::open(&path);
+            store.write(&mut book, records);
+        }
+        let (_, book) = Store::open(&path);
+        let _ = fs::remove_dir_all(&dir);
+        book
+    }
+
+    #[test]
+    fn archive_state_round_trips_and_survives_new_messages() {
+        let chat = "628111000002@s.whatsapp.net";
+        let msg = |id: &str, ts: i64| msg_record(chat, id, false, chat, "x", ts, &Delivery::Received, true);
+        // Old files have no archive records: not archived.
+        assert!(!reopen(&[msg("a", 1)]).chats[0].archived);
+        let b = reopen(&[msg("a", 1), archive_record(chat, true), msg("b", 2)]);
+        assert!(b.chats[0].archived, "a new message keeps it archived");
+        let b = reopen(&[msg("a", 1), archive_record(chat, true), archive_record(chat, false)]);
+        assert!(!b.chats[0].archived);
+        // The phone may archive before the history brings the chat.
+        let b = reopen(&[archive_record(chat, true), msg("a", 1)]);
+        assert!(b.chats[0].archived);
+    }
+
+    #[test]
+    fn archive_before_lid_mapping_moves_to_the_number() {
+        let (lid, pn) = ("111222@lid", "628111000003@s.whatsapp.net");
+        let msg = msg_record(pn, "a", false, pn, "x", 1, &Delivery::Received, true);
+        let b = reopen(&[archive_record(lid, true), lid_record(lid, pn), msg]);
+        assert_eq!(b.chats.len(), 1);
+        assert!(b.chats[0].archived);
+    }
+
+    #[test]
+    fn unread_marker_stays_until_seen() {
+        let chat = "628111000003@s.whatsapp.net";
+        let read = msg_record(chat, "a", false, chat, "x", 1, &Delivery::Received, false);
+        let b = reopen(&[read.clone(), unread_record(chat)]);
+        assert_eq!(b.chats[0].unread, 1);
+        let b = reopen(&[read.clone(), unread_record(chat), seen_record(chat)]);
+        assert_eq!(b.chats[0].unread, 0);
+        let more = msg_record(chat, "b", false, chat, "y", 2, &Delivery::Received, true);
+        let b = reopen(&[read, more, unread_record(chat)]);
+        assert_eq!(b.chats[0].unread, 1, "the marker never lowers a real count");
+    }
 
     #[test]
     fn status_reply_keeps_its_quote() {
@@ -671,6 +888,18 @@ mod tests {
         let m = &b.chats[0].messages[0];
         let q = m.quote.as_ref().expect("quote kept");
         assert_eq!((q.id.as_str(), q.text.as_str(), q.status), ("ST1", "Pesanan katering", true));
+    }
+
+    #[test]
+    fn forwarded_flag_round_trips_and_old_records_read_false() {
+        let chat = "628111@s.whatsapp.net";
+        let plain = msg_record(chat, "a", false, chat, "halo", 10, &Delivery::Received, false);
+        assert!(plain.get("fw").is_none(), "absent when not forwarded");
+        let fw = with_forwarded(msg_record(chat, "b", false, chat, "info", 20, &Delivery::Received, false), true);
+        let b = book(&[plain, fw]);
+        let flags: Vec<bool> = b.chats[0].messages.iter().map(|m| m.forwarded).collect();
+        assert_eq!(flags, [false, true]);
+        assert!(b.chats[0].messages[1].forwardable());
     }
 
     #[test]
@@ -733,6 +962,50 @@ mod tests {
         let b = book(&[rec]);
         assert!(!b.chats[0].mention_pending());
         assert!(b.chats[0].needs_reply(), "private rule unchanged");
+    }
+
+    #[test]
+    fn pins_expire_and_unpin() {
+        let chat = "628111@s.whatsapp.net";
+        let msg = |id: &str, ts: i64| msg_record(chat, id, false, chat, "x", ts, &Delivery::Received, false);
+        let b = book(&[
+            msg("a", 1),
+            msg("b", 2),
+            pin_record(chat, "a", 100, PinLength::Hours24.secs()),
+            pin_record(chat, "b", 200, PinLength::Days7.secs()),
+        ]);
+        let c = &b.chats[0];
+        let ids = |now| c.active_pins(now).iter().map(|p| p.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(300), vec!["a", "b"]);
+        assert_eq!(ids(100 + 86_400), vec!["b"], "24h pin lapsed");
+        assert!(ids(200 + 604_800).is_empty());
+        assert!(c.is_pinned("b", 300) && !c.is_pinned("zzz", 300));
+        // Re-pin replaces rather than duplicates, and a pin without a chat is ignored.
+        let b = book(&[
+            msg("a", 1),
+            pin_record(chat, "a", 100, 1000),
+            pin_record(chat, "a", 150, 5000),
+            pin_record("999@s.whatsapp.net", "q", 1, 10),
+        ]);
+        assert_eq!(b.chats.len(), 1);
+        assert_eq!(b.chats[0].pins, vec![Pin { id: "a".into(), ts: 150, expires: 5150 }]);
+        let b = book(&[msg("a", 1), pin_record(chat, "a", 100, 1000), unpin_record(chat, "a")]);
+        assert!(b.chats[0].pins.is_empty());
+    }
+
+    #[test]
+    fn pin_lengths_round_trip() {
+        for l in [PinLength::Hours24, PinLength::Days7, PinLength::Days30] {
+            assert_eq!(PinLength::parse(l.code()), Some(l));
+            assert_eq!(PinLength::from_secs(l.secs()), l);
+        }
+        assert_eq!(PinLength::parse("1h"), None);
+    }
+
+    #[test]
+    fn old_records_without_pins_still_load() {
+        let b = book(&[msg_record("1@s.whatsapp.net", "x", true, "", "t", 1, &Delivery::Sent, false)]);
+        assert!(b.chats[0].pins.is_empty());
     }
 
     fn book(records: &[Value]) -> Book {
