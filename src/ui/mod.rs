@@ -6,6 +6,7 @@ mod emoji;
 mod fonts;
 mod forward;
 mod icons;
+mod mention;
 mod markup;
 mod pdf;
 mod qr;
@@ -90,6 +91,18 @@ pub struct State {
     /// already asked for this run.
     pub typing_now: std::sync::Arc<std::collections::HashMap<String, backend::Typing>>,
     pub presence_watched: std::collections::HashSet<(String, String)>,
+    /// Group members by `session|group` (from the backend), and the groups
+    /// whose members were already asked for this run.
+    pub members_now: std::sync::Arc<std::collections::HashMap<String, Vec<backend::Member>>>,
+    pub members_asked: std::collections::HashMap<(String, String), std::time::Instant>,
+    /// `@Name` picked in the composer with the member's JID, the chat they
+    /// belong to (`session|chat`), the highlighted picker row, the `@` of a
+    /// picker closed with Esc, and the query the highlight belongs to.
+    pub mention_picks: Vec<(String, String)>,
+    pub mention_chat: String,
+    pub mention_sel: usize,
+    pub mention_dismissed: Option<usize>,
+    pub mention_query: String,
     /// Message the next text goes out as a reply to.
     pub reply: Option<ReplyTarget>,
     /// File waiting in the composer, sent with the text as its caption.
@@ -302,6 +315,11 @@ impl App {
                 // The logo row continues the title bar across the sidebar.
                 let title = egui::Rect::from_min_size(panel.min - egui::vec2(12.0, 14.0), egui::vec2(panel.width() + 12.0, 52.0));
                 window::drag_area(ui, title, "sidebar");
+                // macOS: the window buttons get the title row to themselves and
+                // the logo row sits under it.
+                if window::buttons_inset(ui.ctx()) > 0.0 {
+                    ui.add_space(title.bottom() - panel.top());
+                }
                 widgets::row(
                     ui,
                     32.0,
@@ -421,10 +439,12 @@ impl App {
                         window::controls(ui);
                         // The window buttons sit tight; everything else gets normal spacing.
                         ui.spacing_mut().item_spacing.x = 8.0;
-                        ui.add_space(6.0);
-                        let (sep, _) = ui.allocate_exact_size(egui::vec2(1.0, 20.0), egui::Sense::hover());
-                        ui.painter().rect_filled(sep, 0.0, p.border);
-                        ui.add_space(6.0);
+                        if !window::NATIVE {
+                            ui.add_space(6.0);
+                            let (sep, _) = ui.allocate_exact_size(egui::vec2(1.0, 20.0), egui::Sense::hover());
+                            ui.painter().rect_filled(sep, 0.0, p.border);
+                            ui.add_space(6.0);
+                        }
                         let dark = ui.ctx().theme() == Theme::Dark;
                         let toggle = widgets::icon_button(ui, if dark { "sun" } else { "moon" }, 32.0, false)
                             .on_hover_text(if dark { "Tema terang" } else { "Tema gelap" });
@@ -448,6 +468,8 @@ impl App {
             .show(ui, |ui| {
                 window::drag_area(ui, ui.max_rect().expand2(egui::vec2(32.0, 0.0)), "topnav");
                 ui.horizontal_centered(|ui| {
+                    // Past the macOS window buttons (the bar's margin is 32).
+                    ui.add_space((window::buttons_inset(ui.ctx()) - 32.0).max(0.0));
                     let (logo, _) = ui.allocate_exact_size(egui::vec2(34.0, 34.0), egui::Sense::hover());
                     ui.painter().circle_filled(logo.center(), 17.0, p.primary);
                     widgets::paint_text(ui, logo, "w", fonts::ui(16.0, Weight::SemiBold), p.accent, egui::Align::Center);
@@ -850,7 +872,7 @@ impl eframe::App for App {
         self.backend.close_notifications();
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
         // A clicked notification: bring the window up on that chat.
         if let Some(chat) = self.backend.take_open_chat() {
             self.state.open_chat_requested = Some(chat);
@@ -865,6 +887,7 @@ impl eframe::App for App {
         self.state.settings = self.settings.clone();
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
+        self.state.members_now = snapshot.members;
         if self.state.typing_now.values().any(backend::Typing::fresh) {
             // So a stale "mengetik…" disappears even when nothing else repaints.
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
@@ -941,6 +964,12 @@ impl eframe::App for App {
         } else {
             self.sidebar(ui);
             self.topbar(ui);
+        }
+        // Heights of compact::title_bar, topnav and the sidebar/topbar row.
+        let bar = if compact { 40.0 } else if theme::template().top_nav() { 72.0 } else { 52.0 };
+        // In full screen the title bar lives in AppKit's own toolbar window.
+        if !window::is_fullscreen(ui.ctx()) {
+            window::place_buttons(frame, bar);
         }
         let p = theme::palette(ui.ctx());
         let mut action = None;

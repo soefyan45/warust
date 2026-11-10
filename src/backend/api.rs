@@ -430,7 +430,7 @@ async fn send_text(_: Authed, State(context): State<Context>, Path(id): Path<Str
             if real.starts_with("local-") {
                 return Err(error(StatusCode::CONFLICT, "reply_not_sent", "`reply_to` masih di antrean, belum terkirim"));
             }
-            reply_body(&view.book, &chat, body.text, reply_to)
+            reply_body(&view.book, &chat, body.text, reply_to, Vec::new())
                 .ok_or_else(|| error(StatusCode::NOT_FOUND, "reply_not_found", "`reply_to` tidak ditemukan di chat ini"))?
         }
     };

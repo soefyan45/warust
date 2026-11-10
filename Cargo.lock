@@ -4903,8 +4903,9 @@ dependencies = [
 
 [[package]]
 name = "warust"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
+ "arboard",
  "axum",
  "block2 0.6.2",
  "cpal",
@@ -4927,6 +4928,7 @@ dependencies = [
  "ogg",
  "opus",
  "qrcode",
+ "raw-window-handle",
  "regex",
  "serde",
  "sha2",

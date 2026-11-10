@@ -15,20 +15,24 @@ fn main() -> eframe::Result<()> {
         .ok()
         .and_then(|s| s.split_once('x').and_then(|(w, h)| Some([w.parse().ok()?, h.parse().ok()?])))
         .unwrap_or([1440.0, 900.0]);
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("warust")
-            // X11 shows this icon; Wayland takes it from warust.desktop by app id
-            // (scripts/install-desktop.sh installs that).
-            .with_app_id("warust")
-            .with_icon(icon())
-            // No OS title bar: the app's topbar carries the window controls.
-            .with_decorations(false)
-            .with_inner_size(size)
-            // Narrower than 1100 px it switches to the phone layout.
-            .with_min_inner_size([360.0, 560.0]),
-        ..Default::default()
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("warust")
+        // X11 shows this icon; Wayland takes it from warust.desktop by app id
+        // (scripts/install-desktop.sh installs that).
+        .with_app_id("warust")
+        .with_icon(icon())
+        .with_inner_size(size)
+        // Narrower than 1100 px it switches to the phone layout.
+        .with_min_inner_size([360.0, 560.0]);
+    let viewport = if cfg!(target_os = "macos") {
+        // The system's window, its title bar see-through under the app's
+        // topbar; ui::window moves the window buttons into that bar.
+        viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false)
+    } else {
+        // No OS title bar: the app's topbar carries the window controls.
+        viewport.with_decorations(false)
     };
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
     eframe::run_native(
         "warust",
         options,

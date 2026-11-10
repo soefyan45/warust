@@ -1,6 +1,6 @@
 [package]
 name = "warust"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Desktop WhatsApp gateway: many numbers in one inbox, a local REST API, signed webhooks and triggers"
 license = "MIT"
@@ -46,6 +46,9 @@ egui = "0.37"
 # clipboard (text, and images for pasted screenshots) on Linux, Windows and
 # macOS. eframe's own "clipboard" feature would also add smithay-clipboard.
 egui-winit = { version = "0.37", default-features = false, features = ["arboard"] }
+# The same arboard egui-winit pastes through; named directly to read the file
+# list Finder puts on the clipboard, so a copied file pastes as an attachment.
+arboard = { version = "3.7", default-features = false }
 # Already in the tree through egui; color_fonts draws the colour bitmaps of the
 # bundled Noto Color Emoji (assets/fonts) instead of missing-glyph boxes.
 epaint = { version = "0.37", features = ["color_fonts"] }
@@ -77,20 +80,22 @@ cpal = "0.18"
 opus = "0.4"
 ogg = "0.9"
 
-
-# Clickable notifications (issue #15). macOS: the objc2 family eframe/winit
-# already pulls in, plus its UserNotifications bindings.
+# macOS, all from the objc2 family eframe/winit already pull in:
+# clickable notifications (issue #15) through UserNotifications, and the
+# native window buttons placed in the app's topbar (issue #22).
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 block2 = "0.6"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSBundle", "NSError", "NSObject", "NSSet"] }
+raw-window-handle = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSBundle", "NSError", "NSObject", "NSSet", "NSGeometry"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 # PDF previews with macOS's own renderer (CoreGraphics), so no poppler is
 # needed there; both crates are already in the tree through arboard and winit.
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFURL", "CFCGTypes"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage", "CGPDFDocument", "CGPDFPage"] }
-# The unread count on the Dock icon; already in the tree through winit.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder"] }
+# Native window buttons in the top bar, and the unread count on the Dock
+# icon; already in the tree through winit.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSDockTile", "NSResponder", "NSView", "NSWindow", "NSControl", "NSButton"] }
 
 # Windows: toasts through WinRT, the same windows crate accesskit already uses.
 [target.'cfg(windows)'.dependencies]

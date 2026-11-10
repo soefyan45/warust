@@ -50,8 +50,12 @@ pub enum Body {
     /// A comment or reaction on a contact's status, quoting it (sent to the
     /// poster's chat, as WhatsApp does).
     StatusReply { text: String, status: store::StatusPost },
-    /// A text that quotes an earlier message of the same chat.
-    Reply { text: String, quote: ReplyQuote },
+    /// Text that mentions group members (`mentions` are their JIDs, the text
+    /// holds `@<user part>` for each).
+    Mention { text: String, mentions: Vec<String> },
+    /// A text that quotes an earlier message of the same chat, and may
+    /// mention group members like `Mention`.
+    Reply { text: String, quote: ReplyQuote, mentions: Vec<String> },
     /// A forwarded text message (stage 1: no media).
     Forward(String),
     /// A pin or unpin (`None`). Not a chat message: it shows no bubble, is
@@ -72,10 +76,10 @@ pub struct ReplyQuote {
 
 /// Builds the reply body for `text` quoting message `reply_to` (a real or
 /// local id) of `chat`; `None` when that chat has no such message.
-pub fn reply_body(book: &store::Book, chat: &str, text: String, reply_to: &str) -> Option<Body> {
+pub fn reply_body(book: &store::Book, chat: &str, text: String, reply_to: &str, mentions: Vec<String>) -> Option<Body> {
     let real = book.aliases.get(reply_to).map(String::as_str).unwrap_or(reply_to);
     let quoted = book.chats.iter().find(|c| c.jid == chat)?.messages.iter().find(|m| m.id == real || m.id == reply_to)?;
-    Some(Body::Reply { text, quote: reply_quote(quoted) })
+    Some(Body::Reply { text, quote: reply_quote(quoted), mentions })
 }
 
 fn reply_quote(m: &store::ChatMsg) -> ReplyQuote {
@@ -193,6 +197,49 @@ impl Running {
         });
     }
 
+    /// Fetches a group's members into `Shared::members` and teaches the book
+    /// the LID <-> phone mappings it learns on the way, so `@lid` mentions
+    /// resolve to names. Runs in the background; failures only log.
+    pub fn group_members(&self, id: &str, chat: &str, state: &Updater, store: Arc<Mutex<Store>>) {
+        let Ok(group) = chat.parse::<Jid>() else {
+            return;
+        };
+        let (client, id, state) = (self.client.clone(), id.to_owned(), state.clone());
+        tokio::spawn(async move {
+            let mut meta = match client.groups().fetch_metadata(&group).await {
+                Ok(meta) => meta,
+                Err(e) => {
+                    log::warn!("session {id}: group members failed: {e:?}");
+                    return;
+                }
+            };
+            client.groups().resolve_participant_addresses(&mut meta).await;
+            let own = own_users(&client);
+            let book = state.book(&id);
+            let mut members = Vec::new();
+            let mut records = Vec::new();
+            for p in &meta.participants {
+                let phone = p.phone_number.clone().or_else(|| (!p.jid.is_lid()).then(|| p.jid.clone()));
+                let lid = p.lid.clone().or_else(|| p.jid.is_lid().then(|| p.jid.clone()));
+                let is_own = [Some(&p.jid), phone.as_ref(), lid.as_ref()].into_iter().flatten().any(|j| own.iter().any(|o| o == user_part(&j.to_string())));
+                if is_own {
+                    continue;
+                }
+                let (jid, phone) = (store::bare(&p.jid.to_string()), phone.map(|j| store::bare(&j.to_string())));
+                if let (Some(lid), Some(pn)) = (&lid, &phone) {
+                    let lid = store::bare(&lid.to_string());
+                    // Only what the book does not know yet.
+                    if book.as_ref().is_some_and(|b| b.normalize(&lid) == lid) {
+                        records.push(store::lid_record(&lid, pn));
+                    }
+                }
+                members.push(super::Member { jid, phone });
+            }
+            state.record(&id, &store, &records);
+            state.set_members(&id, &group.to_string(), members);
+        });
+    }
+
     /// Read receipts (blue ticks) for incoming messages, given as
     /// `(sender JID, message id)`, plus the app-state "read" flag so the phone
     /// clears (or sets) its badge. `receipts` is false for "mark unread".
@@ -268,11 +315,11 @@ impl Running {
             Body::File { path, caption } => media::label(path, caption),
             Body::Sticker(_) => "[Stiker]".to_owned(),
             Body::Voice(_) => "[Pesan suara]".to_owned(),
-            Body::StatusReply { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
+            Body::StatusReply { text, .. } | Body::Mention { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
             Body::Pin { .. } => unreachable!("returned above"),
         };
         let media = match &body {
-            Body::Text(_) | Body::StatusReply { .. } | Body::Reply { .. } | Body::Forward(_) => None,
+            Body::Text(_) | Body::StatusReply { .. } | Body::Mention { .. } | Body::Reply { .. } | Body::Forward(_) => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
             Body::Voice(path) => Some(media::describe_sent_voice(path)),
@@ -281,6 +328,9 @@ impl Running {
         let record = store::msg_record(&chat, &local_id, true, "", &shown, unix_secs(), &Delivery::Queued, false);
         let mut record = store::with_media(record, media);
         record = store::with_forwarded(record, matches!(body, Body::Forward(_)));
+        if let Body::Mention { mentions, .. } | Body::Reply { mentions, .. } = &body {
+            record = store::with_mentions(record, mentions, false);
+        }
         if let Body::StatusReply { status, .. } = &body {
             let text = if status.media.is_some() && status.caption().is_empty() { status.text.clone() } else { status.caption() };
             record = store::with_quote(record, &store::Quote { id: status.id.clone(), text, status: true });
@@ -347,7 +397,7 @@ fn restore_queue(id: &str, queue: &UnboundedSender<Outgoing>, state: &Updater, s
     }
 }
 
-/// What a stored queued message sends: its text, file, sticker, or a reply to a status or message.
+/// What a stored queued message sends: its text (with mentions), file, sticker, or a reply to a status or message.
 fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
     if let Some(quote) = m.quote.as_ref().filter(|q| q.status) {
         let status = book.statuses.iter().find(|s| s.id == quote.id)?.clone();
@@ -361,7 +411,10 @@ fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
             // A reply: the quoted message must still be in the book (it gives the participant).
             let real = book.aliases.get(&quote.id).unwrap_or(&quote.id);
             let quoted = book.chats.iter().flat_map(|c| &c.messages).find(|q| q.id == *real || q.id == quote.id)?;
-            return Some(Body::Reply { text: m.text.clone(), quote: reply_quote(quoted) });
+            return Some(Body::Reply { text: m.text.clone(), quote: reply_quote(quoted), mentions: m.mentions.clone() });
+        }
+        if !m.mentions.is_empty() {
+            return Some(Body::Mention { text: m.text.clone(), mentions: m.mentions.clone() });
         }
         return Some(Body::Text(m.text.clone()));
     };
@@ -471,6 +524,29 @@ fn body(message: &wa::Message) -> Option<String> {
         return Some("[Kontak]".to_owned());
     }
     None
+}
+
+/// JIDs the message mentions, from the first `ContextInfo` it carries
+/// (extended text, or an image, video or document caption).
+fn mentions_of(message: &wa::Message) -> Vec<String> {
+    message.context_info().map(|c| c.mentioned_jid.clone()).unwrap_or_default()
+}
+
+/// User part of a JID, without device and server: `123:5@lid` -> `123`.
+fn user_part(jid: &str) -> &str {
+    let user = jid.split('@').next().unwrap_or(jid);
+    user.split(':').next().unwrap_or(user)
+}
+
+/// This number's user parts: phone number and LID (either may be unknown).
+/// Read from the device each time, so it is right before `Connected` too.
+fn own_users(client: &Client) -> Vec<String> {
+    [client.pn(), client.lid()].into_iter().flatten().map(|j| user_part(&j.to_string()).to_owned()).collect()
+}
+
+/// An incoming group message that mentions one of `own` (user parts).
+fn mentions_me(group: bool, from_me: bool, mentions: &[String], own: &[String]) -> bool {
+    group && !from_me && mentions.iter().any(|m| own.iter().any(|o| !o.is_empty() && o == user_part(m)))
 }
 
 /// The pin/unpin a `pinInChatMessage` stands for. The pin lasts for the
@@ -603,6 +679,9 @@ fn on_message(
     let summary = media.as_ref().map(|m| {
         json!({ "kind": m.get("k"), "name": m.get("name"), "mime": m.get("mime"), "size": m.get("size") })
     });
+    let mentions = mentions_of(&ctx.message);
+    let mentioned = mentions_me(source.is_group, source.is_from_me, &mentions, &own_users(&ctx.client));
+    let record = store::with_mentions(record, &mentions, mentioned);
     let record = store::with_forwarded(record, ctx.message.is_forwarded());
     records.push(store::with_media(record, media));
     state.record(id, chats, &records);
@@ -643,7 +722,8 @@ fn on_message(
             timestamp: ctx.info.timestamp.timestamp(),
         });
         if let Some(book) = &book {
-            super::notify::incoming(state, id, book, &chat, &store::bare(&source.sender.to_string()), &push_name, &text, source.is_group);
+            let shown = book.with_mention_names(&text, &mentions);
+            super::notify::incoming(state, id, book, &chat, &store::bare(&source.sender.to_string()), &push_name, &shown, source.is_group, mentioned);
         }
     }
     if !source.is_from_me {
@@ -685,6 +765,7 @@ async fn on_event(
             fetch_group_names(state, id, chats, client.clone());
             let phone = client.pn().map(|jid| mask_phone(&jid.to_string()));
             let own_number = client.pn().map(|jid| store::bare(&jid.to_string()).split('@').next().unwrap_or_default().to_owned());
+            let own_lid = client.lid().map(|jid| user_part(&jid.to_string()).to_owned());
             state.update(id, |v| {
                 v.status = Status::Connected;
                 v.qr = None;
@@ -693,6 +774,9 @@ async fn on_event(
                 if phone.is_some() {
                     v.phone = phone;
                     v.own_number = own_number;
+                }
+                if own_lid.is_some() {
+                    v.own_lid = own_lid;
                 }
             });
             // Once per start: what was still queued when the app closed.
@@ -765,7 +849,9 @@ async fn on_event(
             let compressed = lazy.compressed_bytes().clone();
             // Decompressing and decoding can take a while; keep it off the event loop.
             let media_dir = media::dir(&state.data_dir, id);
-            let records = tokio::task::spawn_blocking(move || history_records(&compressed, &media_dir)).await;
+            let own = own_users(client);
+            let now = unix_secs();
+            let records = tokio::task::spawn_blocking(move || history_records(&compressed, &media_dir, &own, now)).await;
             match records {
                 Ok(Ok(records)) => {
                     log::info!("session {id}: stored {} history records", records.len());
@@ -811,9 +897,18 @@ fn fetch_group_name(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client
     });
 }
 
+/// Mentions in history older than this are not "waiting for a reply".
+const HISTORY_MENTION_WINDOW: i64 = 24 * 3600;
+
+/// Whether a history message counts as a pending mention of us: a live
+/// mention, and recent enough that a reply is still expected.
+fn history_mentions_me(group: bool, from_me: bool, mentions: &[String], own: &[String], ts: i64, now: i64) -> bool {
+    now - ts <= HISTORY_MENTION_WINDOW && mentions_me(group, from_me, mentions, own)
+}
+
 /// Turns one history-sync chunk into chat records: LID mappings, push names,
 /// then conversations (their own names win over push names).
-fn history_records(compressed: &[u8], media_dir: &Path) -> Result<Vec<Value>, String> {
+fn history_records(compressed: &[u8], media_dir: &Path, own: &[String], now: i64) -> Result<Vec<Value>, String> {
     let mut stream = HistorySyncStream::new(compressed, MAX_DECOMPRESSED);
     let mut conversations = Vec::new();
     while let Some(conversation) = stream.next_conversation().map_err(|e| e.to_string())? {
@@ -854,6 +949,8 @@ fn history_records(compressed: &[u8], media_dir: &Path) -> Result<Vec<Value>, St
             let status = if from_me { Delivery::Sent } else { Delivery::Received };
             let ts = info.message_timestamp.unwrap_or(0) as i64;
             let record = store::msg_record(&chat, msg_id, from_me, &sender, &text, ts, &status, false);
+            let mentions = mentions_of(message);
+            let record = store::with_mentions(record, &mentions, history_mentions_me(chat.ends_with("@g.us"), from_me, &mentions, own, ts, now));
             let record = store::with_media(record, media::describe(message, media_dir, msg_id));
             let record = store::with_forwarded(record, message.is_forwarded());
             let (background, color) = status_colors(message);
@@ -986,6 +1083,11 @@ async fn own_author(client: &Client, chat: &Jid) -> Result<Jid, String> {
 async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message, String> {
     match body {
         Body::Text(text) => Ok(wa::Message::text(text)),
+        Body::Mention { text, mentions } => {
+            let mut context = wa::ContextInfo::default();
+            context.mentioned_jid = mentions;
+            Ok(wa::Message::text_with_context(text, context))
+        }
         Body::File { path, caption } => media::message(client, &path, &caption).await,
         Body::Sticker(path) => media::sticker_message(client, &path).await,
         Body::Voice(path) => media::voice_message(client, &path).await,
@@ -995,13 +1097,14 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
             let context = build_quote_context_with_info(status.id.clone(), &poster, &Jid::status_broadcast(), chat, &quoted_status(&status));
             Ok(wa::Message::text_with_context(text, context))
         }
-        Body::Reply { text, quote } => {
+        Body::Reply { text, quote, mentions } => {
             let participant = match &quote.participant {
                 Some(sender) => sender.parse::<Jid>().map_err(|e| format!("JID pengirim pesan tidak valid: {e:?}"))?.to_non_ad(),
                 None => own_author(client, chat).await?,
             };
             // Same chat: no remote_jid, like a reply in WA Web.
-            let context = build_quote_context_with_info(quote.id, &participant, chat, chat, &wa::Message::text(quote.text));
+            let mut context = build_quote_context_with_info(quote.id, &participant, chat, chat, &wa::Message::text(quote.text));
+            context.mentioned_jid = mentions;
             Ok(wa::Message::text_with_context(text, context))
         }
         // The original wa::Message is not kept, so the text is rebuilt with
@@ -1081,7 +1184,7 @@ pub fn mask_phone(jid: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, ReplyQuote, mask_phone, queued_body, reply_body};
+    use super::{Body, HISTORY_MENTION_WINDOW, ReplyQuote, history_mentions_me, mask_phone, mentions_me, queued_body, reply_body};
     use crate::backend::store::{self, Delivery, Quote, Store};
 
     /// A stored queued message comes back as what it was: text, file with
@@ -1142,14 +1245,52 @@ mod tests {
         let (_, book) = Store::open(&path);
         let body = |id: &str| queued_body(&book, book.chats[0].messages.iter().find(|m| m.id == id).unwrap());
         let quote = |id: &str, participant: Option<&str>, text: &str| ReplyQuote { id: id.to_owned(), participant: participant.map(str::to_owned), text: text.to_owned() };
-        assert!(matches!(body("r1"), Some(Body::Reply { text, quote: q }) if text == "jam 5" && q == quote("IN1", Some(them), "kapan kirim?")));
+        assert!(matches!(body("r1"), Some(Body::Reply { text, quote: q, .. }) if text == "jam 5" && q == quote("IN1", Some(them), "kapan kirim?")));
         assert!(matches!(body("r2"), Some(Body::Reply { quote: q, .. }) if q == quote("OUT1", None, "besok")));
         assert!(body("r3").is_none());
         // The REST/UI path builds the same quote; an unknown id gives nothing.
-        assert!(matches!(reply_body(&book, group, "hai".to_owned(), "IN1"), Some(Body::Reply { quote: q, .. }) if q == quote("IN1", Some(them), "kapan kirim?")));
-        assert!(reply_body(&book, group, "hai".to_owned(), "NOPE").is_none());
-        assert!(reply_body(&book, "other@g.us", "hai".to_owned(), "IN1").is_none());
+        assert!(matches!(reply_body(&book, group, "hai".to_owned(), "IN1", Vec::new()), Some(Body::Reply { quote: q, .. }) if q == quote("IN1", Some(them), "kapan kirim?")));
+        assert!(reply_body(&book, group, "hai".to_owned(), "NOPE", Vec::new()).is_none());
+        assert!(reply_body(&book, "other@g.us", "hai".to_owned(), "IN1", Vec::new()).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_history_mentions_are_not_pending() {
+        let men = vec!["99@lid".to_owned()];
+        let own = vec!["99".to_owned()];
+        let now = 1_000_000;
+        assert!(history_mentions_me(true, false, &men, &own, now - 60, now));
+        assert!(history_mentions_me(true, false, &men, &own, now - HISTORY_MENTION_WINDOW, now));
+        assert!(!history_mentions_me(true, false, &men, &own, now - HISTORY_MENTION_WINDOW - 1, now));
+        assert!(!history_mentions_me(false, false, &men, &own, now, now), "not a group");
+    }
+
+    #[test]
+    fn queued_mention_comes_back_as_mention() {
+        let dir = std::env::temp_dir().join(format!("warust-mention-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let chat = "123@g.us";
+        let men = vec!["99@lid".to_owned(), "628111@s.whatsapp.net".to_owned()];
+        let rec = store::with_mentions(store::msg_record(chat, "m", true, "", "@99 @628111 halo", 100, &Delivery::Queued, false), &men, false);
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, format!("{rec}\n")).unwrap();
+        let (_, book) = Store::open(&path);
+        let msg = &book.chats[0].messages[0];
+        assert!(matches!(queued_body(&book, msg), Some(Body::Mention { text, mentions }) if text == "@99 @628111 halo" && mentions == men));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mentions_me_matches_number_or_lid_ignoring_device() {
+        let own = vec!["628111".to_owned(), "99".to_owned()];
+        let m = |j: &str| vec![j.to_owned()];
+        assert!(mentions_me(true, false, &m("628111@s.whatsapp.net"), &own));
+        assert!(mentions_me(true, false, &m("99:3@lid"), &own));
+        assert!(!mentions_me(true, false, &m("55@lid"), &own));
+        assert!(!mentions_me(false, false, &m("99@lid"), &own), "not a group");
+        assert!(!mentions_me(true, true, &m("99@lid"), &own), "from us");
+        assert!(!mentions_me(true, false, &m("@lid"), &["".to_owned()]));
     }
 
     #[test]
