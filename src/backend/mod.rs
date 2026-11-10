@@ -241,6 +241,7 @@ impl Backend {
         let shared = Arc::new(Mutex::new(Shared { settings: Arc::new(settings), ..Shared::default() }));
         let (hooks, hook_events) = unbounded_channel();
         let state = Updater { shared: shared.clone(), ctx, data_dir: data_dir.clone(), hooks, commands: commands.clone() };
+        notify::init(&state);
         let api_commands = commands.clone();
         std::thread::Builder::new()
             .name("whatsapp".to_owned())
@@ -715,10 +716,10 @@ async fn run(
                     let m = c.messages.iter().find(|m| m.id == msg_id)?;
                     Some((c.jid.clone(), m.from_me, m.sender.clone()))
                 });
-                match (running.get(&id), stores.get(&id), found) {
-                    (Some(r), Some(store), Some((chat, from_me, sender))) => {
+                match (running.get(&id), found) {
+                    (Some(r), Some((chat, from_me, sender))) => {
                         let target = session::PinTarget { chat, msg_id, sender: (!from_me).then_some(sender) };
-                        r.pin(&id, target, pinned.then_some(length), &state, store.clone());
+                        r.pin(target, pinned.then_some(length));
                     }
                     _ => log::warn!("pin: session {id} is not running or the message is gone"),
                 }

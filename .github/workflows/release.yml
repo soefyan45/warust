@@ -1,5 +1,6 @@
 # Builds warust for Linux (.deb), Windows (.zip) and macOS (universal .dmg,
-# Developer ID signed and notarized when the APPLE_* secrets are set).
+# Developer ID signed and notarized from the "release" environment's APPLE_*
+# secrets, which only v* tags can reach).
 # A tag like v0.1.0 also publishes them as a GitHub Release; running it by hand
 # (Actions → Release → Run workflow) only keeps the files as build artifacts.
 name: Release
@@ -63,6 +64,11 @@ jobs:
   macos:
     name: macOS (.dmg)
     runs-on: macos-latest
+    # The APPLE_* secrets live in the "release" environment, which only v*
+    # tags may use (and only the owner may create those). Runs from a branch
+    # get no environment, so a changed workflow on a branch cannot read them;
+    # they fall back to an ad-hoc signature.
+    environment: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
     env:
       MACOSX_DEPLOYMENT_TARGET: "11.0"
     steps:

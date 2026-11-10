@@ -52,6 +52,9 @@ pub enum Body {
     Reply { text: String, quote: ReplyQuote },
     /// A forwarded text message (stage 1: no media).
     Forward(String),
+    /// A pin or unpin (`None`). Not a chat message: it shows no bubble, is
+    /// never stored as queued, and so is lost if the app closes before it goes out.
+    Pin { target: PinTarget, length: Option<store::PinLength> },
 }
 
 /// The message a `Body::Reply` quotes.
@@ -236,44 +239,12 @@ impl Running {
         });
     }
 
-    /// Pins or unpins a message for everyone; the chat store only changes once
-    /// WhatsApp accepted it. `sender` is the author as stored (groups need it).
-    pub fn pin(&self, id: &str, target: PinTarget, length: Option<store::PinLength>, state: &Updater, store: Arc<Mutex<Store>>) {
-        let Ok(chat_jid) = target.chat.parse::<Jid>() else {
-            return;
-        };
-        let sender_jid = target.sender.as_deref().and_then(|s| s.parse::<Jid>().ok());
-        let from_me = target.sender.is_none();
-        let (client, id, state) = (self.client.clone(), id.to_owned(), state.clone());
-        tokio::spawn(async move {
-            let PinTarget { chat, msg_id, .. } = target;
-            let addressed = MessageId::new(msg_id.as_str()).and_then(|mid| MessageRef::new(&chat_jid, mid, sender_jid.as_ref(), from_me));
-            let addressed = match addressed {
-                Ok(addressed) => addressed,
-                Err(e) => return log::warn!("session {id}: cannot address message {msg_id} to pin: {e}"),
-            };
-            let sent = match length {
-                Some(length) => {
-                    let duration = match length {
-                        store::PinLength::Hours24 => PinDuration::Hours24,
-                        store::PinLength::Days7 => PinDuration::Days7,
-                        store::PinLength::Days30 => PinDuration::Days30,
-                    };
-                    client.pin_message(&addressed, duration).await
-                }
-                None => client.unpin_message(&addressed).await,
-            };
-            match sent {
-                Ok(_) => {
-                    let record = match length {
-                        Some(length) => store::pin_record(&chat, &msg_id, unix_secs(), length.secs()),
-                        None => store::unpin_record(&chat, &msg_id),
-                    };
-                    state.record(&id, &store, &[record]);
-                }
-                Err(e) => log::warn!("session {id}: pin failed: {e}"),
-            }
-        });
+    /// Queues a pin (`Some(length)`) or unpin (`None`) for everyone. It waits
+    /// in the same paced queue as messages, so pinning in a row keeps the
+    /// anti-ban gap. The chat store only changes once WhatsApp accepted it.
+    pub fn pin(&self, target: PinTarget, length: Option<store::PinLength>) {
+        let chat = target.chat.clone();
+        let _ = self.queue.send(Outgoing { local_id: String::new(), chat, body: Body::Pin { target, length } });
     }
 
     pub fn request_avatar(&self, jid: String) {
@@ -287,16 +258,21 @@ impl Running {
 
     /// Like `enqueue`, under an id the caller already handed out (the REST API).
     pub fn enqueue_as(&self, id: &str, chat: String, body: Body, local_id: String, state: &Updater, store: &Mutex<Store>) {
+        if matches!(body, Body::Pin { .. }) {
+            return log::warn!("session {id}: pins go through `pin`, not the message queue");
+        }
         let shown = match &body {
             Body::Text(text) => text.clone(),
             Body::File { path, caption } => media::label(path, caption),
             Body::Sticker(_) => "[Stiker]".to_owned(),
             Body::StatusReply { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
+            Body::Pin { .. } => unreachable!("returned above"),
         };
         let media = match &body {
             Body::Text(_) | Body::StatusReply { .. } | Body::Reply { .. } | Body::Forward(_) => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
+            Body::Pin { .. } => unreachable!("returned above"),
         };
         let record = store::msg_record(&chat, &local_id, true, "", &shown, unix_secs(), &Delivery::Queued, false);
         let mut record = store::with_media(record, media);
@@ -900,6 +876,14 @@ async fn send_worker(
                 tokio::time::sleep(gap - last.elapsed()).await;
             }
         }
+        let message = match message {
+            Outgoing { body: Body::Pin { target, length }, .. } => {
+                send_pin(&id, &client, &state, &chats, target, length).await;
+                last = Some(Instant::now());
+                continue;
+            }
+            other => other,
+        };
         let outcome: Result<String, String> = match message.chat.parse::<Jid>() {
             Err(e) => Err(format!("JID tidak valid: {e:?}")),
             Ok(jid) => match prepare(&client, &jid, message.body).await {
@@ -943,6 +927,42 @@ async fn send_worker(
     }
 }
 
+/// Sends one queued pin or unpin and, once WhatsApp accepted it, records it.
+async fn send_pin(id: &str, client: &Client, state: &Updater, chats: &Mutex<Store>, target: PinTarget, length: Option<store::PinLength>) {
+    let Ok(chat_jid) = target.chat.parse::<Jid>() else {
+        return;
+    };
+    let sender_jid = target.sender.as_deref().and_then(|s| s.parse::<Jid>().ok());
+    let from_me = target.sender.is_none();
+    let PinTarget { chat, msg_id, .. } = target;
+    let addressed = MessageId::new(msg_id.as_str()).and_then(|mid| MessageRef::new(&chat_jid, mid, sender_jid.as_ref(), from_me));
+    let addressed = match addressed {
+        Ok(addressed) => addressed,
+        Err(e) => return log::warn!("session {id}: cannot address message {msg_id} to pin: {e}"),
+    };
+    let sent = match length {
+        Some(length) => {
+            let duration = match length {
+                store::PinLength::Hours24 => PinDuration::Hours24,
+                store::PinLength::Days7 => PinDuration::Days7,
+                store::PinLength::Days30 => PinDuration::Days30,
+            };
+            client.pin_message(&addressed, duration).await
+        }
+        None => client.unpin_message(&addressed).await,
+    };
+    match sent {
+        Ok(_) => {
+            let record = match length {
+                Some(length) => store::pin_record(&chat, &msg_id, unix_secs(), length.secs()),
+                None => store::unpin_record(&chat, &msg_id),
+            };
+            state.record(id, chats, &[record]);
+        }
+        Err(e) => log::warn!("session {id}: pin failed: {e}"),
+    }
+}
+
 /// Our own JID (no device part) as the author of a quoted message: the LID in
 /// LID-addressed groups, else the phone number, like the crate's own add-on keys.
 async fn own_author(client: &Client, chat: &Jid) -> Result<Jid, String> {
@@ -978,6 +998,7 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
         }
         // The original wa::Message is not kept, so the text is rebuilt with
         // the same markers `prepare_for_forward` sets (score 1: first hop).
+        Body::Pin { .. } => Err("a pin is not a message".to_owned()),
         Body::Forward(text) => {
             let mut context = wa::ContextInfo::default();
             context.is_forwarded = Some(true);

@@ -1,9 +1,8 @@
-//! Desktop notifications for incoming messages with the OS's own tools; no
-//! extra crates. Linux: `notify-send` (libnotify) and `canberra-gtk-play`, one
-//! notification per chat that a newer message replaces and a click opens.
-//! macOS: `osascript` notifications and `afplay`. Windows: a PowerShell
-//! balloon and the system sound. On macOS and Windows a click does not open the
-//! chat.
+//! Desktop notifications for incoming messages: one per chat, which a newer
+//! message replaces and a click opens. Linux: `notify-send` (libnotify) and
+//! `canberra-gtk-play`. macOS: UserNotifications (`macos.rs`) when running as
+//! warust.app, else `osascript` without the click; `afplay` for the sound.
+//! Windows: toasts (`windows.rs`), else a PowerShell balloon; the system sound.
 
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
@@ -11,6 +10,11 @@ use std::io::{BufRead, BufReader};
 use std::process::{Child, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(windows)]
+mod windows;
 
 use super::Updater;
 use super::session::mask_phone;
@@ -26,6 +30,28 @@ const SOUND_GAP: Duration = Duration::from_secs(2);
 fn shown() -> &'static Mutex<HashMap<String, (u32, Child)>> {
     static SHOWN: OnceLock<Mutex<HashMap<String, (u32, Child)>>> = OnceLock::new();
     SHOWN.get_or_init(Default::default)
+}
+
+/// One notification per chat goes by this key; a click turns it back into the
+/// chat to open.
+fn chat_key(session: &str, jid: &str) -> String {
+    format!("{session}|{jid}")
+}
+
+#[cfg_attr(target_os = "linux", allow(dead_code))]
+fn parse_key(key: &str) -> Option<(&str, &str)> {
+    key.split_once('|').filter(|(session, jid)| !session.is_empty() && !jid.is_empty())
+}
+
+/// Sets up clickable notifications where the OS needs it ahead of time. Call
+/// once, on the main thread, before any message comes in.
+pub(crate) fn init(state: &Updater) {
+    #[cfg(target_os = "macos")]
+    macos::init(state);
+    #[cfg(windows)]
+    windows::init(state);
+    #[cfg(target_os = "linux")]
+    let _ = state;
 }
 
 /// Escapes text for the notification body, which servers read as markup.
@@ -80,17 +106,27 @@ pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, 
     if notify.sound {
         play_sound();
     }
+    let key = chat_key(session, &jid);
     #[cfg(target_os = "linux")]
     {
-        let key = format!("{session}|{jid}");
         let (state, session, jid) = (state.clone(), session.to_owned(), jid);
         std::thread::spawn(move || show(&state, &key, &session, &jid, &title, &escape(&body)));
     }
-    #[cfg(not(target_os = "linux"))]
-    std::thread::spawn(move || show_simple(&title, &body));
+    #[cfg(target_os = "macos")]
+    if !macos::show(&key, &title, &body) {
+        std::thread::spawn(move || show_simple(&title, &body));
+    }
+    #[cfg(windows)]
+    std::thread::spawn(move || {
+        if let Err(e) = windows::show(&key, &title, &body) {
+            log::warn!("toast failed, using a balloon: {e}");
+            show_simple(&title, &body);
+        }
+    });
 }
 
-/// macOS and Windows: a plain notification, without the click to open.
+/// macOS outside warust.app and Windows without toasts: a plain
+/// notification, without the click to open.
 #[cfg(not(target_os = "linux"))]
 fn show_simple(title: &str, body: &str) {
     use crate::platform::{applescript_quote, command, powershell_quote};
@@ -192,6 +228,8 @@ fn show(state: &Updater, key: &str, session: &str, jid: &str, title: &str, body:
 
 /// Ends the waiting `notify-send`s, so none outlive the app.
 pub(crate) fn close_all() {
+    #[cfg(windows)]
+    windows::forget_all();
     if let Ok(mut shown) = shown().lock() {
         for (_, (_, mut child)) in shown.drain() {
             let _ = child.kill();
@@ -218,5 +256,14 @@ mod tests {
         assert_eq!(body, "+62 812-****-7890: halo");
         assert_eq!(escape("a<b>&c"), "a&lt;b&gt;&amp;c");
         assert!(preview(&"x".repeat(300)).ends_with('…'));
+    }
+
+    #[test]
+    fn chat_keys_round_trip() {
+        let key = chat_key("s1762591234", "6281234567890@s.whatsapp.net");
+        assert_eq!(key, "s1762591234|6281234567890@s.whatsapp.net");
+        assert_eq!(parse_key(&key), Some(("s1762591234", "6281234567890@s.whatsapp.net")));
+        assert_eq!(parse_key("tanpa-pemisah"), None);
+        assert_eq!(parse_key("|123@g.us"), None);
     }
 }

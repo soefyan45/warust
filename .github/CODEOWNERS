@@ -1,0 +1,13 @@
+# Inti kode warust: perubahan di sini wajib disetujui soefyan45 sebelum
+# di-merge (dijaga oleh ruleset "main" di GitHub). Bagian lain (UI, aset,
+# dokumen) cukup satu persetujuan dari kolaborator mana pun.
+/src/backend/          @soefyan45
+/src/main.rs           @soefyan45
+/src/platform.rs       @soefyan45
+/Cargo.toml            @soefyan45
+/Cargo.lock            @soefyan45
+/rust-toolchain.toml   @soefyan45
+/.github/              @soefyan45
+/packaging/            @soefyan45
+/LICENSE               @soefyan45
+/THIRD_PARTY_NOTICES.md @soefyan45

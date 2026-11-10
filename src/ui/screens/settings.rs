@@ -250,7 +250,7 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                     let draft = form.draft.as_mut().expect("synced");
                     widgets::toggle(ui, &mut draft.send_read, "Kirim tanda dibaca");
                     ui.label(rich(
-                        "Membuka chat mengirim centang biru ke pengirim dan menandai chat dibaca di HP. Matikan agar hanya badge di sini yang hilang.",
+                        "Menyala: membuka chat mengirim centang biru ke pengirim dan menandai chat dibaca di HP. Bawaannya mati, jadi hanya badge di sini yang hilang.",
                         12.0,
                         Weight::Regular,
                         p.muted,
