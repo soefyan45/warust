@@ -894,6 +894,7 @@ impl eframe::App for App {
         }
         self.webhooks = snapshot.webhooks;
         self.api = snapshot.api;
+        crate::i18n::set(&self.settings.language);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.

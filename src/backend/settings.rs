@@ -137,6 +137,8 @@ pub struct Settings {
     /// Opening a chat sends read receipts (blue ticks) and syncs "read" to
     /// the phone. Off by default (it only clears the local badge).
     pub send_read: bool,
+    /// UI language: `en` (the default, also for older files) or `id`.
+    pub language: String,
 }
 
 impl Default for Settings {
@@ -153,6 +155,7 @@ impl Default for Settings {
             notify: Notify::default(),
             typing: true,
             send_read: false,
+            language: crate::i18n::EN.to_owned(),
         }
     }
 }

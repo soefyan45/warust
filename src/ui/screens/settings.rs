@@ -210,6 +210,10 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                             }
                         }
                     });
+                    // Named in both languages, so either can find it.
+                    let mut language = usize::from(draft.language == crate::i18n::ID);
+                    line(ui, "Language / Bahasa", |ui| widgets::tabs(ui, &["English", "Bahasa Indonesia"], &mut language));
+                    draft.language = if language == 1 { crate::i18n::ID } else { crate::i18n::EN }.to_owned();
                     if Template::from_key(&draft.template).has_dark() {
                         let mut tab = usize::from(draft.theme == "light");
                         line(ui, "Tema", |ui| widgets::tabs(ui, &["Gelap", "Terang"], &mut tab));

@@ -264,6 +264,7 @@ impl Backend {
     pub fn start(ctx: egui::Context, data_dir: PathBuf) -> Self {
         let (commands, receiver) = unbounded_channel();
         let settings = Settings::load(&data_dir);
+        crate::i18n::set(&settings.language);
         let shared = Arc::new(Mutex::new(Shared { settings: Arc::new(settings), ..Shared::default() }));
         let (hooks, hook_events) = unbounded_channel();
         let state = Updater { shared: shared.clone(), ctx, data_dir: data_dir.clone(), hooks, commands: commands.clone() };
