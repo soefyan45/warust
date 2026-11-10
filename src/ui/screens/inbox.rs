@@ -625,10 +625,12 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
 
 /// Opens a chat and remembers where its unread messages start; call before
 /// `Seen` clears the count. Re-opening the chat already open keeps the anchor.
+/// Either way the text box takes the keyboard.
 pub fn open_chat(state: &mut State, session: &str, jid: &str, chat: Option<&Chat>) {
     let already = state.inbox_session.as_deref() == Some(session) && state.chat_selected.as_deref() == Some(jid);
     state.inbox_session = Some(session.to_owned());
     state.chat_selected = Some(jid.to_owned());
+    state.focus_composer = true;
     if already {
         return;
     }
@@ -2973,10 +2975,16 @@ fn composer(
 ) -> Option<Outgoing> {
     let connected = session.status == Status::Connected;
     let id = ui.make_persistent_id("composer_text");
+    // Taken even while a voice note hides the text box, so the focus does not
+    // jump there later.
+    let opened = std::mem::take(&mut state.focus_composer);
     match voice_note(ui, p, state, session, chat, compact) {
         Err(()) => return None,
         Ok(Some(voice)) => return Some(voice),
         Ok(None) => {}
+    }
+    if opened {
+        ui.memory_mut(|m| m.request_focus(id));
     }
     let mut mention = mention_input(ui, state, book, session, chat, id);
     if let Some(rx) = &state.picking {
@@ -3970,6 +3978,23 @@ mod member_color_tests {
         let distinct: std::collections::HashSet<_> =
             (0..40).map(|n| member_color(&format!("62812{n:04}@s.whatsapp.net"), true)).collect();
         assert!(distinct.len() >= 8, "members spread over the palette: {}", distinct.len());
+    }
+}
+
+#[cfg(test)]
+mod open_chat_tests {
+    use super::*;
+
+    #[test]
+    fn opening_a_chat_asks_for_the_text_box() {
+        let mut state = State::default();
+        open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
+        assert!(state.focus_composer);
+        // The composer takes the request; clicking the open chat again asks anew.
+        state.focus_composer = false;
+        open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
+        assert!(state.focus_composer);
+        assert_eq!(state.chat_selected.as_deref(), Some("628111@s.whatsapp.net"));
     }
 }
 

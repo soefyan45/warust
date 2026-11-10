@@ -187,6 +187,9 @@ pub struct State {
     pub folded: std::collections::HashSet<String>,
     /// The chat list scrolls to the open chat once (it was opened elsewhere).
     pub reveal_chat: bool,
+    /// A chat was just opened: its text box takes the keyboard, so typing
+    /// needs no click first.
+    pub focus_composer: bool,
     /// "Tautkan nomor" was clicked in the Inbox's device panel.
     pub add_number_requested: bool,
     /// Ringkasan "Pesan terbaru": 0 = belum dibalas, 1 = semua.
