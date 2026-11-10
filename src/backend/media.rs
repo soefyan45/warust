@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use whatsapp_rust::download::{DownloadParams, MediaType};
 use whatsapp_rust::serde_json::{Value, json};
-use whatsapp_rust::media::{DocumentOptions, ImageOptions, VideoOptions, document_message, image_message, video_message};
+use whatsapp_rust::media::{AudioOptions, DocumentOptions, ImageOptions, VideoOptions, audio_message, document_message, image_message, video_message};
 use whatsapp_rust::prelude::*;
 use whatsapp_rust::upload::UploadOptions;
 
@@ -461,6 +461,29 @@ pub fn describe(message: &wa::Message, dir: &Path, msg_id: &str) -> Option<Value
         "thumb": thumb,
         "dl": download,
     }))
+}
+
+/// Uploads a recorded voice note and wraps it as a push-to-talk message, with
+/// its length and waveform read from the file.
+pub async fn voice_message(client: &Client, path: &Path) -> Result<wa::Message, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Pesan suara tidak terbaca: {e}"))?;
+    let (seconds, waveform) = super::voice::inspect(&bytes)?;
+    let upload = client
+        .upload(bytes, MediaType::Audio, UploadOptions::default())
+        .await
+        .map_err(|e| format!("Upload gagal: {e}"))?;
+    let mut options = AudioOptions::default();
+    options.mimetype = Some("audio/ogg; codecs=opus".to_owned());
+    options.ptt = Some(true);
+    options.duration_seconds = Some(seconds);
+    options.waveform = Some(waveform);
+    Ok(audio_message(upload, options))
+}
+
+/// The media part of a sent voice note's chat record.
+pub fn describe_sent_voice(path: &Path) -> Value {
+    let size = std::fs::metadata(path).map(|m| m.len()).ok();
+    json!({ "k": "audio", "mime": "audio/ogg; codecs=opus", "size": size, "file": path.to_string_lossy() })
 }
 
 /// The media part of a sent sticker's chat record.

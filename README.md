@@ -61,7 +61,7 @@ Semua screenshot memakai data contoh.</sub></p>
   </tr>
 </table>
 
-Juga: emoji berwarna, kirim foto/video/dokumen/stiker, pratinjau PDF di aplikasi, tanda kirim ✓✓,
+Juga: emoji berwarna, kirim foto/video/dokumen/stiker, rekam pesan suara, pratinjau PDF di aplikasi, tanda kirim ✓✓,
 notifikasi desktop (klik untuk membuka chat), dua template (Forest, dan Klasik gelap/terang), serta tata letak HP saat jendela
 dikecilkan di bawah 1100 px.
 
@@ -82,6 +82,9 @@ Data (kunci sesi, chat, media, pengaturan, API key) disimpan di folder per pengg
 `~/.local/share/warust` (Linux), `~/Library/Application Support/warust` (macOS), atau
 `%APPDATA%\warust` (Windows). Jangan bagikan folder itu: isinya cukup untuk masuk ke akun WhatsApp yang
 tertaut. Folder lain bisa dipilih dengan variabel lingkungan `WARUST_DATA`.
+Pesan suara yang direkam disimpan di subfolder `voice/` (Ogg Opus, sekitar 4 KB per detik) agar
+bisa dibuka lagi dari chat; warust tidak menghapusnya sendiri, jadi folder itu boleh dikosongkan bila
+perlu ruang.
 
 Beberapa fitur memakai alat bawaan OS. Di Linux, paket .deb menyarankan `zenity` (dialog file),
 `poppler-utils` (pratinjau PDF), `libnotify-bin` dan `gnome-session-canberra` (notifikasi dan suara),
@@ -92,7 +95,8 @@ thumbnail (di macOS, Quick Look dipakai sebagai gantinya).
 
 ### Dari source
 
-Butuh [Rust](https://rustup.rs) (versi dipatok di `rust-toolchain.toml`) dan compiler C untuk SQLite.
+Butuh [Rust](https://rustup.rs) (versi dipatok di `rust-toolchain.toml`), compiler C untuk SQLite, dan
+CMake untuk libopus (pesan suara). Di Linux juga header ALSA untuk mikrofon (`sudo apt install cmake libasound2-dev`).
 
 ```bash
 git clone https://github.com/soefyan45/warust && cd warust
