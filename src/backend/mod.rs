@@ -272,6 +272,8 @@ pub enum Command {
     /// Pin a message for everyone (for `length`), or unpin it. `msg_id` is a real
     /// WhatsApp id from `chat`'s messages.
     Pin { id: String, chat: String, msg_id: String, pinned: bool, length: store::PinLength },
+    /// Delete a message for everyone (only our own) or just for me (#72).
+    DeleteMessage { id: String, chat: String, msg_id: String, everyone: bool },
     /// Save new settings; restarts the API server when its part changed.
     SaveSettings(Settings),
     /// Send a `webhook.test` event to the global webhook URL.
@@ -881,6 +883,21 @@ async fn run(
                         r.pin(target, pinned.then_some(length));
                     }
                     _ => log::warn!("pin: session {id} is not running or the message is gone"),
+                }
+            }
+            Command::DeleteMessage { id, chat, msg_id, everyone } => {
+                let found = state.book(&id).and_then(|book| {
+                    let jid = book.normalize(&chat);
+                    let c = book.chats.iter().find(|c| c.jid == jid)?;
+                    let m = c.messages.iter().find(|m| m.id == msg_id)?;
+                    Some((c.jid.clone(), m.from_me, m.sender.clone()))
+                });
+                match (running.get(&id), stores.get(&id), found) {
+                    (Some(r), Some(store), Some((chat, from_me, sender))) if from_me || !everyone => {
+                        let target = session::PinTarget { chat, msg_id, sender: (!from_me).then_some(sender) };
+                        r.delete(&id, target, everyone, &state, store);
+                    }
+                    _ => log::warn!("delete: session {id} is not running, the message is gone, or it isn't ours to delete for everyone"),
                 }
             }
             Command::Seen { id, chat } => {

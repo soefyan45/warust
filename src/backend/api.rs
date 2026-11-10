@@ -529,6 +529,7 @@ async fn get_message(_: Authed, State(context): State<Context>, Path((id, msg_id
         "chat": chat.jid,
         "from_me": m.from_me,
         "text": m.text,
+        "deleted": m.deleted,
         "timestamp": m.ts,
         "status": status,
         "error": failure,

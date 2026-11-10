@@ -80,13 +80,15 @@ pub struct ChatMsg {
     pub mentions_me: bool,
     /// Shown as "Diteruskan": it came in forwarded, or we forwarded it.
     pub forwarded: bool,
+    /// Deleted for everyone by its sender: its content is gone (#72).
+    pub deleted: bool,
 }
 
 impl ChatMsg {
     /// Stage 1 of forwarding: plain text only. Media, locations and
     /// contacts are only a label here, not something to send again.
     pub fn forwardable(&self) -> bool {
-        self.media.is_none() && !self.text.trim().is_empty() && !matches!(self.text.as_str(), "[Lokasi]" | "[Kontak]")
+        !self.deleted && self.media.is_none() && !self.text.trim().is_empty() && !matches!(self.text.as_str(), "[Lokasi]" | "[Kontak]")
     }
 }
 
@@ -330,6 +332,8 @@ pub struct Book {
     /// Archived chats (normalized JIDs), also those without messages yet, so
     /// an archive record that comes before the history still counts.
     archived: HashSet<String>,
+    /// Messages deleted for me: history repeating them does not bring them back.
+    hidden: HashSet<String>,
 }
 
 impl Book {
@@ -494,6 +498,9 @@ impl Book {
                     }
                     return;
                 }
+                if self.hidden.contains(&id) {
+                    return;
+                }
                 let jid = self.normalize(&chat);
                 let message = ChatMsg {
                     id,
@@ -517,6 +524,7 @@ impl Book {
                         .unwrap_or_default(),
                     mentions_me: record.get("mme").and_then(Value::as_bool).unwrap_or(false),
                     forwarded: record.get("fw").and_then(Value::as_bool).unwrap_or(false),
+                    deleted: false,
                 };
                 let unread = record.get("unread").and_then(Value::as_bool).unwrap_or(false);
                 let chat = self.chat_mut(&jid);
@@ -525,7 +533,7 @@ impl Book {
                     if message.status.rank() > existing.status.rank() {
                         existing.status = message.status;
                     }
-                    if existing.media.is_none() {
+                    if existing.media.is_none() && !existing.deleted {
                         existing.media = message.media;
                     }
                     return;
@@ -547,6 +555,32 @@ impl Book {
                             if status.rank() > m.status.rank() || matches!(status, Delivery::Failed(_)) || retry {
                                 m.status = status;
                             }
+                            return;
+                        }
+                    }
+                }
+            }
+            Some("hide") => {
+                // Deleted for me: the message leaves the chat for good.
+                if let Some(id) = text("id") {
+                    for chat in &mut self.chats {
+                        chat.messages.retain(|m| m.id != id);
+                    }
+                    self.chats.retain(|c| !c.messages.is_empty());
+                    self.hidden.insert(id);
+                }
+            }
+            Some("del") => {
+                // Deleted for everyone: keep the bubble, drop what it said.
+                if let Some(id) = text("id") {
+                    for chat in &mut self.chats {
+                        if let Some(m) = chat.messages.iter_mut().find(|m| m.id == id) {
+                            m.deleted = true;
+                            m.text.clear();
+                            m.media = None;
+                            m.quote = None;
+                            m.mentions.clear();
+                            m.mentions_me = false;
                             return;
                         }
                     }
@@ -817,6 +851,16 @@ pub fn done_record(chat: &str, ts: i64) -> Value {
 /// Pins message `id` at `ts` for `secs` seconds.
 pub fn pin_record(chat: &str, id: &str, ts: i64, secs: i64) -> Value {
     json!({ "t": "pin", "chat": chat, "id": id, "ts": ts, "exp": ts + secs })
+}
+
+/// The message `id` was deleted for everyone.
+pub fn deleted_record(id: &str) -> Value {
+    json!({ "t": "del", "id": id })
+}
+
+/// The message `id` was deleted for me.
+pub fn hidden_record(id: &str) -> Value {
+    json!({ "t": "hide", "id": id })
 }
 
 pub fn unpin_record(chat: &str, id: &str) -> Value {
@@ -1101,6 +1145,33 @@ mod tests {
         ]);
         assert_eq!(b.chats[0].messages.len(), 1);
         assert_eq!(b.chats[0].messages[0].status, Delivery::Read);
+    }
+
+    #[test]
+    fn a_deleted_message_keeps_its_place_but_not_its_content() {
+        let b = book(&[
+            msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "secret", 1, &Delivery::Received, false),
+            deleted_record("x"),
+            // History repeating the message does not bring the text back.
+            msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "secret", 1, &Delivery::Received, false),
+        ]);
+        let m = &b.chats[0].messages[0];
+        assert_eq!(b.chats[0].messages.len(), 1);
+        assert!(m.deleted);
+        assert!(m.text.is_empty());
+        assert!(!m.forwardable());
+    }
+
+    #[test]
+    fn a_message_deleted_for_me_stays_gone() {
+        let b = book(&[
+            msg_record("1@s.whatsapp.net", "a", true, "", "keep", 1, &Delivery::Sent, false),
+            msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "gone", 2, &Delivery::Received, false),
+            hidden_record("x"),
+            msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "gone", 2, &Delivery::Received, false),
+        ]);
+        assert_eq!(b.chats[0].messages.len(), 1);
+        assert_eq!(b.chats[0].messages[0].id, "a");
     }
 
     #[test]

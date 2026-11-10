@@ -62,6 +62,9 @@ pub enum Body {
     /// A pin or unpin (`None`). Not a chat message: it shows no bubble, is
     /// never stored as queued, and so is lost if the app closes before it goes out.
     Pin { target: PinTarget, length: Option<store::PinLength> },
+    /// Delete a message for everyone (our own messages only), or for me (this
+    /// account's devices). Like a pin it shows no bubble of its own.
+    Delete { target: PinTarget, everyone: bool },
 }
 
 /// The message a `Body::Reply` quotes.
@@ -89,6 +92,7 @@ fn reply_quote(m: &store::ChatMsg) -> ReplyQuote {
 
 /// The message to pin or unpin. `sender` is its author as stored, `None` for
 /// our own messages (groups need the author to address a message).
+/// A message addressed for a pin or a delete.
 pub struct PinTarget {
     pub chat: String,
     pub msg_id: String,
@@ -312,6 +316,22 @@ impl Running {
         let _ = self.queue.send(Outgoing { local_id: String::new(), chat, body: Body::Pin { target, length } });
     }
 
+    /// Deletes a message. For me it leaves this chat at once and the phone
+    /// follows through the app state; for everyone it changes once WhatsApp
+    /// took the revoke. Both wait in the paced queue like a send.
+    pub fn delete(&self, id: &str, target: PinTarget, everyone: bool, state: &Updater, store: &Mutex<Store>) {
+        if !everyone {
+            remove_media_file(state, id, &target.msg_id);
+            state.record(id, store, &[store::hidden_record(&target.msg_id)]);
+            // A message that never went out is only here: nothing to tell the phone.
+            if target.msg_id.starts_with("local-") {
+                return;
+            }
+        }
+        let chat = target.chat.clone();
+        let _ = self.queue.send(Outgoing { local_id: String::new(), chat, body: Body::Delete { target, everyone } });
+    }
+
     pub fn request_avatar(&self, jid: String) {
         let _ = self.avatars.send(jid);
     }
@@ -323,8 +343,8 @@ impl Running {
 
     /// Like `enqueue`, under an id the caller already handed out (the REST API).
     pub fn enqueue_as(&self, id: &str, chat: String, body: Body, local_id: String, state: &Updater, store: &Mutex<Store>) {
-        if matches!(body, Body::Pin { .. }) {
-            return log::warn!("session {id}: pins go through `pin`, not the message queue");
+        if matches!(body, Body::Pin { .. } | Body::Delete { .. }) {
+            return log::warn!("session {id}: pins and deletes go through `pin` and `delete`, not the message queue");
         }
         let shown = match &body {
             Body::Text(text) => text.clone(),
@@ -332,14 +352,14 @@ impl Running {
             Body::Sticker(_) => "[Stiker]".to_owned(),
             Body::Voice(_) => "[Pesan suara]".to_owned(),
             Body::StatusReply { text, .. } | Body::Mention { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
-            Body::Pin { .. } => unreachable!("returned above"),
+            Body::Pin { .. } | Body::Delete { .. } => unreachable!("returned above"),
         };
         let media = match &body {
             Body::Text(_) | Body::StatusReply { .. } | Body::Mention { .. } | Body::Reply { .. } | Body::Forward(_) => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
             Body::Voice(path) => Some(media::describe_sent_voice(path)),
-            Body::Pin { .. } => unreachable!("returned above"),
+            Body::Pin { .. } | Body::Delete { .. } => unreachable!("returned above"),
         };
         let record = store::msg_record(&chat, &local_id, true, "", &shown, unix_secs(), &Delivery::Queued, false);
         let mut record = store::with_media(record, media);
@@ -603,6 +623,36 @@ fn pin_record_of(message: &wa::Message, chat: &str, ts: i64) -> Option<Value> {
     }
 }
 
+/// Removes the downloaded file of a message that is being deleted.
+fn remove_media_file(state: &Updater, id: &str, msg_id: &str) {
+    let file = state.book(id).and_then(|book| book.media_of(msg_id).and_then(|m| m.file.clone()));
+    if let Some(file) = file {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
+/// The id of the message a "delete for everyone" takes back.
+fn revoked(message: &wa::Message) -> Option<String> {
+    use wa::message::protocol_message::Type;
+    let protocol = message.get_base_message().protocol_message.as_option()?;
+    if protocol.r#type != Some(Type::REVOKE) {
+        return None;
+    }
+    protocol.key.as_option()?.id.clone().filter(|id| !id.is_empty())
+}
+
+/// A message deleted for everyone: its downloaded file goes, the bubble
+/// stays as "This message was deleted", and the webhook hears of it.
+fn on_revoke(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, chat: &str, target: &str) {
+    let Some(book) = state.book(id) else { return };
+    if !book.chats.iter().flat_map(|c| &c.messages).any(|m| m.id == target) {
+        return log::info!("session {id}: deleted message {target} is not here");
+    }
+    remove_media_file(state, id, target);
+    state.record(id, chats, &[store::deleted_record(target)]);
+    state.emit(id, "message.deleted", json!({ "id": target, "chat": chat }));
+}
+
 /// Background and text colour of a text status.
 fn status_colors(message: &wa::Message) -> (Option<u32>, Option<u32>) {
     match message.get_base_message().extended_text_message.as_option() {
@@ -673,6 +723,10 @@ fn on_message(
     // it has no bubble of its own.
     if let Some(record) = pin_record_of(&ctx.message, &chat, ctx.info.timestamp.timestamp()) {
         state.record(id, chats, &[record]);
+        return;
+    }
+    if let Some(target) = revoked(&ctx.message) {
+        on_revoke(state, id, chats, &chat, &target);
         return;
     }
     let Some(text) = body(&ctx.message) else {
@@ -1022,6 +1076,11 @@ async fn send_worker(
                 last = Some(Instant::now());
                 continue;
             }
+            Outgoing { body: Body::Delete { target, everyone }, .. } => {
+                send_delete(&id, &client, &state, &chats, target, everyone).await;
+                last = Some(Instant::now());
+                continue;
+            }
             other => other,
         };
         let outcome: Result<String, String> = match message.chat.parse::<Jid>() {
@@ -1103,6 +1162,34 @@ async fn send_pin(id: &str, client: &Client, state: &Updater, chats: &Mutex<Stor
     }
 }
 
+/// Sends a delete: a revoke for everyone, or the phone's "delete for me".
+async fn send_delete(id: &str, client: &Client, state: &Updater, chats: &Mutex<Store>, target: PinTarget, everyone: bool) {
+    let Ok(chat_jid) = target.chat.parse::<Jid>() else {
+        return;
+    };
+    let sender_jid = target.sender.as_deref().and_then(|s| s.parse::<Jid>().ok());
+    let from_me = target.sender.is_none();
+    let PinTarget { chat, msg_id, .. } = target;
+    let addressed = match MessageId::new(msg_id.as_str()).and_then(|mid| MessageRef::new(&chat_jid, mid, sender_jid.as_ref(), from_me)) {
+        Ok(addressed) => addressed,
+        Err(e) => return log::warn!("session {id}: cannot address message {msg_id} to delete: {e}"),
+    };
+    if !everyone {
+        if let Err(e) = client.chat_actions().delete_message_for_me(&addressed, true, None).await {
+            log::warn!("session {id}: delete for me sync failed: {e}");
+        }
+        return;
+    }
+    match client.revoke_message(&addressed).await {
+        Ok(_) => {
+            remove_media_file(state, id, &msg_id);
+            state.record(id, chats, &[store::deleted_record(&msg_id)]);
+            state.emit(id, "message.deleted", json!({ "id": msg_id, "chat": chat }));
+        }
+        Err(e) => log::warn!("session {id}: delete for everyone failed: {e}"),
+    }
+}
+
 /// Our own JID (no device part) as the author of a quoted message: the LID in
 /// LID-addressed groups, else the phone number, like the crate's own add-on keys.
 async fn own_author(client: &Client, chat: &Jid) -> Result<Jid, String> {
@@ -1145,7 +1232,7 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
         }
         // The original wa::Message is not kept, so the text is rebuilt with
         // the same markers `prepare_for_forward` sets (score 1: first hop).
-        Body::Pin { .. } => Err("a pin is not a message".to_owned()),
+        Body::Pin { .. } | Body::Delete { .. } => Err("a pin or delete is not a message".to_owned()),
         Body::Forward(text) => {
             let mut context = wa::ContextInfo::default();
             context.is_forwarded = Some(true);

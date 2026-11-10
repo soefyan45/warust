@@ -131,6 +131,8 @@ pub struct State {
     pub pdf_view: Option<pdf::Viewer>,
     /// "Teruskan ke…" dialog for a message of the open chat.
     pub forward: Option<forward::Dialog>,
+    /// "Delete message?" asked for a message of the open chat (#72).
+    pub delete_ask: Option<screens::inbox::DeleteAsk>,
     /// The file dialog running on its own thread; `None` inside when cancelled.
     pub picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
     /// The voice note in the composer, tied to the chat it was started in.

@@ -225,6 +225,7 @@ pub fn show(
                 if let Some(event) = event {
                     on_message_event(event, state, session, chat, &mut commands);
                 }
+                delete_dialog(ui.ctx(), state, &mut commands);
             });
         });
     });
@@ -1018,8 +1019,27 @@ fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, siz
             rect.min.x += side + 4.0;
         }
     }
+    if m.deleted {
+        widgets::paint_text(ui, rect, deleted_line(m), fonts::ui(size, Weight::Regular), p.muted, Align::Min);
+        return;
+    }
     let text = book.with_mention_names(&m.text, &m.mentions);
     widgets::paint_text(ui, rect, &text.replace('\n', " "), fonts::ui(size, Weight::Regular), color, Align::Min);
+}
+
+/// What a message deleted for everyone shows instead of its text (#72).
+fn deleted_line(m: &ChatMsg) -> &'static str {
+    if m.from_me {
+        tr("You deleted this message", "Anda menghapus pesan ini")
+    } else {
+        tr("This message was deleted", "Pesan ini telah dihapus")
+    }
+}
+
+/// The deleted line as a muted italic galley for the bubble.
+fn deleted_galley(ui: &Ui, m: &ChatMsg, color: Color32) -> std::sync::Arc<egui::Galley> {
+    let format = egui::TextFormat { font_id: fonts::ui(14.0, Weight::Regular), color, italics: true, ..Default::default() };
+    ui.painter().layout_job(egui::text::LayoutJob::single_section(deleted_line(m).to_owned(), format))
 }
 
 pub fn delivery_label(status: &Delivery) -> &'static str {
@@ -1637,6 +1657,8 @@ enum MsgAction {
     Forward,
     Pin(PinLength),
     Unpin,
+    /// Ask how to delete the message.
+    Delete,
     /// Send a failed message again.
     Retry,
 }
@@ -1646,6 +1668,68 @@ enum MsgEvent {
     Media(MediaClick),
     /// A context menu action on the message with this id.
     Menu(MsgAction, String),
+}
+
+/// How long WhatsApp lets a sender delete a message for everyone (about two
+/// and a half days).
+const DELETE_FOR_EVERYONE_SECS: i64 = 60 * 3600;
+
+/// A message the user asked to delete; `everyone` when that is still allowed.
+pub struct DeleteAsk {
+    session: String,
+    chat: String,
+    msg_id: String,
+    everyone: bool,
+}
+
+/// "Delete message?": for everyone (our own recent messages), for me, or not.
+fn delete_dialog(ctx: &egui::Context, state: &mut State, commands: &mut Vec<Command>) {
+    let Some(ask) = state.delete_ask.as_ref() else { return };
+    let p = theme::palette(ctx);
+    let mut answer: Option<Option<bool>> = None;
+    let modal = egui::Modal::new(egui::Id::unique("delete_message"))
+        .frame(
+            egui::Frame::NONE
+                .fill(p.panel)
+                .stroke(Stroke::new(1.0, p.border_strong))
+                .corner_radius(R_LG)
+                .inner_margin(egui::Margin::same(24)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.spacing_mut().item_spacing.y = 12.0;
+            ui.label(rich(tr("Delete message?", "Hapus pesan?"), 16.0, Weight::SemiBold, p.text));
+            let text = if ask.everyone {
+                tr(
+                    "Delete for everyone removes it on both sides and leaves \"You deleted this message\". Delete for me removes it only from your devices.",
+                    "Hapus untuk semua orang menghapusnya di kedua sisi dan menyisakan \"Anda menghapus pesan ini\". Hapus untuk saya hanya menghapusnya dari perangkat Anda.",
+                )
+            } else {
+                tr("It is removed only from your devices. The other person still sees it.", "Pesan hanya dihapus dari perangkat Anda. Lawan bicara tetap melihatnya.")
+            };
+            ui.add(egui::Label::new(rich(text, 13.0, Weight::Regular, p.text_2)).wrap());
+            ui.add_space(4.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::button(ui, None, tr("Cancel", "Batal"), Kind::Secondary).clicked() {
+                    answer = Some(None);
+                }
+                let (me_kind, me_icon) = if ask.everyone { (Kind::Secondary, None) } else { (Kind::Primary, Some("trash")) };
+                if widgets::button(ui, me_icon, tr("Delete for me", "Hapus untuk saya"), me_kind).clicked() {
+                    answer = Some(Some(false));
+                }
+                if ask.everyone && widgets::button(ui, Some("trash"), tr("Delete for everyone", "Hapus untuk semua"), Kind::Primary).clicked() {
+                    answer = Some(Some(true));
+                }
+            });
+        });
+    if answer.is_none() && modal.should_close() {
+        answer = Some(None);
+    }
+    let Some(answer) = answer else { return };
+    let ask = state.delete_ask.take().expect("checked above");
+    if let Some(everyone) = answer {
+        commands.push(Command::DeleteMessage { id: ask.session, chat: ask.chat, msg_id: ask.msg_id, everyone });
+    }
 }
 
 /// Room under a failed bubble for its "Not sent · Retry" line.
@@ -1694,6 +1778,13 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         }
         MsgEvent::Menu(MsgAction::Unpin, msg_id) => {
             commands.push(Command::Pin { id: session.id.clone(), chat: chat.jid.clone(), msg_id, pinned: false, length: PinLength::Days7 });
+        }
+        MsgEvent::Menu(MsgAction::Delete, msg_id) => {
+            let Some(m) = chat.messages.iter().find(|m| m.id == msg_id) else { return };
+            // WhatsApp takes back only our own sent messages, and only for a while.
+            let age = time::now() - m.ts;
+            let everyone = m.from_me && !m.id.starts_with("local-") && age < DELETE_FOR_EVERYONE_SECS;
+            state.delete_ask = Some(DeleteAsk { session: session.id.clone(), chat: chat.jid.clone(), msg_id, everyone });
         }
         MsgEvent::Menu(MsgAction::Retry, msg_id) => commands.push(Command::Retry { id: session.id.clone(), msg_id }),
     }
@@ -1810,6 +1901,10 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
             });
         }
     }
+    // A queued message is still on its way; one that failed or went out can go.
+    if !matches!(m.status, Delivery::Queued) && ui.button(tr("Delete…", "Hapus…")).clicked() {
+        action = Some(MsgAction::Delete);
+    }
     if action.is_some() {
         ui.close();
     }
@@ -1924,7 +2019,11 @@ fn messages(
         let caption = caption(m);
         let mentions = mention_refs(book, m, own.0, own.1);
         let accent = if m.from_me { fg } else { p.accent_text };
-        let text = (!caption.is_empty()).then(|| ui.painter().layout_job(markup::job_with_mentions(&caption, 14.0, fg, code_bg, wrap, &mentions, accent)));
+        let text = if m.deleted {
+            Some(deleted_galley(ui, m, meta_color))
+        } else {
+            (!caption.is_empty()).then(|| ui.painter().layout_job(markup::job_with_mentions(&caption, 14.0, fg, code_bg, wrap, &mentions, accent)))
+        };
         let meta = time::clock(m.ts);
         let tick = if m.from_me { tick(p, &m.status, meta_color, !sticker && is_dark(p.primary)) } else { None };
         let meta = if m.forwarded { crate::trf!("Forwarded · {meta}", "Diteruskan · {meta}") } else { meta };
@@ -2050,7 +2149,10 @@ fn messages(
                         // Created before the media's own click area, so media keeps its primary click.
                         let bubble = ui.interact(rect, ui.scope_id().with(("bubble", &m.id)), Sense::click());
                         let mut action = None;
-                        bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                        // A deleted message has nothing left to reply to, copy, forward or pin.
+                        if !m.deleted {
+                            bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                        }
                         if jump.as_deref() == Some(m.id.as_str()) {
                             ui.scroll_to_rect(rect, Some(Align::Center));
                             ui.data_mut(|d| d.insert_temp(flash_id, (m.id.clone(), clock + 1.8)));
@@ -2104,7 +2206,10 @@ fn messages(
                             }
                             at.y += media_size.y + 8.0;
                         }
-                        if let Some(text) = text.as_ref().filter(|_| veiled) {
+                        if let Some(text) = text.as_ref().filter(|_| m.deleted) {
+                            painter.galley(at, text.clone(), p.muted);
+                            at.y += text.size().y + 4.0;
+                        } else if let Some(text) = text.as_ref().filter(|_| veiled) {
                             crate::ui::privacy::frost_galley(&painter, at, text, frost);
                             at.y += text.size().y + 4.0;
                         } else if let Some(text) = text {
@@ -3614,6 +3719,7 @@ fn compact_chat(
             if let Some(event) = event {
                 on_message_event(event, state, session, chat, &mut commands);
             }
+            delete_dialog(ui.ctx(), state, &mut commands);
         });
     });
     commands
