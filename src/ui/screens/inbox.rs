@@ -3,13 +3,14 @@
 //! paced queue) and the contact panel.
 
 use egui::{
-    Align, CentralPanel, Color32, CursorIcon, Frame, Key, KeyboardShortcut, Margin, Modifiers, Panel, Rect, ScrollArea,
+    Align, CentralPanel, Color32, CursorIcon, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Panel, Rect, ScrollArea,
     Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::backend::store::PinLength;
 use crate::backend::{Book, Chat, ChatMsg, Command, Delivery, MAX_FILE_BYTES, Media, SessionView, Status};
 
 /// Profile pictures by JID, as the backend shares them.
@@ -19,13 +20,14 @@ type Downloads = HashMap<String, Option<String>>;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG, R_MD};
 use crate::ui::widgets::{self, Kind, rich, rich_mono};
-use crate::ui::{State, emoji, icons, markup, pdf, stickers, time};
+use crate::ui::{ReplyTarget, State, UnreadAnchor, emoji, forward, icons, markup, pdf, stickers, time};
 
 const ROW: f32 = 60.0;
-/// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai".
+/// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai", "Diarsipkan".
 pub const TAB_REPLY: usize = 0;
 pub const TAB_ALL: usize = 1;
 pub const TAB_DONE: usize = 2;
+pub const TAB_ARCHIVED: usize = 3;
 /// Older messages stay in the store; the view paints the latest ones.
 const SHOWN: usize = 300;
 
@@ -167,8 +169,9 @@ pub fn show(
         .show(ui, |ui| {
             let to = super::chat_title(&book, chat);
             let (id, jid) = (session.id.clone(), chat.jid.clone());
+            reply_bar(ui, &p, state, &id, &jid);
             match composer(ui, &p, state, &to, session, &book, several, false) {
-                Some(Outgoing::Text(text)) => commands.push(Command::Send { id, chat: jid, text }),
+                Some(Outgoing::Text(text)) => commands.push(text_command(state, id, jid, text)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
                 None => {}
@@ -187,13 +190,12 @@ pub fn show(
                     state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                     commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
                 }
+                pinned_bar(ui, &p, chat);
                 let mut want = Vec::new();
-                let clicked = messages(ui, &p, &book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref());
+                let event = messages(ui, &p, &book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), &mut state.unread_anchor);
                 ask_avatars(state, &mut commands, &session.id, want);
-                match clicked {
-                    Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
-                    Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
-                    None => {}
+                if let Some(event) = event {
+                    on_message_event(event, state, session, chat, &mut commands);
                 }
             });
         });
@@ -336,7 +338,10 @@ fn chat_list(
     };
     let several = sessions.len() > 1;
     let combined = state.inbox_scope.is_none() && several;
-    let chats: Vec<(&SessionView, &Chat)> = scoped.iter().flat_map(|s| s.book.chats.iter().map(move |c| (*s, c))).collect();
+    let all_chats: Vec<(&SessionView, &Chat)> = scoped.iter().flat_map(|s| s.book.chats.iter().map(move |c| (*s, c))).collect();
+    let archived = all_chats.iter().filter(|(_, c)| c.archived).count();
+    // Archived chats stay out of the counts of the main tabs.
+    let chats: Vec<(&SessionView, &Chat)> = all_chats.into_iter().filter(|(_, c)| !c.archived).collect();
     let unread = chats.iter().filter(|(_, c)| c.unread > 0).count();
     let title = match &state.inbox_scope {
         Some(_) => scoped.first().map(|s| s.name.clone()).unwrap_or_default(),
@@ -370,13 +375,13 @@ fn chat_list(
         });
         ui.add_space(4.0);
     }
-    if state.chat_tab > TAB_DONE {
+    if state.chat_tab > TAB_ARCHIVED {
         state.chat_tab = TAB_REPLY;
     }
     ui.horizontal(|ui| {
         ui.add_space(6.0);
         let waiting = chats.iter().filter(|(_, c)| c.needs_reply()).count();
-        let labels = [format!("Perlu balas · {waiting}"), format!("Semua · {}", chats.len()), "Selesai".to_owned()];
+        let labels = [format!("Perlu balas · {waiting}"), format!("Semua · {}", chats.len()), "Selesai".to_owned(), format!("Diarsipkan · {archived}")];
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         widgets::tabs(ui, &labels, &mut state.chat_tab);
     });
@@ -401,6 +406,7 @@ fn chat_list(
         let empty = match state.chat_tab {
             TAB_REPLY => "Semua chat sudah dibalas.",
             TAB_DONE => "Belum ada chat yang ditandai selesai.",
+            TAB_ARCHIVED => "Belum ada chat yang diarsipkan.",
             _ => "Tidak ada chat di sini.",
         };
         ui.vertical_centered(|ui| ui.label(rich(empty, 13.0, Weight::Regular, p.muted)));
@@ -432,9 +438,10 @@ fn chat_list(
                         && state.chat_selected.as_deref() == Some(chat.jid.as_str());
                     let title = super::chat_title(&s.book, chat);
                     let via_number = via.then_some(*s);
-                    if chat_row(ui, p, rect, &title, chat, picture, selected, &s.id, via_number, typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
-                        state.inbox_session = Some(s.id.clone());
-                        state.chat_selected = Some(chat.jid.clone());
+                    let row = chat_row(ui, p, rect, &title, chat, picture, selected, &s.id, via_number, typing_label(state, &s.id, &s.book, chat).as_deref());
+                    chat_menu(&row, s, chat, &mut commands);
+                    if row.clicked() {
+                        open_chat(state, &s.id, &chat.jid, Some(chat));
                         if chat.unread > 0 {
                             commands.push(Command::Seen { id: s.id.clone(), chat: chat.jid.clone() });
                         }
@@ -452,6 +459,8 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
     let query = state.chat_search.trim().to_lowercase();
     let keep = |s: &SessionView, c: &Chat| {
         let tab = match tab {
+            TAB_ARCHIVED => c.archived,
+            _ if c.archived => false,
             TAB_REPLY => c.needs_reply(),
             TAB_DONE => c.is_done(),
             _ => true,
@@ -475,6 +484,41 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
         lines.extend(mine.into_iter().map(|(s, c)| Line::Chat(s, c)));
     }
     lines
+}
+
+/// Opens a chat and remembers where its unread messages start; call before
+/// `Seen` clears the count. Re-opening the chat already open keeps the anchor.
+pub fn open_chat(state: &mut State, session: &str, jid: &str, chat: Option<&Chat>) {
+    let already = state.inbox_session.as_deref() == Some(session) && state.chat_selected.as_deref() == Some(jid);
+    state.inbox_session = Some(session.to_owned());
+    state.chat_selected = Some(jid.to_owned());
+    if already {
+        return;
+    }
+    state.unread_anchor = chat.and_then(|chat| {
+        let incoming: Vec<&ChatMsg> = chat.messages.iter().filter(|m| !m.from_me).collect();
+        let count = (chat.unread as usize).min(incoming.len());
+        let first = incoming.get(incoming.len().checked_sub(count)?)?;
+        (count > 0).then(|| UnreadAnchor { jid: jid.to_owned(), count, first_id: first.id.clone(), pending: true })
+    });
+}
+
+/// Right-click menu of a chat row (wide and phone lists): read state and archive.
+fn chat_menu(row: &egui::Response, session: &SessionView, chat: &Chat, commands: &mut Vec<Command>) {
+    row.context_menu(|ui| {
+        ui.set_min_width(180.0);
+        let (id, jid) = (session.id.clone(), chat.jid.clone());
+        if chat.unread > 0 {
+            if ui.button("Tandai sudah dibaca").clicked() {
+                commands.push(Command::Seen { id: id.clone(), chat: jid.clone() });
+            }
+        } else if ui.button("Tandai belum dibaca").clicked() {
+            commands.push(Command::MarkUnread { id: id.clone(), chat: jid.clone() });
+        }
+        if ui.button(if chat.archived { "Keluarkan dari arsip" } else { "Arsipkan" }).clicked() {
+            commands.push(Command::Archive { id, chat: jid, archived: !chat.archived });
+        }
+    });
 }
 
 /// "● CS Utama  4410 ........ 3 chat", red when the number cannot reply.
@@ -949,6 +993,166 @@ fn paint_media(
     }
 }
 
+/// An entry of the message context menu. To extend the menu add a variant,
+/// a button in `message_menu` and a branch in `on_message_event` (or handle
+/// it inline in `messages` when it needs no backend, like `Copy`).
+enum MsgAction {
+    Copy,
+    Reply,
+    Forward,
+    Pin(PinLength),
+    Unpin,
+}
+
+/// What the user did on a message in the open chat.
+enum MsgEvent {
+    Media(MediaClick),
+    /// A context menu action on the message with this id.
+    Menu(MsgAction, String),
+}
+
+/// Turns a message event into commands or UI state; shared by the wide and
+/// compact layouts.
+fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, chat: &Chat, commands: &mut Vec<Command>) {
+    match event {
+        MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
+        MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
+        // Handled inline where the menu is shown.
+        MsgEvent::Menu(MsgAction::Copy, _) => {}
+        MsgEvent::Menu(MsgAction::Forward, msg_id) => {
+            if let Some(m) = chat.messages.iter().find(|m| m.id == msg_id).filter(|m| m.forwardable()) {
+                state.forward = Some(forward::Dialog::new(session.id.clone(), m.text.clone()));
+            }
+        }
+        MsgEvent::Menu(MsgAction::Reply, msg_id) => {
+            let Some(m) = chat.messages.iter().find(|m| m.id == msg_id) else { return };
+            let author = if m.from_me { "Anda".to_owned() } else { super::sender_label(&session.book, &m.sender) };
+            let snippet = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            state.reply = Some(ReplyTarget { session: session.id.clone(), chat: chat.jid.clone(), id: m.id.clone(), author, snippet });
+        }
+        MsgEvent::Menu(MsgAction::Pin(length), msg_id) => {
+            commands.push(Command::Pin { id: session.id.clone(), chat: chat.jid.clone(), msg_id, pinned: true, length });
+        }
+        MsgEvent::Menu(MsgAction::Unpin, msg_id) => {
+            commands.push(Command::Pin { id: session.id.clone(), chat: chat.jid.clone(), msg_id, pinned: false, length: PinLength::Days7 });
+        }
+    }
+}
+
+/// The text to send: a quoted reply when "Balas" is active in this chat.
+fn text_command(state: &mut State, id: String, chat: String, text: String) -> Command {
+    match state.reply.take_if(|r| r.chat == chat && r.session == id) {
+        Some(reply) => Command::Reply { id, chat, text, reply_to: reply.id },
+        None => Command::Send { id, chat, text },
+    }
+}
+
+/// "Membalas <nama>: <cuplikan>" above the composer; x or Esc cancels. A reply
+/// started in another chat is dropped.
+fn reply_bar(ui: &mut Ui, p: &Palette, state: &mut State, session: &str, chat: &str) {
+    if state.reply.as_ref().is_some_and(|r| r.chat != chat || r.session != session) {
+        state.reply = None;
+    }
+    let Some(reply) = &state.reply else { return };
+    let mut cancel = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    let snippet: String = reply.snippet.chars().take(120).collect();
+    Frame::NONE
+        .fill(p.raised)
+        .corner_radius(R_MD)
+        .inner_margin(Margin { left: 10, right: 4, top: 4, bottom: 4 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                icons::show(ui, "message-circle", 16.0, p.text_2);
+                let label = format!("Membalas {}: {snippet}", reply.author);
+                ui.add(egui::Label::new(rich(&label, 13.0, Weight::Regular, p.text_2)).truncate());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    cancel |= widgets::icon_button(ui, "x", 24.0, false).on_hover_text("Batalkan balasan (Esc)").clicked();
+                });
+            });
+        });
+    ui.add_space(6.0);
+    if cancel {
+        state.reply = None;
+    }
+}
+
+/// Where a click on the pinned bar asks `messages` to scroll to (temp memory,
+/// so the bar and the list need no shared state).
+fn jump_id() -> egui::Id {
+    egui::Id::unique("pin_jump")
+}
+
+/// The bar above the messages: the latest pin that has not lapsed, with the
+/// number of pins. A click scrolls to the message and flashes it.
+fn pinned_bar(ui: &mut Ui, p: &Palette, chat: &Chat) {
+    let pins = chat.active_pins(time::now());
+    let Some((latest, m)) = pins.iter().rev().find_map(|pin| chat.messages.iter().find(|m| m.id == pin.id).map(|m| (*pin, m))) else {
+        return;
+    };
+    let mut label = caption(m);
+    if label.is_empty() {
+        label = m.media.as_ref().map(media_title).unwrap_or_default();
+    }
+    let label = label.replace('\n', " ");
+    ui.add_space(8.0);
+    let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+    let response = response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Buka pesan yang disematkan");
+    ui.painter().rect(rect, R_MD, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 18.0, rect.center().y), vec2(14.0, 14.0)), "pin", 14.0, p.primary);
+    let count = if pins.len() > 1 { format!("{} sematan", pins.len()) } else { String::new() };
+    let right = if count.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(count.clone(), fonts::ui(11.0, Weight::Medium), p.muted).size().x + 12.0 };
+    let text = Rect::from_min_max(pos2(rect.left() + 34.0, rect.top()), pos2(rect.right() - 12.0 - right, rect.bottom()));
+    widgets::paint_text(ui, text, &label, fonts::ui(13.0, Weight::Regular), p.text, Align::Min);
+    if !count.is_empty() {
+        let tag = Rect::from_min_max(pos2(rect.right() - right, rect.top()), pos2(rect.right() - 12.0, rect.bottom()));
+        widgets::paint_text(ui, tag, &count, fonts::ui(11.0, Weight::Medium), p.muted, Align::Max);
+    }
+    if response.clicked() {
+        ui.data_mut(|d| d.insert_temp(jump_id(), latest.id.clone()));
+        ui.ctx().request_repaint();
+    }
+    ui.add_space(4.0);
+}
+
+/// Right-click / long-press menu of a message bubble; returns the chosen action.
+fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
+    let mut action = None;
+    // A message still in the send queue has no WhatsApp id to quote yet.
+    if !m.id.starts_with("local-") && ui.button("Balas").clicked() {
+        action = Some(MsgAction::Reply);
+    }
+    // Text only for now; media forwarding is stage 2.
+    if m.forwardable() && ui.button("Teruskan").clicked() {
+        action = Some(MsgAction::Forward);
+    }
+    // Media without a caption has nothing to copy.
+    if !caption(m).is_empty() && ui.button("Salin").clicked() {
+        action = Some(MsgAction::Copy);
+    }
+    // A message still in the send queue has no WhatsApp id to pin yet.
+    if !m.id.starts_with("local-") {
+        if pinned {
+            if ui.button("Lepas sematan").clicked() {
+                action = Some(MsgAction::Unpin);
+            }
+        } else {
+            ui.menu_button("Sematkan", |ui| {
+                for (label, length) in [("24 jam", PinLength::Hours24), ("7 hari", PinLength::Days7), ("30 hari", PinLength::Days30)] {
+                    if ui.button(label).clicked() {
+                        action = Some(MsgAction::Pin(length));
+                    }
+                }
+            });
+        }
+    }
+    if action.is_some() {
+        ui.close();
+    }
+    action
+}
+
 /// Paints the open chat; returns a message whose media the user wants downloaded.
 /// Draws the conversation. In a group, incoming runs from one member get the
 /// member's picture beside the first bubble and their name, in their colour,
@@ -964,7 +1168,8 @@ fn messages(
     want_avatars: &mut Vec<String>,
     auto_stickers: bool,
     typing: Option<&str>,
-) -> Option<MediaClick> {
+    anchor: &mut Option<UnreadAnchor>,
+) -> Option<MsgEvent> {
     const GAP: f32 = 6.0;
     /// Extra space before a group run from another member.
     const RUN_GAP: f32 = 6.0;
@@ -978,6 +1183,23 @@ fn messages(
     let start = chat.messages.len().saturating_sub(SHOWN);
     let shown: &[ChatMsg] = &chat.messages[start..];
     let mut clicked = None;
+    let now = time::now();
+    // Set by the pinned bar: scroll to this message, then flash it for a moment.
+    let jump: Option<String> = ui.data_mut(|d| d.remove_temp(jump_id()));
+    let flash_id = egui::Id::unique("pin_flash");
+    let flash: Option<(String, f64)> = ui.data(|d| d.get_temp(flash_id));
+    let clock = ui.input(|i| i.time);
+    let flash = flash.filter(|(_, until)| *until > clock).map(|(id, _)| id);
+    if flash.is_some() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+    }
+
+    // The unread divider goes before this message; the first frame scrolls to it once.
+    let unread = anchor.as_ref().filter(|a| a.jid == chat.jid && shown.iter().any(|m| m.id == a.first_id)).map(|a| (a.first_id.clone(), a.count));
+    let mut scroll_unread = unread.is_some() && anchor.as_mut().is_some_and(|a| std::mem::take(&mut a.pending));
+    let memo_id = ui.scope_id().with(("chat_scroll_memo", &chat.jid));
+    let bottom_id = ui.scope_id().with(("chat_scroll_bottom", &chat.jid));
+    let to_bottom: bool = ui.data_mut(|d| d.remove_temp::<bool>(bottom_id)).unwrap_or(false);
 
     struct Bubble<'a> {
         m: &'a ChatMsg,
@@ -997,6 +1219,8 @@ fn messages(
     }
     enum Item<'a> {
         Day(String),
+        /// "N pesan belum dibaca" before the first unread message.
+        Unread(usize),
         Bubble(Bubble<'a>),
         /// "••• sedang mengetik" after the last message (Pego `v5/Inbox · Chat`).
         Typing(String),
@@ -1023,6 +1247,9 @@ fn messages(
         } else {
             (p.text, p.muted, p.border)
         };
+        if let Some((_, count)) = unread.as_ref().filter(|(first, _)| *first == m.id) {
+            items.push(Item::Unread(*count));
+        }
         let media = m.media.as_ref().map(|media| (media, media_box(media, wrap)));
         let media_size = media.as_ref().map(|(_, b)| b.size());
         let sticker = matches!(media, Some((_, MediaBox::Sticker(_))));
@@ -1031,6 +1258,7 @@ fn messages(
         let text = (!caption.is_empty()).then(|| ui.painter().layout_job(markup::job(&caption, 14.0, fg, code_bg, wrap)));
         let meta = time::clock(m.ts);
         let tick = if m.from_me { tick(p, &m.status, meta_color, !sticker && is_dark(p.primary)) } else { None };
+        let meta = if m.forwarded { format!("Diteruskan · {meta}") } else { meta };
         let head = who.filter(|_| group && new_run).map(|jid| {
             let color = member_color(&jid, dark);
             let mut job = egui::text::LayoutJob::simple_singleline(super::sender_label(book, &m.sender), fonts::ui(12.5, Weight::SemiBold), color);
@@ -1062,20 +1290,20 @@ fn messages(
     let content: f32 = items
         .iter()
         .map(|i| match i {
-            Item::Day(_) => DIVIDER,
+            Item::Day(_) | Item::Unread(_) => DIVIDER,
             Item::Bubble(b) => b.lead + b.size.y + GAP,
             Item::Typing(_) => TYPING_ROW + GAP,
         })
         .sum();
 
-    ScrollArea::vertical()
+    let output = ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink(false)
         .show(ui, |ui| {
             ui.add_space(12.0);
             let height = content.max(ui.available_height());
             let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
-            let painter = ui.painter();
+            let painter = ui.painter().clone();
             let mut y = area.bottom() - content;
             if start > 0 {
                 let note = Rect::from_min_size(pos2(area.left(), y - 24.0), vec2(area.width(), 16.0));
@@ -1097,6 +1325,18 @@ fn messages(
                         widgets::paint_text(ui, text, &label, fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
                         y += TYPING_ROW + GAP;
+                    }
+                    Item::Unread(count) => {
+                        let label = format!("{count} pesan belum dibaca");
+                        let galley = painter.layout_no_wrap(label, fonts::ui(12.0, Weight::Medium), p.accent_text);
+                        let (w, cy, cx) = (galley.size().x, y + DIVIDER / 2.0, area.center().x);
+                        let pill = Rect::from_center_size(pos2(cx, cy), vec2(w + 24.0, 24.0));
+                        painter.rect(pill, 12.0, p.accent_soft, Stroke::new(1.0, p.border), StrokeKind::Inside);
+                        painter.galley(pos2(cx - w / 2.0, cy - galley.size().y / 2.0), galley, p.accent_text);
+                        if std::mem::take(&mut scroll_unread) {
+                            ui.scroll_to_rect(Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), DIVIDER)), Some(Align::TOP));
+                        }
+                        y += DIVIDER;
                     }
                     Item::Day(label) => {
                         // A pill, so it reads on the wallpaper (Pego m5/Chat "Hari ini").
@@ -1122,6 +1362,18 @@ fn messages(
                         let rect = Rect::from_min_size(pos2(left, y), size);
                         if !matches!(media, Some((_, MediaBox::Sticker(_)))) {
                             painter.rect(rect, R_LG, fill, stroke, StrokeKind::Inside);
+                        }
+                        // Created before the media's own click area, so media keeps its primary click.
+                        let bubble = ui.interact(rect, ui.scope_id().with(("bubble", &m.id)), Sense::click());
+                        let mut action = None;
+                        bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                        if jump.as_deref() == Some(m.id.as_str()) {
+                            ui.scroll_to_rect(rect, Some(Align::Center));
+                            ui.data_mut(|d| d.insert_temp(flash_id, (m.id.clone(), clock + 1.8)));
+                            ui.ctx().request_repaint();
+                        }
+                        if flash.as_deref() == Some(m.id.as_str()) {
+                            painter.rect_stroke(rect.expand(2.0), R_LG, Stroke::new(2.0, p.primary), StrokeKind::Outside);
                         }
                         let mut at = rect.min + vec2(14.0, 10.0);
                         if let Some((name, jid, color)) = head {
@@ -1149,14 +1401,23 @@ fn messages(
                             let media_size = shown.size();
                             let media_rect = Rect::from_min_size(at, media_size);
                             if let Some(click) = paint_media(ui, p, media_rect, m, media, shown, downloads, auto_stickers) {
-                                clicked = Some(click);
+                                clicked = Some(MsgEvent::Media(click));
                             }
                             at.y += media_size.y + 8.0;
                         }
                         if let Some(text) = text {
                             let height = text.size().y;
-                            painter.galley(at, text, p.text);
+                            // Selectable label (drag to select, Cmd/Ctrl+C copies the selection). It sits above the
+                            // bubble's click area, so it also needs its own context menu for right-click on text.
+                            let label = ui.put(Rect::from_min_size(at, text.size()), egui::Label::new(text).selectable(true));
+                            label.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
                             at.y += height + 4.0;
+                        }
+                        // "Salin" copies the whole caption; egui does not expose the label selection, Cmd/Ctrl+C copies a partial one.
+                        match action {
+                            Some(MsgAction::Copy) => ui.ctx().copy_text(caption(m)),
+                            Some(action) => clicked = Some(MsgEvent::Menu(action, m.id.clone())),
+                            None => {}
                         }
                         let (meta_w, meta_h) = (meta.size().x, meta.size().y);
                         painter.galley(at, meta, p.muted);
@@ -1173,7 +1434,40 @@ fn messages(
                     }
                 }
             }
+            if to_bottom {
+                ui.scroll_to_rect(Rect::from_min_size(pos2(area.left(), area.bottom() - 1.0), vec2(area.width(), 1.0)), Some(Align::BOTTOM));
+            }
         });
+    // Floating "down" button while scrolled up, with the incoming messages since leaving the bottom.
+    let at_bottom = output.state.unclamped_offset().y + output.inner_rect.height() >= output.content_size.y - 8.0;
+    if at_bottom {
+        ui.data_mut(|d| d.remove_temp::<usize>(memo_id));
+    } else {
+        let seen = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(memo_id, || chat.messages.len()));
+        let fresh = chat.messages.get(seen..).map_or(0, |new| new.iter().filter(|m| !m.from_me).count());
+        let size = 40.0;
+        let at = output.inner_rect.right_bottom() - vec2(size + 16.0, size + 16.0);
+        egui::Area::new(ui.scope_id().with(("chat_to_bottom", &chat.jid)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(at)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(size), Sense::click());
+                let fill = if resp.hovered() { p.selected } else { p.raised };
+                ui.painter().circle(rect.center(), size / 2.0, fill, Stroke::new(1.0, p.border_strong));
+                icons::paint(ui, rect, "chevron-down", 20.0, p.text_2);
+                if fresh > 0 {
+                    let label = if fresh > 99 { "99+".to_owned() } else { fresh.to_string() };
+                    let galley = ui.painter().layout_no_wrap(label, fonts::ui(11.0, Weight::Medium), p.on_primary);
+                    let badge = Rect::from_center_size(rect.center_top() + vec2(0.0, 2.0), vec2((galley.size().x + 10.0).max(18.0), 18.0));
+                    ui.painter().rect_filled(badge, 9.0, p.primary);
+                    ui.painter().galley(badge.center() - galley.size() / 2.0, galley, p.on_primary);
+                }
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    ui.data_mut(|d| d.insert_temp(bottom_id, true));
+                    ui.ctx().request_repaint();
+                }
+            });
+    }
     clicked
 }
 
@@ -1591,13 +1885,33 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
         Some(id) => sessions.iter().filter(|s| &s.id == id).collect(),
         None => sessions.iter().collect(),
     };
-    let lines = lines_for(state, &scoped, TAB_ALL, combined && state.inbox_grouped);
+    // The phone list has no tabs: "Diarsipkan" is a switch above the list.
+    let archived_view = state.chat_tab == TAB_ARCHIVED;
+    let archived = scoped.iter().map(|s| s.book.chats.iter().filter(|c| c.archived).count()).sum::<usize>();
+    let lines = lines_for(state, &scoped, if archived_view { TAB_ARCHIVED } else { TAB_ALL }, combined && state.inbox_grouped);
     let via = combined && !state.inbox_grouped;
     CentralPanel::default().frame(Frame::NONE.fill(p.panel)).show(ui, |ui| {
         ui.painter().hline(ui.max_rect().x_range(), ui.max_rect().top(), Stroke::new(1.0, p.border));
+        if archived_view || archived > 0 {
+            let label = if archived_view { "← Kembali ke semua chat".to_owned() } else { format!("Diarsipkan · {archived}") };
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.add_space(PAD);
+                let link = ui.add(egui::Button::new(rich(&label, 13.0, Weight::Medium, p.accent_text)).frame(false));
+                if link.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                    state.chat_tab = if archived_view { TAB_ALL } else { TAB_ARCHIVED };
+                }
+            });
+        }
         if lines.is_empty() {
             ui.add_space(32.0);
-            let text = if sessions.is_empty() { "Belum ada nomor. Tautkan nomor di tab Perangkat." } else { "Tidak ada chat di sini." };
+            let text = if sessions.is_empty() {
+                "Belum ada nomor. Tautkan nomor di tab Perangkat."
+            } else if archived_view {
+                "Belum ada chat yang diarsipkan."
+            } else {
+                "Tidak ada chat di sini."
+            };
             ui.vertical_centered(|ui| ui.label(rich(text, 14.0, Weight::Regular, p.muted)));
             return;
         }
@@ -1628,9 +1942,10 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                         }
                         let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
                         let title = super::chat_title(&s.book, chat);
-                        if compact_row(ui, &p, rect, &title, chat, picture, &s.id, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
-                            state.inbox_session = Some(s.id.clone());
-                            state.chat_selected = Some(chat.jid.clone());
+                        let row = compact_row(ui, &p, rect, &title, chat, picture, &s.id, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref());
+                        chat_menu(&row, s, chat, &mut commands);
+                        if row.clicked() {
+                            open_chat(state, &s.id, &chat.jid, Some(chat));
                             if chat.unread > 0 {
                                 commands.push(Command::Seen { id: s.id.clone(), chat: chat.jid.clone() });
                             }
@@ -1795,8 +2110,9 @@ fn compact_chat(
                 ui.add_space(8.0);
             }
             let (id, jid) = (session.id.clone(), chat.jid.clone());
+            reply_bar(ui, &p, state, &id, &jid);
             match composer(ui, &p, state, &title, session, book, several, true) {
-                Some(Outgoing::Text(text)) => commands.push(Command::Send { id, chat: jid, text }),
+                Some(Outgoing::Text(text)) => commands.push(text_command(state, id, jid, text)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
                 None => {}
@@ -1810,13 +2126,12 @@ fn compact_chat(
                 state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                 commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
             }
+            pinned_bar(ui, &p, chat);
             let mut want = Vec::new();
-            let clicked = messages(ui, &p, book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, book, chat).as_deref());
+            let event = messages(ui, &p, book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), &mut state.unread_anchor);
             ask_avatars(state, &mut commands, &session.id, want);
-            match clicked {
-                Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
-                Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
-                None => {}
+            if let Some(event) = event {
+                on_message_event(event, state, session, chat, &mut commands);
             }
         });
     });
@@ -1841,7 +2156,7 @@ mod typing_tests {
     fn contact_typing_label() {
         use crate::backend::{Book, Chat, Typing};
         use std::time::{Duration, Instant};
-        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None };
+        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new() };
         let book = Book::default();
         let mut state = State::default();
         assert_eq!(typing_label(&state, "s1", &book, &chat), None);
