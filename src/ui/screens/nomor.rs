@@ -31,6 +31,8 @@ pub enum Action {
     Remove(String),
     /// The number's inbox in a window of its own.
     Window(String),
+    /// Open the "Ganti nama" dialog.
+    Rename(String),
 }
 
 pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) -> Option<Action> {
@@ -370,6 +372,10 @@ pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView) -> 
         if ui.button("Buka di jendela baru").clicked() {
             action = Some(Action::Window(session.id.clone()));
         }
+        if ui.button("Ganti nama…").clicked() {
+            action = Some(Action::Rename(session.id.clone()));
+        }
+        // Kept apart from the steps that unlink, so a slip does not relink.
         ui.separator();
         if !connected && ui.button("Tautkan / tampilkan pairing").clicked() {
             action = Some(fix(session));

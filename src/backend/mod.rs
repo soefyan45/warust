@@ -24,6 +24,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use registry::Registry;
 use session::{Body, Running};
 pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
+pub use registry::{NAME_MAX, clean_name};
 pub use session::mask_phone;
 pub use settings::Settings;
 pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost};
@@ -182,6 +183,8 @@ pub enum Command {
     Logout { id: String },
     /// Unlink (if linked) and delete the session.
     Remove { id: String },
+    /// A new name for a number (already checked with `registry::clean_name`).
+    Rename { id: String, name: String },
     /// Queue a text message. `chat` is a JID from the session's book.
     Send { id: String, chat: String, text: String },
     /// Queue a text that quotes message `reply_to` of `chat`.
@@ -615,6 +618,10 @@ async fn run(
                     v.qr = None;
                     v.pair_code = None;
                 });
+            }
+            Command::Rename { id, name } => {
+                registry.rename(&id, &name);
+                state.update(&id, |v| v.name = name);
             }
             Command::Remove { id } => {
                 if let Some(r) = running.remove(&id) {

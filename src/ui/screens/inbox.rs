@@ -1507,6 +1507,24 @@ fn pick_file(ctx: &egui::Context) -> std::sync::mpsc::Receiver<Option<PathBuf>> 
     rx
 }
 
+/// Saves a pasted picture as `tempel-<time>.png` in `dir`; the sent bubble
+/// shows it from there, so it is kept.
+fn save_pasted_image(image: &egui::ColorImage, dir: &Path) -> Result<PathBuf, String> {
+    let [w, h] = image.size;
+    let rgba: Vec<u8> = image.pixels.iter().flat_map(|c| c.to_srgba_unmultiplied()).collect();
+    let picture = image::RgbaImage::from_raw(w as u32, h as u32, rgba).ok_or("ukuran gambar tidak cocok")?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let stamp = time::stamp(time::now());
+    let mut path = dir.join(format!("tempel-{stamp}.png"));
+    let mut n = 1;
+    while path.exists() {
+        n += 1;
+        path = dir.join(format!("tempel-{stamp}-{n}.png"));
+    }
+    picture.save(&path).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 /// The file waiting to be sent: icon, name, size and a remove button.
 /// Returns false when the file cannot be sent (missing or too large).
 fn attachment_chip(ui: &mut Ui, p: &Palette, attachment: &mut Option<PathBuf>) -> bool {
@@ -1585,6 +1603,24 @@ fn composer(
     });
     if dropped.is_some() {
         state.attachment = dropped;
+    }
+    // Ctrl+V with a picture on the clipboard (a screenshot, a copied image)
+    // attaches it like the paperclip does; text still pastes into the box.
+    let pasted = ui.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            egui::Event::PasteImage(image) => Some(image.clone()),
+            _ => None,
+        })
+    });
+    let focus = ui.memory(|m| m.focused());
+    if let Some(image) = pasted.filter(|_| focus.is_none() || focus == Some(id)) {
+        match save_pasted_image(&image, &crate::platform::data_dir().join("pasted")) {
+            Ok(path) => {
+                state.attachment = Some(path);
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            Err(e) => log::warn!("cannot keep a pasted image: {e}"),
+        }
     }
     let mut send = connected
         && ui.memory(|m| m.has_focus(id))
@@ -2162,6 +2198,24 @@ fn compact_chat(
         });
     });
     commands
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    #[test]
+    fn pasted_image_is_kept_as_png() {
+        let dir = std::env::temp_dir().join(format!("warust-paste-{}", std::process::id()));
+        let image = egui::ColorImage::new([3, 2], vec![egui::Color32::from_rgb(29, 90, 63); 6]);
+        let first = save_pasted_image(&image, &dir).unwrap();
+        let second = save_pasted_image(&image, &dir).unwrap();
+        assert_ne!(first, second, "two pastes in the same second keep both");
+        let back = image::open(&first).unwrap().to_rgba8();
+        assert_eq!(back.dimensions(), (3, 2));
+        assert_eq!(back.get_pixel(0, 0).0, [29, 90, 63, 255]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[cfg(test)]
