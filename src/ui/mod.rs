@@ -155,8 +155,8 @@ impl App {
             Ok("settings") => Screen::Settings,
             _ => Screen::Nomor,
         };
-        // Sessions live in ./data (device stores in data/sessions/<id>.db).
-        let backend = Backend::start(cc.egui_ctx.clone(), std::path::PathBuf::from("data"));
+        // Sessions live in the data folder (device stores in sessions/<id>.db).
+        let backend = Backend::start(cc.egui_ctx.clone(), crate::platform::data_dir().to_path_buf());
         Self {
             screen,
             search: String::new(),

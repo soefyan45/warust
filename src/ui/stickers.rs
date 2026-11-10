@@ -2,7 +2,7 @@
 //! (once downloaded) and the user's own collection in `data/stickers/`.
 //! A click sends the sticker right away, like WhatsApp.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::{PopupCloseBehavior, Response, ScrollArea, Sense, Stroke, StrokeKind, Ui, vec2};
@@ -21,7 +21,7 @@ const RECENT: usize = 16;
 static ADDING: AtomicBool = AtomicBool::new(false);
 
 pub fn dir() -> PathBuf {
-    Path::new("data").join("stickers")
+    crate::platform::data_dir().join("stickers")
 }
 
 /// The collection, newest first.
@@ -60,23 +60,14 @@ fn received(book: &Book) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Asks for a picture with zenity and adds it to the collection, off the UI thread.
+/// Asks for a picture with the OS's dialog and adds it to the collection, off the UI thread.
 fn add_from_file(ctx: &egui::Context) {
     if ADDING.swap(true, Ordering::SeqCst) {
         return;
     }
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let picked = std::process::Command::new("zenity")
-            .args([
-                "--file-selection",
-                "--title=Pilih gambar untuk dijadikan stiker",
-                "--file-filter=Gambar | *.png *.jpg *.jpeg *.webp",
-            ])
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim_end_matches('\n')));
+        let picked = crate::platform::pick_file("Pilih gambar untuk dijadikan stiker", true);
         if let Some(source) = picked {
             if let Err(e) = make_sticker(&source, &dir()) {
                 log::warn!("cannot add a sticker: {e}");
@@ -147,7 +138,7 @@ pub fn picker(ui: &Ui, button: &Response, book: &Book, connected: bool) -> Optio
                 }
                 if widgets::button(ui, None, "Buka folder", Kind::Secondary).clicked() {
                     let _ = std::fs::create_dir_all(dir());
-                    let _ = std::process::Command::new("xdg-open").arg(dir()).spawn();
+                    crate::platform::open(dir());
                 }
             });
             if !connected {

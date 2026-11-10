@@ -95,7 +95,7 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
             if response.clicked() {
                 match &media.file {
                     Some(file) => {
-                        let _ = std::process::Command::new("xdg-open").arg(file).spawn();
+                        crate::platform::open(file);
                     }
                     None if media.downloadable() => commands.push(Command::Download { id: session.to_owned(), msg_id: post.id.clone() }),
                     None => {}

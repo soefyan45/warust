@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=warust
+Comment=Gateway WhatsApp desktop
+Icon=warust
+Exec=warust
+StartupWMClass=warust
+Terminal=false
+Categories=Network;Chat;

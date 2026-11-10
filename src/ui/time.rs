@@ -1,5 +1,5 @@
-//! Local times for messages (stored as Unix seconds). The UTC offset is read
-//! once from `date +%z`, so no time-zone crate is needed.
+//! Local times for messages (stored as Unix seconds). The UTC offset is asked
+//! of the OS once (`platform::utc_offset`), so no time-zone crate is needed.
 
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -8,29 +8,7 @@ const DAYS: [&str; 7] = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", 
 
 fn offset() -> i64 {
     static OFFSET: OnceLock<i64> = OnceLock::new();
-    *OFFSET.get_or_init(|| {
-        std::process::Command::new("date")
-            .arg("+%z")
-            .output()
-            .ok()
-            .and_then(|o| parse_offset(String::from_utf8_lossy(&o.stdout).trim()))
-            .unwrap_or(0)
-    })
-}
-
-/// `+0700` → 25200 seconds.
-fn parse_offset(text: &str) -> Option<i64> {
-    let (sign, digits) = match text.as_bytes().first()? {
-        b'+' => (1, &text[1..]),
-        b'-' => (-1, &text[1..]),
-        _ => return None,
-    };
-    if digits.len() != 4 {
-        return None;
-    }
-    let hours: i64 = digits[..2].parse().ok()?;
-    let minutes: i64 = digits[2..].parse().ok()?;
-    Some(sign * (hours * 3600 + minutes * 60))
+    *OFFSET.get_or_init(|| crate::platform::utc_offset().unwrap_or(0))
 }
 
 pub fn now() -> i64 {
@@ -128,9 +106,9 @@ mod tests {
 
     #[test]
     fn offsets_and_dates() {
-        assert_eq!(parse_offset("+0700"), Some(25200));
-        assert_eq!(parse_offset("-0330"), Some(-12600));
-        assert_eq!(parse_offset("WIB"), None);
+        assert_eq!(crate::platform::parse_offset("+0700"), Some(25200));
+        assert_eq!(crate::platform::parse_offset("-0330"), Some(-12600));
+        assert_eq!(crate::platform::parse_offset("WIB"), None);
         assert_eq!(civil(0), (1970, 1, 1));
         assert_eq!(civil(20_401), (2025, 11, 9));
         // 1970-01-01 was a Thursday.

@@ -9,6 +9,26 @@ readme = "README.md"
 # `cargo run` starts the desktop app; the Phase 0 spike is `cargo run --bin spike`.
 default-run = "warust"
 
+# `cargo deb` (the release workflow) builds the Debian package from these.
+[package.metadata.deb]
+maintainer = "Soefyan Syah <2637377+soefyan45@users.noreply.github.com>"
+section = "net"
+priority = "optional"
+depends = "$auto"
+recommends = "zenity, poppler-utils, libnotify-bin, gnome-session-canberra"
+extended-description = """\
+Many WhatsApp numbers in one inbox, a status page, a local REST API, signed \
+webhooks and triggers. Unofficial client, not affiliated with WhatsApp or Meta."""
+assets = [
+  ["target/release/warust", "usr/bin/", "755"],
+  ["packaging/linux/warust.desktop", "usr/share/applications/", "644"],
+  ["assets/app/warust-256.png", "usr/share/icons/hicolor/256x256/apps/warust.png", "644"],
+  ["assets/app/warust.svg", "usr/share/icons/hicolor/scalable/apps/warust.svg", "644"],
+  ["README.md", "usr/share/doc/warust/", "644"],
+  ["THIRD_PARTY_NOTICES.md", "usr/share/doc/warust/", "644"],
+  ["LICENSE", "usr/share/doc/warust/copyright", "644"],
+]
+
 [dependencies]
 # A pinned commit of the crmne fork of upstream main. crates.io 0.7.0 fails
 # pairing with 401 signature-mismatch; the fix is upstream #1440, not yet
@@ -44,4 +64,11 @@ sha2 = { version = "0.11", default-features = false }
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
 # Encodes the pairing QR, painted as vectors in egui.
 qrcode = { version = "0.14", default-features = false }
+# Already in the tree through rustls/ring: OS randomness for API keys and
+# webhook secrets on every OS.
+getrandom = "0.3"
 
+
+[profile.release]
+# Smaller downloads: no symbol tables in the shipped binary.
+strip = true

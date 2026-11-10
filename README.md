@@ -24,7 +24,7 @@ signed webhooks and triggers. The interface is in Indonesian.</em></p>
 
 <p align="center">
   <a href="Cargo.toml"><img src="https://img.shields.io/badge/built_with-Rust-1D5A3F" alt="Built with Rust"></a>
-  <img src="https://img.shields.io/badge/platform-Linux-24292F" alt="Linux">
+  <img src="https://img.shields.io/badge/platform-Linux%20%C2%B7%20macOS%20%C2%B7%20Windows-24292F" alt="Linux, macOS, Windows">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-3E6A12" alt="MIT license"></a>
 </p>
 
@@ -67,25 +67,41 @@ dikecilkan di bawah 1100 px.
 
 ## Pasang
 
-Saat ini dari source, di Linux. Butuh [Rust](https://rustup.rs) (versi dipatok di
-`rust-toolchain.toml`, otomatis dipasang rustup), compiler C untuk SQLite, dan alat sistem untuk
-dialog file, PDF, dan notifikasi:
+Unduh dari [Releases](https://github.com/soefyan45/warust/releases/latest):
+
+| OS | Berkas | Cara pasang |
+|---|---|---|
+| Linux (Debian/Ubuntu, x86_64) | `warust_<versi>_amd64.deb` | `sudo apt install ./warust_<versi>_amd64.deb`, lalu buka **warust** dari menu aplikasi |
+| Windows 10/11 (x86_64) | `warust-<versi>-windows-x86_64.zip` | Ekstrak, jalankan `warust.exe` |
+| macOS 11+ (Apple Silicon dan Intel) | `warust-<versi>-macos-universal.dmg` | Buka, seret **warust** ke Applications |
+
+Aplikasi belum ditandatangani sertifikat pengembang:
+
+- **macOS** menyebut "pengembang tidak dikenal". Klik kanan warust di Applications → **Buka** → **Buka**
+  (sekali saja), atau jalankan `xattr -dr com.apple.quarantine /Applications/warust.app`.
+- **Windows** SmartScreen: klik **Info selengkapnya** → **Tetap jalankan**.
+
+Data (kunci sesi, chat, media, pengaturan, API key) disimpan di folder per pengguna:
+`~/.local/share/warust` (Linux), `~/Library/Application Support/warust` (macOS), atau
+`%APPDATA%\warust` (Windows). Jangan bagikan folder itu: isinya cukup untuk masuk ke akun WhatsApp yang
+tertaut. Folder lain bisa dipilih dengan variabel lingkungan `WARUST_DATA`.
+
+Beberapa fitur memakai alat bawaan OS. Di Linux, paket .deb menyarankan `zenity` (dialog file),
+`poppler-utils` (pratinjau PDF), `libnotify-bin` dan `gnome-session-canberra` (notifikasi dan suara).
+Pratinjau PDF di macOS dan Windows butuh poppler (`brew install poppler` / Scoop); tanpa itu PDF tetap
+bisa dibuka di aplikasi lain. Klik notifikasi untuk membuka chat baru ada di Linux.
+
+### Dari source
+
+Butuh [Rust](https://rustup.rs) (versi dipatok di `rust-toolchain.toml`) dan compiler C untuk SQLite.
 
 ```bash
-sudo apt install build-essential zenity poppler-utils libnotify-bin gnome-session-canberra
 git clone https://github.com/soefyan45/warust && cd warust
 cargo run --release
+scripts/install-desktop.sh   # Linux, opsional: ikon di dock dan menu
 ```
 
-Opsional, supaya ikon warust muncul di dock dan menu aplikasi (Wayland mengambil ikon dari desktop
-entry):
-
-```bash
-scripts/install-desktop.sh
-```
-
-Semua data (kunci sesi, chat, media, pengaturan, API key) disimpan di folder `data/` di samping
-aplikasi. Jangan bagikan folder itu: isinya cukup untuk masuk ke akun WhatsApp yang tertaut.
+Saat dijalankan dari folder proyek yang sudah punya `data/`, folder itu yang dipakai.
 
 ## Tautkan nomor
 

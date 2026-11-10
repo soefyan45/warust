@@ -181,7 +181,7 @@ pub fn export_csv(sessions: &[SessionView]) -> std::io::Result<(std::path::PathB
         csv.push_str(&row.iter().map(|f| field(f)).collect::<Vec<_>>().join(","));
         csv.push('\n');
     }
-    let dir = std::path::Path::new("data").join("exports");
+    let dir = crate::platform::data_dir().join("exports");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("log-{}.csv", time::stamp(time::now())));
     std::fs::write(&path, csv)?;

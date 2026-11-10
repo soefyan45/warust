@@ -355,6 +355,7 @@ impl Updater {
         self.shared.lock().ok()?.viewing.clone()
     }
 
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) fn request_open(&self, session: &str, jid: &str) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.open_chat = Some((session.to_owned(), jid.to_owned()));

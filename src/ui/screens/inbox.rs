@@ -638,9 +638,7 @@ fn media_action(m: &ChatMsg, media: &Media, downloads: &Downloads) -> &'static s
 
 /// Opens a downloaded file in the desktop's default app.
 fn open_file(path: &Path) {
-    if let Err(e) = std::process::Command::new("xdg-open").arg(path).spawn() {
-        log::warn!("cannot open a downloaded file: {e}");
-    }
+    crate::platform::open(path);
 }
 
 /// Paints the media part of a bubble at `rect`; returns true when the user
@@ -943,14 +941,7 @@ fn pick_file(ctx: &egui::Context) -> std::sync::mpsc::Receiver<Option<PathBuf>> 
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let picked = std::process::Command::new("zenity")
-            .args(["--file-selection", "--title=Pilih foto atau dokumen"])
-            .output()
-            .inspect_err(|e| log::warn!("file dialog (zenity) failed: {e}"))
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim_end_matches('\n')))
-            .filter(|path| path.is_file());
+        let picked = crate::platform::pick_file("Pilih foto atau dokumen", false);
         let _ = tx.send(picked);
         ctx.request_repaint();
     });

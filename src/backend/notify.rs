@@ -1,11 +1,14 @@
-//! Desktop notifications for incoming messages, through `notify-send`
-//! (libnotify) and the sound through `canberra-gtk-play`; no extra crates. One
-//! notification per chat: a newer message replaces it, and clicking it opens
-//! the chat in the app.
+//! Desktop notifications for incoming messages with the OS's own tools; no
+//! extra crates. Linux: `notify-send` (libnotify) and `canberra-gtk-play`, one
+//! notification per chat that a newer message replaces and a click opens.
+//! macOS: `osascript` notifications and `afplay`. Windows: a PowerShell
+//! balloon and the system sound. On macOS and Windows a click does not open the
+//! chat.
 
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -26,6 +29,7 @@ fn shown() -> &'static Mutex<HashMap<String, (u32, Child)>> {
 }
 
 /// Escapes text for the notification body, which servers read as markup.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn escape(text: &str) -> String {
     text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
@@ -76,9 +80,37 @@ pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, 
     if notify.sound {
         play_sound();
     }
-    let key = format!("{session}|{jid}");
-    let (state, session, jid) = (state.clone(), session.to_owned(), jid);
-    std::thread::spawn(move || show(&state, &key, &session, &jid, &title, &escape(&body)));
+    #[cfg(target_os = "linux")]
+    {
+        let key = format!("{session}|{jid}");
+        let (state, session, jid) = (state.clone(), session.to_owned(), jid);
+        std::thread::spawn(move || show(&state, &key, &session, &jid, &title, &escape(&body)));
+    }
+    #[cfg(not(target_os = "linux"))]
+    std::thread::spawn(move || show_simple(&title, &body));
+}
+
+/// macOS and Windows: a plain notification, without the click to open.
+#[cfg(not(target_os = "linux"))]
+fn show_simple(title: &str, body: &str) {
+    use crate::platform::{applescript_quote, command, powershell_quote};
+    let result = if cfg!(target_os = "macos") {
+        let script = format!("display notification \"{}\" with title \"{}\"", applescript_quote(body), applescript_quote(title));
+        command("osascript").args(["-e", &script]).status()
+    } else {
+        // A tray balloon: Windows shows it as a notification, then it is removed.
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; \
+             $n.Icon = [System.Drawing.SystemIcons]::Information; $n.BalloonTipTitle = '{}'; $n.BalloonTipText = '{}'; \
+             $n.Visible = $true; $n.ShowBalloonTip(5000); Start-Sleep -Seconds 6; $n.Dispose()",
+            powershell_quote(title),
+            powershell_quote(body)
+        );
+        command("powershell").args(["-NoProfile", "-Command", &script]).status()
+    };
+    if let Err(e) = result {
+        log::warn!("no desktop notification: {e}");
+    }
 }
 
 fn play_sound() {
@@ -90,18 +122,28 @@ fn play_sound() {
         return;
     }
     *last = Some(Instant::now());
-    let _ = Command::new("canberra-gtk-play")
-        .args(["-i", "message-new-instant", "-d", "warust"])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let mut command = if cfg!(target_os = "macos") {
+        let mut c = crate::platform::command("afplay");
+        c.arg("/System/Library/Sounds/Glass.aiff");
+        c
+    } else if cfg!(windows) {
+        let mut c = crate::platform::command("powershell");
+        c.args(["-NoProfile", "-Command", "[System.Media.SystemSounds]::Asterisk.Play()"]);
+        c
+    } else {
+        let mut c = crate::platform::command("canberra-gtk-play");
+        c.args(["-i", "message-new-instant", "-d", "warust"]);
+        c
+    };
+    let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).spawn();
 }
 
 /// Runs `notify-send` and waits (on this thread) for a click.
+#[cfg(target_os = "linux")]
 fn show(state: &Updater, key: &str, session: &str, jid: &str, title: &str, body: &str) {
     let replace = shown().lock().ok().and_then(|s| s.get(key).map(|(id, _)| *id));
     let build = |program: &str, prefix: &[&str]| {
-        let mut command = Command::new(program);
+        let mut command = crate::platform::command(program);
         command
             .args(prefix)
             .args(["--app-name=warust", "--icon=warust", "--category=im.received"])

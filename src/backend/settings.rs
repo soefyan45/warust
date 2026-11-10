@@ -180,8 +180,11 @@ impl Settings {
         // Holds the API key and webhook secret: owner only, where the file
         // system supports it (not on NTFS/FAT mounts).
         let write = std::fs::write(&tmp, text).and_then(|_| {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            }
             std::fs::rename(&tmp, &path)
         });
         if let Err(e) = write {
@@ -192,11 +195,9 @@ impl Settings {
 
 /// A random secret such as `wr_3f9a…` (32 random bytes, hex).
 pub fn new_secret(prefix: &str) -> String {
-    use std::io::Read;
     let mut bytes = [0u8; 32];
-    let filled = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut bytes));
-    if filled.is_err() {
-        // Not expected on Linux; still never a fixed key.
+    if !crate::platform::random_bytes(&mut bytes) {
+        // Not expected on any supported OS; still never a fixed key.
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())

@@ -188,7 +188,7 @@ fn line(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
 pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Command> {
     let p = theme::palette(ui.ctx());
     let mut commands = Vec::new();
-    let data_dir = std::fs::canonicalize("data").unwrap_or_else(|_| "data".into());
+    let data_dir = crate::platform::data_dir();
     CentralPanel::default()
         .frame(theme::page(ui.ctx()))
         .show(ui, |ui| {
@@ -269,7 +269,7 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                     });
                     ui.horizontal(|ui| {
                         if widgets::button(ui, Some("arrow-up-right"), "Buka folder", Kind::Secondary).clicked() {
-                            let _ = std::process::Command::new("xdg-open").arg(&data_dir).spawn();
+                            crate::platform::open(data_dir);
                         }
                         ui.label(rich(
                             "Jangan bagikan folder sessions/: isinya kunci login nomor Anda.",

@@ -4716,6 +4716,7 @@ dependencies = [
  "egui_extras",
  "env_logger",
  "epaint",
+ "getrandom 0.3.4",
  "hmac",
  "image",
  "log",

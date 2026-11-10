@@ -1,7 +1,11 @@
 //! warust desktop app: one process runs the UI, the WhatsApp sessions, the
 //! REST API and the webhooks. The early test tool lives in src/bin/spike.rs.
 
+// A GUI app on Windows: no console window behind it in release builds.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 mod backend;
+mod platform;
 mod ui;
 
 fn main() -> eframe::Result<()> {

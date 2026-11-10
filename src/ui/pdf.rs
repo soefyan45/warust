@@ -150,7 +150,7 @@ pub fn page(ctx: &egui::Context, file: &Path, page: u32, width: f32) -> Option<P
         std::fs::metadata(file).and_then(|m| m.modified()).ok().hash(&mut hasher);
         hasher.finish()
     };
-    let dir = Path::new("data").join("pdf-pages").join(format!("{key:016x}"));
+    let dir = crate::platform::data_dir().join("pdf-pages").join(format!("{key:016x}"));
     let target = dir.join(format!("p{page}-w{width}.png"));
     let mut c = cache().lock().ok()?;
     match c.pages.get(&target) {
@@ -217,7 +217,7 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                     close = widgets::icon_button(ui, "x", 28.0, false).on_hover_text("Tutup (Esc)").clicked();
                     ui.add_space(8.0);
                     if widgets::button(ui, None, "Buka di aplikasi lain", Kind::Secondary).clicked() {
-                        let _ = std::process::Command::new("xdg-open").arg(&viewer.file).spawn();
+                        crate::platform::open(&viewer.file);
                     }
                     ui.add_space(8.0);
                     let at = ZOOMS.iter().position(|z| *z == viewer.zoom).unwrap_or(2);
