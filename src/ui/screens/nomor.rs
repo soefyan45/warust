@@ -7,6 +7,7 @@ use std::time::Instant;
 use egui::{Align, Color32, Margin, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::backend::{SessionView, Status};
+use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG};
 use crate::ui::widgets::{self, Kind, rich};
@@ -31,7 +32,7 @@ pub enum Action {
     Remove(String),
     /// The number's inbox in a window of its own.
     Window(String),
-    /// Open the "Ganti nama" dialog.
+    /// Open the "Rename" dialog.
     Rename(String),
 }
 
@@ -45,8 +46,9 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) -> Option<
                 let connected = sessions.iter().filter(|s| s.status == Status::Connected).count();
                 super::page_head(
                     ui,
-                    "Nomor",
-                    &format!(
+                    tr("Numbers", "Nomor"),
+                    &crate::trf!(
+                        "{} numbers, {connected} connected as companion devices.",
                         "{} nomor, {connected} terhubung sebagai perangkat pendamping.",
                         sessions.len()
                     ),
@@ -70,9 +72,9 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) -> Option<
                     ui.spacing_mut().item_spacing.y = 0.0;
                     let problems = sessions.len() - connected;
                     let tabs = [
-                        format!("Semua {}", sessions.len()),
-                        format!("Terhubung {connected}"),
-                        format!("Perlu tindakan {problems}"),
+                        crate::trf!("All {}", "Semua {}", sessions.len()),
+                        crate::trf!("Connected {connected}", "Terhubung {connected}"),
+                        crate::trf!("Needs action {problems}", "Perlu tindakan {problems}"),
                     ];
                     widgets::row(
                         ui,
@@ -81,7 +83,7 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) -> Option<
                             let labels: Vec<&str> = tabs.iter().map(String::as_str).collect();
                             widgets::tabs(ui, &labels, &mut state.nomor_tab)
                         },
-                        |ui| widgets::search(ui, &mut state.nomor_search, "Cari nama atau nomor", 240.0, false),
+                        |ui| widgets::search(ui, &mut state.nomor_search, tr("Search name or number", "Cari nama atau nomor"), 240.0, false),
                     );
                     ui.add_space(8.0);
                     if let Some(a) = table(ui, &p, state, sessions) {
@@ -94,7 +96,7 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) -> Option<
     action
 }
 
-/// Returns true when "Tautkan nomor pertama" is clicked.
+/// Returns true when "Link your first number" is clicked.
 fn empty(ui: &mut Ui, p: &Palette) -> bool {
     let mut add = false;
     theme::card(ui.ctx())
@@ -104,15 +106,18 @@ fn empty(ui: &mut Ui, p: &Palette) -> bool {
             ui.vertical_centered(|ui| {
                 ui.spacing_mut().item_spacing.y = 10.0;
                 icons::show(ui, "smartphone", 28.0, p.muted);
-                ui.label(rich("Belum ada nomor tertaut", 16.0, Weight::SemiBold, p.text));
+                ui.label(rich(tr("No linked numbers yet", "Belum ada nomor tertaut"), 16.0, Weight::SemiBold, p.text));
                 ui.label(rich(
-                    "Tautkan nomor WhatsApp sebagai perangkat pendamping untuk mulai menerima dan mengirim pesan.",
+                    tr(
+                        "Link a WhatsApp number as a companion device to start receiving and sending messages.",
+                        "Tautkan nomor WhatsApp sebagai perangkat pendamping untuk mulai menerima dan mengirim pesan.",
+                    ),
                     13.0,
                     Weight::Regular,
                     p.muted,
                 ));
                 ui.add_space(6.0);
-                add = widgets::button(ui, Some("plus"), "Tautkan nomor pertama", Kind::Primary).clicked();
+                add = widgets::button(ui, Some("plus"), tr("Link your first number", "Tautkan nomor pertama"), Kind::Primary).clicked();
             });
         });
     add
@@ -125,11 +130,11 @@ fn stats(ui: &mut Ui, p: &Palette, sessions: &[SessionView]) {
     let queue: usize = sessions.iter().map(|s| s.queue).sum();
     let problems = sessions.len() - connected;
     let cells = [
-        ("Terhubung", connected.to_string(), format!("dari {}", sessions.len())),
-        ("Pesan masuk", incoming.to_string(), "24 jam terakhir".to_owned()),
-        ("Perlu tindakan", problems.to_string(), "nomor".to_owned()),
-        ("Terkirim", sent.to_string(), "24 jam terakhir".to_owned()),
-        ("Dalam antrean", queue.to_string(), "jeda ± 4 dtk per pesan".to_owned()),
+        (tr("Connected", "Terhubung"), connected.to_string(), crate::trf!("of {}", "dari {}", sessions.len())),
+        (tr("Incoming messages", "Pesan masuk"), incoming.to_string(), tr("last 24 hours", "24 jam terakhir").to_owned()),
+        (tr("Needs action", "Perlu tindakan"), problems.to_string(), tr("numbers", "nomor").to_owned()),
+        (tr("Sent", "Terkirim"), sent.to_string(), tr("last 24 hours", "24 jam terakhir").to_owned()),
+        (tr("Queued", "Dalam antrean"), queue.to_string(), tr("delay ± 4 s per message", "jeda ± 4 dtk per pesan").to_owned()),
     ];
     let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::hover());
     ui.painter()
@@ -172,8 +177,8 @@ fn chart(ui: &mut Ui, p: &Palette, rect: Rect, sessions: &[SessionView]) {
         .rect_stroke(rect, R_LG, Stroke::new(1.0, p.border), StrokeKind::Inside);
     let inner = rect.shrink2(vec2(18.0, 16.0));
     let head = Rect::from_min_size(inner.min, vec2(inner.width(), 18.0));
-    widgets::paint_text(ui, head, "Pesan masuk per jam, 24 jam terakhir", fonts::ui(13.0, Weight::SemiBold), p.text, Align::Min);
-    widgets::paint_text(ui, head, &format!("Total {total} pesan"), fonts::ui(12.0, Weight::Regular), p.muted, Align::Max);
+    widgets::paint_text(ui, head, tr("Incoming messages per hour, last 24 hours", "Pesan masuk per jam, 24 jam terakhir"), fonts::ui(13.0, Weight::SemiBold), p.text, Align::Min);
+    widgets::paint_text(ui, head, &crate::trf!("Total {total} messages", "Total {total} pesan"), fonts::ui(12.0, Weight::Regular), p.muted, Align::Max);
 
     let axis = Rect::from_min_max(pos2(inner.left(), inner.bottom() - 14.0), inner.max);
     let area = Rect::from_min_max(pos2(inner.left(), head.bottom() + 14.0), pos2(inner.right(), axis.top() - 8.0));
@@ -190,14 +195,14 @@ fn chart(ui: &mut Ui, p: &Palette, rect: Rect, sessions: &[SessionView]) {
         widgets::paint_text(
             ui,
             area,
-            "Belum ada pesan masuk sejak aplikasi dibuka",
+            tr("No incoming messages since the app was opened", "Belum ada pesan masuk sejak aplikasi dibuka"),
             fonts::ui(13.0, Weight::Regular),
             p.muted,
             Align::Center,
         );
     }
 
-    let labels = ["24 jam lalu", "18 jam", "12 jam", "6 jam", "sekarang"];
+    let labels = [tr("24 h ago", "24 jam lalu"), tr("18 h", "18 jam"), tr("12 h", "12 jam"), tr("6 h", "6 jam"), tr("now", "sekarang")];
     let slots = widgets::columns(axis, &[None; 5], 0.0);
     for (i, (slot, label)) in slots.iter().zip(labels).enumerate() {
         let align = match i {
@@ -213,15 +218,40 @@ fn chart(ui: &mut Ui, p: &Palette, rect: Rect, sessions: &[SessionView]) {
 /// Icon, color, label and a one-line explanation for a status.
 pub fn describe(p: &Palette, status: &Status) -> (&'static str, Color32, String, String) {
     match status {
-        Status::Connected => ("check", p.green, "Terhubung".into(), String::new()),
-        Status::Starting => ("loader-circle", p.gray, "Memulai".into(), "Membuka sesi".into()),
-        Status::Pairing => ("qr-code", p.gray, "Menunggu pairing".into(), "Buka untuk memindai QR atau memakai kode".into()),
-        Status::Reconnecting => ("rotate-cw", p.amber, "Menyambung ulang".into(), "Koneksi terputus, mencoba lagi".into()),
-        Status::LoggedOut => ("unlink", p.red, "Terputus".into(), "Tautan dilepas dari HP, perlu ditautkan ulang".into()),
-        Status::Replaced => ("triangle-alert", p.amber, "Diambil alih".into(), "Sesi yang sama tersambung di tempat lain".into()),
-        Status::Locked => ("triangle-alert", p.amber, "Dipakai proses lain".into(), "Hentikan proses lain yang memakai sesi ini".into()),
-        Status::Banned(reason) => ("triangle-alert", p.red, "Diblokir sementara".into(), reason.clone()),
-        Status::Failed(reason) => ("triangle-alert", p.red, "Gagal".into(), reason.clone()),
+        Status::Connected => ("check", p.green, tr("Connected", "Terhubung").into(), String::new()),
+        Status::Starting => ("loader-circle", p.gray, tr("Starting", "Memulai").into(), tr("Opening session", "Membuka sesi").into()),
+        Status::Pairing => (
+            "qr-code",
+            p.gray,
+            tr("Waiting for pairing", "Menunggu pairing").into(),
+            tr("Open to scan the QR or use a code", "Buka untuk memindai QR atau memakai kode").into(),
+        ),
+        Status::Reconnecting => (
+            "rotate-cw",
+            p.amber,
+            tr("Reconnecting", "Menyambung ulang").into(),
+            tr("Connection lost, trying again", "Koneksi terputus, mencoba lagi").into(),
+        ),
+        Status::LoggedOut => (
+            "unlink",
+            p.red,
+            tr("Disconnected", "Terputus").into(),
+            tr("Link removed from the phone, needs to be linked again", "Tautan dilepas dari HP, perlu ditautkan ulang").into(),
+        ),
+        Status::Replaced => (
+            "triangle-alert",
+            p.amber,
+            tr("Taken over", "Diambil alih").into(),
+            tr("The same session is connected elsewhere", "Sesi yang sama tersambung di tempat lain").into(),
+        ),
+        Status::Locked => (
+            "triangle-alert",
+            p.amber,
+            tr("In use by another process", "Dipakai proses lain").into(),
+            tr("Stop the other process that uses this session", "Hentikan proses lain yang memakai sesi ini").into(),
+        ),
+        Status::Banned(reason) => ("triangle-alert", p.red, tr("Temporarily blocked", "Diblokir sementara").into(), reason.clone()),
+        Status::Failed(reason) => ("triangle-alert", p.red, tr("Failed", "Gagal").into(), reason.clone()),
     }
 }
 
@@ -231,7 +261,7 @@ fn attention(ui: &mut Ui, p: &Palette, rect: Rect, sessions: &[SessionView]) -> 
         .rect_stroke(rect, R_LG, Stroke::new(1.0, p.border), StrokeKind::Inside);
     let inner = rect.shrink2(vec2(18.0, 16.0));
     let head = Rect::from_min_size(inner.min, vec2(inner.width(), 18.0));
-    widgets::paint_text(ui, head, "Perlu perhatian", fonts::ui(13.0, Weight::SemiBold), p.text, Align::Min);
+    widgets::paint_text(ui, head, tr("Needs attention", "Perlu perhatian"), fonts::ui(13.0, Weight::SemiBold), p.text, Align::Min);
     widgets::paint_text(ui, head, &items.len().to_string(), fonts::mono(12.0), p.muted, Align::Max);
 
     if items.is_empty() {
@@ -239,7 +269,7 @@ fn attention(ui: &mut Ui, p: &Palette, rect: Rect, sessions: &[SessionView]) -> 
         let icon = Rect::from_min_size(line.min, vec2(16.0, 16.0));
         icons::paint(ui, icon, "check", 16.0, p.green);
         let text = Rect::from_min_max(pos2(line.left() + 26.0, line.top()), line.max);
-        widgets::paint_text(ui, text, "Semua nomor terhubung", fonts::ui(13.0, Weight::Medium), p.text, Align::Min);
+        widgets::paint_text(ui, text, tr("All numbers connected", "Semua nomor terhubung"), fonts::ui(13.0, Weight::Medium), p.text, Align::Min);
         return None;
     }
 
@@ -264,7 +294,7 @@ fn attention(ui: &mut Ui, p: &Palette, rect: Rect, sessions: &[SessionView]) -> 
     }
     if items.len() > 3 {
         let more = Rect::from_min_size(pos2(inner.left() + 26.0, y - 6.0), vec2(inner.width(), 16.0));
-        widgets::paint_text(ui, more, &format!("+{} lainnya", items.len() - 3), fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
+        widgets::paint_text(ui, more, &crate::trf!("+{} more", "+{} lainnya", items.len() - 3), fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
     }
     action
 }
@@ -282,10 +312,10 @@ fn ago(at: Option<Instant>) -> String {
         return "-".to_owned();
     };
     match at.elapsed().as_secs() {
-        0..60 => "Baru saja".to_owned(),
-        s @ 60..3600 => format!("{} mnt lalu", s / 60),
-        s @ 3600..86400 => format!("{} jam lalu", s / 3600),
-        s => format!("{} hari lalu", s / 86400),
+        0..60 => tr("Just now", "Baru saja").to_owned(),
+        s @ 60..3600 => crate::trf!("{} min ago", "{} mnt lalu", s / 60),
+        s @ 3600..86400 => crate::trf!("{} h ago", "{} jam lalu", s / 3600),
+        s => crate::trf!("{} d ago", "{} hari lalu", s / 86400),
     }
 }
 
@@ -294,7 +324,7 @@ fn table(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) 
     let (head, _) = ui.allocate_exact_size(vec2(width, 36.0), Sense::hover());
     widgets::hline(ui, head, head.bottom() - 0.5, p.border);
     let cols = widgets::columns(head.shrink2(vec2(12.0, 0.0)), &ROW_COLS, 16.0);
-    let titles = ["Nomor", "Status", "Terkirim", "Pesan masuk", "Antrean", "Terakhir aktif", ""];
+    let titles = [tr("Number", "Nomor"), "Status", tr("Sent", "Terkirim"), tr("Incoming", "Pesan masuk"), tr("Queued", "Antrean"), tr("Last active", "Terakhir aktif"), ""];
     for (i, (col, title)) in cols.iter().zip(titles).enumerate() {
         let align = if matches!(i, 2 | 4) { Align::Max } else { Align::Min };
         widgets::paint_text(ui, *col, title, fonts::ui(12.0, Weight::Medium), p.muted, align);
@@ -309,7 +339,7 @@ fn table(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) 
             2 => !connected,
             _ => true,
         };
-        let phone = session.phone.clone().unwrap_or_else(|| "belum ditautkan".to_owned());
+        let phone = session.phone.clone().unwrap_or_else(|| tr("not linked yet", "belum ditautkan").to_owned());
         let query_ok = query.is_empty()
             || session.name.to_lowercase().contains(&query)
             || phone.contains(&query);
@@ -369,25 +399,25 @@ pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView) -> 
     let mut action = None;
     egui::Popup::menu(anchor).show(|ui| {
         ui.set_min_width(180.0);
-        if ui.button("Buka di jendela baru").clicked() {
+        if ui.button(tr("Open in new window", "Buka di jendela baru")).clicked() {
             action = Some(Action::Window(session.id.clone()));
         }
-        if ui.button("Ganti nama…").clicked() {
+        if ui.button(tr("Rename…", "Ganti nama…")).clicked() {
             action = Some(Action::Rename(session.id.clone()));
         }
         // Kept apart from the steps that unlink, so a slip does not relink.
         ui.separator();
-        if !connected && ui.button("Tautkan / tampilkan pairing").clicked() {
+        if !connected && ui.button(tr("Link / show pairing", "Tautkan / tampilkan pairing")).clicked() {
             action = Some(fix(session));
         }
-        if ui.button("Tautkan ulang (pairing baru)").clicked() {
+        if ui.button(tr("Relink (new pairing)", "Tautkan ulang (pairing baru)")).clicked() {
             action = Some(Action::Relink(session.id.clone()));
         }
-        if session.phone.is_some() && ui.button("Putuskan tautan").clicked() {
+        if session.phone.is_some() && ui.button(tr("Unlink", "Putuskan tautan")).clicked() {
             action = Some(Action::Logout(session.id.clone()));
         }
         ui.separator();
-        if ui.button(rich("Hapus nomor", 13.0, Weight::Regular, p.red_text)).clicked() {
+        if ui.button(rich(tr("Remove number", "Hapus nomor"), 13.0, Weight::Regular, p.red_text)).clicked() {
             action = Some(Action::Remove(session.id.clone()));
         }
     });

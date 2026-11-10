@@ -651,7 +651,7 @@ pub fn short_jid(jid: &str) -> String {
     if jid.ends_with("@s.whatsapp.net") {
         super::session::mask_phone(jid)
     } else if jid.ends_with("@g.us") {
-        format!("grup …{tail}")
+        crate::trf!("group …{tail}", "grup …{tail}")
     } else {
         format!("lid …{tail}")
     }

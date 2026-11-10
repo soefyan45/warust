@@ -9,6 +9,7 @@ use egui::{CentralPanel, ScrollArea, Ui};
 
 use crate::backend::settings::Sending;
 use crate::backend::{Command, Settings};
+use crate::i18n::tr;
 use crate::ui::State;
 use crate::ui::fonts::Weight;
 use crate::ui::icons;
@@ -62,18 +63,18 @@ impl Form {
 
     /// The draft with the number fields applied, or why they are invalid.
     pub fn result(&self) -> Result<Settings, String> {
-        let mut s = self.draft.clone().ok_or("Belum dimuat")?;
+        let mut s = self.draft.clone().ok_or(tr("Not loaded yet", "Belum dimuat"))?;
         s.api.port = match self.port.trim().parse::<u16>() {
             Ok(port) if port >= 1024 => port,
-            _ => return Err("Port harus angka 1024–65535".to_owned()),
+            _ => return Err(tr("Port must be a number from 1024 to 65535", "Port harus angka 1024–65535").to_owned()),
         };
         s.sending.gap_secs = match self.gap.trim().parse::<u64>() {
             Ok(gap) if (Sending::MIN_GAP..=120).contains(&gap) => gap,
-            _ => return Err(format!("Jeda minimal harus {}–120 detik", Sending::MIN_GAP)),
+            _ => return Err(crate::trf!("Minimum gap must be {}–120 seconds", "Jeda minimal harus {}–120 detik", Sending::MIN_GAP)),
         };
         s.sending.jitter_secs = match self.jitter.trim().parse::<u64>() {
             Ok(jitter) if jitter <= 30 => jitter,
-            _ => return Err("Jitter harus 0–30 detik".to_owned()),
+            _ => return Err(tr("Jitter must be 0–30 seconds", "Jitter harus 0–30 detik").to_owned()),
         };
         if let Some(problem) = s.rules.iter().find_map(|r| r.problem()) {
             return Err(problem);
@@ -109,12 +110,12 @@ pub fn save_bar(ui: &mut Ui, form: &mut Form) -> Option<Settings> {
         |ui| {
             let (icon, text, color) = match (&result, dirty, &note) {
                 (Err(e), _, _) => ("triangle-alert", e.clone(), p.red_text),
-                (Ok(_), true, _) => ("ellipsis", "Ada perubahan yang belum disimpan".to_owned(), p.amber),
+                (Ok(_), true, _) => ("ellipsis", tr("There are unsaved changes", "Ada perubahan yang belum disimpan").to_owned(), p.amber),
                 (Ok(_), false, Some((note, at))) if at.elapsed().as_secs() < 6 => {
                     ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
                     ("check", note.clone(), p.text_2)
                 }
-                _ => ("check", "Semua perubahan tersimpan".to_owned(), p.muted),
+                _ => ("check", tr("All changes saved", "Semua perubahan tersimpan").to_owned(), p.muted),
             };
             ui.spacing_mut().item_spacing.x = 6.0;
             icons::show(ui, icon, 14.0, color);
@@ -122,20 +123,20 @@ pub fn save_bar(ui: &mut Ui, form: &mut Form) -> Option<Settings> {
         },
         |ui| {
             let button = ui.add_enabled_ui(dirty && result.is_ok(), |ui| {
-                widgets::button(ui, Some("check"), "Simpan perubahan", Kind::Primary)
+                widgets::button(ui, Some("check"), tr("Save changes", "Simpan perubahan"), Kind::Primary)
             });
             if button.inner.clicked() {
                 save = result.clone().ok();
             }
             ui.add_space(8.0);
-            undo = ui.add_enabled_ui(dirty, |ui| widgets::button(ui, None, "Batalkan", Kind::Secondary)).inner.clicked();
+            undo = ui.add_enabled_ui(dirty, |ui| widgets::button(ui, None, tr("Cancel", "Batalkan"), Kind::Secondary)).inner.clicked();
         },
     );
     if undo {
         form.draft = None;
     }
     if save.is_some() {
-        form.flash("Tersimpan");
+        form.flash(tr("Saved", "Tersimpan"));
     }
     save
 }
@@ -195,110 +196,133 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
             ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 20.0;
                 ui.set_max_width(ui.available_width().min(760.0));
-                super::page_head(ui, "Pengaturan", "Tampilan, kecepatan kirim, media, dan lokasi data aplikasi.");
+                super::page_head(
+                    ui,
+                    tr("Settings", "Pengaturan"),
+                    tr("Appearance, sending speed, media, and where the app keeps its data.", "Tampilan, kecepatan kirim, media, dan lokasi data aplikasi."),
+                );
                 let form = &mut state.settings_form;
                 form.sync(saved);
 
-                super::card(ui, "Tampilan", "Template mengatur susunan halaman dan warna; data dan fitur sama di semua template.", |ui| {
-                    let draft = form.draft.as_mut().expect("synced");
-                    ui.label(rich("Template halaman", 13.0, Weight::Medium, p.text_2));
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
-                        for template in Template::ALL {
-                            if template_option(ui, &p, template, draft.template == template.key()).clicked() {
-                                draft.template = template.key().to_owned();
+                super::card(
+                    ui,
+                    tr("Appearance", "Tampilan"),
+                    tr(
+                        "The template sets the page layout and colours; data and features are the same in every template.",
+                        "Template mengatur susunan halaman dan warna; data dan fitur sama di semua template.",
+                    ),
+                    |ui| {
+                        let draft = form.draft.as_mut().expect("synced");
+                        ui.label(rich(tr("Page template", "Template halaman"), 13.0, Weight::Medium, p.text_2));
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
+                            for template in Template::ALL {
+                                if template_option(ui, &p, template, draft.template == template.key()).clicked() {
+                                    draft.template = template.key().to_owned();
+                                }
                             }
+                        });
+                        // Named in both languages, so either can find it.
+                        let mut language = usize::from(draft.language == crate::i18n::ID);
+                        line(ui, "Language / Bahasa", |ui| widgets::tabs(ui, &["English", "Bahasa Indonesia"], &mut language));
+                        draft.language = if language == 1 { crate::i18n::ID } else { crate::i18n::EN }.to_owned();
+                        if Template::from_key(&draft.template).has_dark() {
+                            let mut tab = usize::from(draft.theme == "light");
+                            line(ui, tr("Theme", "Tema"), |ui| widgets::tabs(ui, &[tr("Dark", "Gelap"), tr("Light", "Terang")], &mut tab));
+                            draft.theme = if tab == 1 { "light" } else { "dark" }.to_owned();
+                        } else {
+                            ui.label(rich(tr("This template only has a light mode.", "Template ini hanya punya mode terang."), 12.0, Weight::Regular, p.muted));
                         }
-                    });
-                    // Named in both languages, so either can find it.
-                    let mut language = usize::from(draft.language == crate::i18n::ID);
-                    line(ui, "Language / Bahasa", |ui| widgets::tabs(ui, &["English", "Bahasa Indonesia"], &mut language));
-                    draft.language = if language == 1 { crate::i18n::ID } else { crate::i18n::EN }.to_owned();
-                    if Template::from_key(&draft.template).has_dark() {
-                        let mut tab = usize::from(draft.theme == "light");
-                        line(ui, "Tema", |ui| widgets::tabs(ui, &["Gelap", "Terang"], &mut tab));
-                        draft.theme = if tab == 1 { "light" } else { "dark" }.to_owned();
-                    } else {
-                        ui.label(rich("Template ini hanya punya mode terang.", 12.0, Weight::Regular, p.muted));
-                    }
-                });
+                    },
+                );
 
                 super::card(
                     ui,
-                    "Pengiriman (anti-ban)",
-                    "Jeda antar pesan per nomor, termasuk pesan dari REST API. Jeda pendek menaikkan risiko nomor dibatasi WhatsApp.",
+                    tr("Sending (anti-ban)", "Pengiriman (anti-ban)"),
+                    tr(
+                        "Gap between messages per number, including messages from the REST API. A short gap raises the risk of the number being restricted by WhatsApp.",
+                        "Jeda antar pesan per nomor, termasuk pesan dari REST API. Jeda pendek menaikkan risiko nomor dibatasi WhatsApp.",
+                    ),
                     |ui| {
-                        line(ui, "Jeda minimal (detik)", |ui| {
+                        line(ui, tr("Minimum gap (seconds)", "Jeda minimal (detik)"), |ui| {
                             widgets::field(ui, &mut form.gap, "4", 90.0, true);
-                            ui.label(rich(&format!("minimal {}", Sending::MIN_GAP), 12.0, Weight::Regular, p.muted));
+                            ui.label(rich(&crate::trf!("minimum {}", "minimal {}", Sending::MIN_GAP), 12.0, Weight::Regular, p.muted));
                         });
-                        line(ui, "Jitter acak (detik)", |ui| {
+                        line(ui, tr("Random jitter (seconds)", "Jitter acak (detik)"), |ui| {
                             widgets::field(ui, &mut form.jitter, "2", 90.0, true);
-                            ui.label(rich("tambahan acak 0–N detik, 0–30", 12.0, Weight::Regular, p.muted));
+                            ui.label(rich(tr("random extra 0–N seconds, 0–30", "tambahan acak 0–N detik, 0–30"), 12.0, Weight::Regular, p.muted));
                         });
                     },
                 );
 
                 super::card(ui, "Media", "", |ui| {
                     let draft = form.draft.as_mut().expect("synced");
-                    widgets::toggle(ui, &mut draft.auto_stickers, "Unduh stiker otomatis saat terlihat di chat");
+                    widgets::toggle(ui, &mut draft.auto_stickers, tr("Download stickers automatically when they show in a chat", "Unduh stiker otomatis saat terlihat di chat"));
                     ui.label(rich(
-                        "Foto, video, dan dokumen tetap diunduh saat diklik.",
+                        tr("Photos, videos, and documents are still downloaded on click.", "Foto, video, dan dokumen tetap diunduh saat diklik."),
                         12.0,
                         Weight::Regular,
                         p.muted,
                     ));
                 });
 
-                super::card(ui, "Privasi", "", |ui| {
+                super::card(ui, tr("Privacy", "Privasi"), "", |ui| {
                     let draft = form.draft.as_mut().expect("synced");
-                    widgets::toggle(ui, &mut draft.send_read, "Kirim tanda dibaca");
+                    widgets::toggle(ui, &mut draft.send_read, tr("Send read receipts", "Kirim tanda dibaca"));
                     ui.label(rich(
-                        "Menyala: membuka chat mengirim centang biru ke pengirim dan menandai chat dibaca di HP. Bawaannya mati, jadi hanya badge di sini yang hilang.",
+                        tr(
+                            "On: opening a chat sends blue ticks to the sender and marks the chat as read on the phone. It is off by default, so only the badge here goes away.",
+                            "Menyala: membuka chat mengirim centang biru ke pengirim dan menandai chat dibaca di HP. Bawaannya mati, jadi hanya badge di sini yang hilang.",
+                        ),
                         12.0,
                         Weight::Regular,
                         p.muted,
                     ));
                 });
 
-                super::card(ui, "Notifikasi", "Pesan masuk muncul di notifikasi desktop; klik untuk membuka chatnya.", |ui| {
-                    let notify = &mut form.draft.as_mut().expect("synced").notify;
-                    widgets::toggle(ui, &mut notify.enabled, "Tampilkan notifikasi pesan masuk");
-                    ui.add_enabled_ui(notify.enabled, |ui| {
-                        ui.spacing_mut().item_spacing.y = 14.0;
-                        widgets::toggle(ui, &mut notify.groups, "Termasuk pesan grup");
-                        widgets::toggle(ui, &mut notify.preview, "Tampilkan isi pesan (matikan agar hanya nama pengirim)");
-                        widgets::toggle(ui, &mut notify.sound, "Bunyikan suara pesan");
-                    });
-                    ui.label(rich(
-                        "Chat yang sedang terbuka di jendela aktif tidak dinotifikasi.",
-                        12.0,
-                        Weight::Regular,
-                        p.muted,
-                    ));
-                });
+                super::card(
+                    ui,
+                    tr("Notifications", "Notifikasi"),
+                    tr("Incoming messages show as desktop notifications; click to open the chat.", "Pesan masuk muncul di notifikasi desktop; klik untuk membuka chatnya."),
+                    |ui| {
+                        let notify = &mut form.draft.as_mut().expect("synced").notify;
+                        widgets::toggle(ui, &mut notify.enabled, tr("Show notifications for incoming messages", "Tampilkan notifikasi pesan masuk"));
+                        ui.add_enabled_ui(notify.enabled, |ui| {
+                            ui.spacing_mut().item_spacing.y = 14.0;
+                            widgets::toggle(ui, &mut notify.groups, tr("Include group messages", "Termasuk pesan grup"));
+                            widgets::toggle(ui, &mut notify.preview, tr("Show the message text (turn off to show only the sender name)", "Tampilkan isi pesan (matikan agar hanya nama pengirim)"));
+                            widgets::toggle(ui, &mut notify.sound, tr("Play a message sound", "Bunyikan suara pesan"));
+                        });
+                        ui.label(rich(
+                            tr("The chat open in the active window is not notified.", "Chat yang sedang terbuka di jendela aktif tidak dinotifikasi."),
+                            12.0,
+                            Weight::Regular,
+                            p.muted,
+                        ));
+                    },
+                );
 
-                super::card(ui, "Privasi", "", |ui| {
+                super::card(ui, tr("Privacy", "Privasi"), "", |ui| {
                     let draft = form.draft.as_mut().expect("synced");
-                    widgets::toggle(ui, &mut draft.typing, "Tampilkan \"sedang mengetik\" ke lawan chat saat membalas");
+                    widgets::toggle(ui, &mut draft.typing, tr("Show \"typing\" to the other person while replying", "Tampilkan \"sedang mengetik\" ke lawan chat saat membalas"));
                     ui.label(rich(
-                        "Tanda dilihat status diatur per nomor di halaman Status.",
+                        tr("Status seen receipts are set per number on the Status page.", "Tanda dilihat status diatur per nomor di halaman Status."),
                         12.0,
                         Weight::Regular,
                         p.muted,
                     ));
                 });
 
-                super::card(ui, "Data", "Sesi, chat, media, dan pengaturan disimpan di komputer ini.", |ui| {
-                    line(ui, "Folder data", |ui| {
+                super::card(ui, "Data", tr("Sessions, chats, media, and settings are stored on this computer.", "Sesi, chat, media, dan pengaturan disimpan di komputer ini."), |ui| {
+                    line(ui, tr("Data folder", "Folder data"), |ui| {
                         ui.add(egui::Label::new(rich_mono(&data_dir.display().to_string(), 12.0, p.text)).truncate());
                     });
                     ui.horizontal(|ui| {
-                        if widgets::button(ui, Some("arrow-up-right"), "Buka folder", Kind::Secondary).clicked() {
+                        if widgets::button(ui, Some("arrow-up-right"), tr("Open folder", "Buka folder"), Kind::Secondary).clicked() {
                             crate::platform::open(data_dir);
                         }
                         ui.label(rich(
-                            "Jangan bagikan folder sessions/: isinya kunci login nomor Anda.",
+                            tr("Do not share the sessions/ folder: it holds your numbers' login keys.", "Jangan bagikan folder sessions/: isinya kunci login nomor Anda."),
                             12.0,
                             Weight::Regular,
                             p.muted,

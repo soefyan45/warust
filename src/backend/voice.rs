@@ -3,6 +3,7 @@
 //! bubble draws. Audio is encoded while it is recorded, so memory stays at
 //! the size of the file (about 4 KB a second) and finishing is quick.
 
+use crate::i18n::tr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
@@ -137,10 +138,14 @@ fn seconds_of(samples: u64) -> u32 {
 /// over as silence rather than an error, hence the hint.
 fn check(samples: u64, levels: &[f32]) -> Result<(), String> {
     if samples < MIN_SAMPLES {
-        return Err("Rekaman terlalu pendek".to_owned());
+        return Err(tr("Recording is too short", "Rekaman terlalu pendek").to_owned());
     }
     if levels.iter().all(|&l| l < 1e-5) {
-        return Err("Tidak ada suara dari mikrofon. Periksa izin mikrofon untuk warust di pengaturan sistem.".to_owned());
+        return Err(tr(
+            "No sound from the microphone. Check the microphone permission for warust in the system settings.",
+            "Tidak ada suara dari mikrofon. Periksa izin mikrofon untuk warust di pengaturan sistem.",
+        )
+        .to_owned());
     }
     Ok(())
 }
@@ -247,16 +252,16 @@ impl Encoder {
 /// back from the file so a queued note can be sent again from its path.
 pub fn inspect(ogg: &[u8]) -> Result<(u32, Vec<u8>), String> {
     let mut reader = ogg::PacketReader::new(std::io::Cursor::new(ogg));
-    let head = reader.read_packet_expected().map_err(|e| format!("Bukan pesan suara: {e}"))?;
+    let head = reader.read_packet_expected().map_err(|e| crate::trf!("Not a voice message: {e}", "Bukan pesan suara: {e}"))?;
     if !head.data.starts_with(b"OpusHead") || head.data.len() < 19 {
-        return Err("Bukan pesan suara Opus".to_owned());
+        return Err(tr("Not an Opus voice message", "Bukan pesan suara Opus").to_owned());
     }
     let pre_skip = usize::from(u16::from_le_bytes([head.data[10], head.data[11]]));
-    reader.read_packet_expected().map_err(|e| format!("Pesan suara rusak: {e}"))?; // OpusTags
+    reader.read_packet_expected().map_err(|e| crate::trf!("Broken voice message: {e}", "Pesan suara rusak: {e}"))?; // OpusTags
     let mut decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|e| e.to_string())?;
     let (mut pcm, mut end) = (Vec::new(), 0u64);
     let mut out = vec![0.0f32; 5_760];
-    while let Some(packet) = reader.read_packet().map_err(|e| format!("Pesan suara rusak: {e}"))? {
+    while let Some(packet) = reader.read_packet().map_err(|e| crate::trf!("Broken voice message: {e}", "Pesan suara rusak: {e}"))? {
         let n = decoder.decode_float(&packet.data, &mut out, false).map_err(|e| e.to_string())?;
         pcm.extend_from_slice(&out[..n]);
         end = packet.absgp_page();
@@ -302,7 +307,7 @@ impl Recorder {
         let level = Arc::new(AtomicU32::new(0));
         let (audio, peak) = (to.clone(), level.clone());
         let spawned = std::thread::Builder::new().name("mic".to_owned()).spawn(move || record(audio, peak, from, ready, done));
-        let failed = spawned.err().map(|e| format!("Mikrofon tidak bisa dipakai: {e}"));
+        let failed = spawned.err().map(|e| crate::trf!("The microphone cannot be used: {e}", "Mikrofon tidak bisa dipakai: {e}"));
         Self { to, opened, saved: Some(saved), level, asked: Instant::now(), started: None, failed }
     }
 
@@ -319,9 +324,9 @@ impl Recorder {
                 return Mic::Recording;
             }
             Ok(Err(e)) => self.failed = Some(e),
-            Err(mpsc::TryRecvError::Disconnected) => self.failed = Some("Mikrofon berhenti".to_owned()),
+            Err(mpsc::TryRecvError::Disconnected) => self.failed = Some(tr("The microphone stopped", "Mikrofon berhenti").to_owned()),
             Err(mpsc::TryRecvError::Empty) if self.asked.elapsed() > OPEN_TIMEOUT => {
-                self.failed = Some("Mikrofon tidak merespons".to_owned());
+                self.failed = Some(tr("The microphone is not responding", "Mikrofon tidak merespons").to_owned());
             }
             Err(mpsc::TryRecvError::Empty) => return Mic::Opening,
         }
@@ -375,7 +380,7 @@ fn record(
     let mut encoder = match Encoder::new(rate) {
         Ok(encoder) => encoder,
         Err(e) => {
-            let _ = ready.send(Err(format!("Encoder suara gagal: {e}")));
+            let _ = ready.send(Err(crate::trf!("Voice encoder failed: {e}", "Encoder suara gagal: {e}")));
             return;
         }
     };
@@ -399,7 +404,7 @@ fn record(
                     }
                 }
                 let saved = match failure {
-                    Some(e) => Err(format!("Pesan suara gagal diproses: {e}")),
+                    Some(e) => Err(crate::trf!("Voice message processing failed: {e}", "Pesan suara gagal diproses: {e}")),
                     None => encoder.finish().and_then(|ogg| save(&dir, &ogg)),
                 };
                 // Nobody waits any more (its window closed): the file would only
@@ -414,27 +419,27 @@ fn record(
 }
 
 fn save(dir: &std::path::Path, ogg: &[u8]) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("Folder pesan suara tidak bisa dibuat: {e}"))?;
+    std::fs::create_dir_all(dir).map_err(|e| crate::trf!("The voice message folder cannot be created: {e}", "Folder pesan suara tidak bisa dibuat: {e}"))?;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let path = dir.join(format!("voice-{nanos}.ogg"));
-    std::fs::write(&path, ogg).map_err(|e| format!("Pesan suara tidak tersimpan: {e}"))?;
+    std::fs::write(&path, ogg).map_err(|e| crate::trf!("The voice message could not be saved: {e}", "Pesan suara tidak tersimpan: {e}"))?;
     Ok(path)
 }
 
 /// Opens the default microphone; its callback hands mono chunks to `audio`.
 fn open(audio: mpsc::Sender<Message>, level: Arc<AtomicU32>) -> Result<(cpal::Stream, u32), String> {
-    let device = cpal::default_host().default_input_device().ok_or("Tidak ada mikrofon")?;
-    let config = device.default_input_config().map_err(|e| format!("Mikrofon tidak bisa dipakai: {e}"))?;
+    let device = cpal::default_host().default_input_device().ok_or(tr("No microphone", "Tidak ada mikrofon"))?;
+    let config = device.default_input_config().map_err(|e| crate::trf!("The microphone cannot be used: {e}", "Mikrofon tidak bisa dipakai: {e}"))?;
     let rate = config.sample_rate();
     let stream = match config.sample_format() {
         cpal::SampleFormat::F32 => listen::<f32>(&device, config.into(), audio, level),
         cpal::SampleFormat::I16 => listen::<i16>(&device, config.into(), audio, level),
         cpal::SampleFormat::I32 => listen::<i32>(&device, config.into(), audio, level),
         cpal::SampleFormat::U16 => listen::<u16>(&device, config.into(), audio, level),
-        other => return Err(format!("Format mikrofon {other} belum didukung")),
+        other => return Err(crate::trf!("Microphone format {other} is not supported yet", "Format mikrofon {other} belum didukung")),
     }
-    .map_err(|e| format!("Mikrofon tidak bisa dibuka: {e}"))?;
-    stream.play().map_err(|e| format!("Mikrofon tidak bisa mulai merekam: {e}"))?;
+    .map_err(|e| crate::trf!("The microphone cannot be opened: {e}", "Mikrofon tidak bisa dibuka: {e}"))?;
+    stream.play().map_err(|e| crate::trf!("The microphone cannot start recording: {e}", "Mikrofon tidak bisa mulai merekam: {e}"))?;
     Ok((stream, rate))
 }
 
@@ -526,8 +531,8 @@ mod tests {
 
     #[test]
     fn refuses_short_or_silent_recordings() {
-        assert_eq!(check(1_000, &[0.3]), Err("Rekaman terlalu pendek".to_owned()));
-        assert!(check(48_000, &vec![0.0; 50]).unwrap_err().contains("izin mikrofon"));
+        assert_eq!(check(1_000, &[0.3]), Err("Recording is too short".to_owned()));
+        assert!(check(48_000, &vec![0.0; 50]).unwrap_err().contains("microphone permission"));
         assert_eq!(check(48_000, &frame_levels(&tone(48_000, 1.0, 1, 0.2))), Ok(()));
         let mut encoder = Encoder::new(RATE).unwrap();
         encoder.push(&vec![0.0; 48_000]).unwrap();

@@ -21,6 +21,7 @@ use whatsapp_rust::wacore_binary::JidExt;
 use whatsapp_rust::wacore::types::presence::{ChatActivity, ReceiptType};
 
 use super::media;
+use crate::i18n::tr;
 use super::registry::Registry;
 use super::store::{self, Delivery, Store};
 use super::{Status, Updater};
@@ -368,14 +369,14 @@ fn restore_queue(id: &str, queue: &UnboundedSender<Outgoing>, state: &Updater, s
     for chat in &book.chats {
         for m in chat.messages.iter().filter(|m| m.from_me && matches!(m.status, Delivery::Queued)) {
             let why = if now - m.ts > QUEUE_LIFETIME {
-                Some("Kedaluwarsa: masih antre lebih dari 24 jam saat aplikasi ditutup")
+                Some(tr("Expired: still queued for more than 24 hours when the app was closed", "Kedaluwarsa: masih antre lebih dari 24 jam saat aplikasi ditutup"))
             } else {
                 match queued_body(&book, m) {
                     Some(body) => {
                         pending.push((m.ts, Outgoing { local_id: m.id.clone(), chat: chat.jid.clone(), body }));
                         None
                     }
-                    None => Some("Tidak bisa dikirim ulang: file atau status aslinya sudah tidak ada"),
+                    None => Some(tr("Cannot be resent: the file or the original status is gone", "Tidak bisa dikirim ulang: file atau status aslinya sudah tidak ada")),
                 }
             };
             if let Some(why) = why {
@@ -441,7 +442,7 @@ pub async fn start(id: &str, registry: &Registry, state: &Updater, chats: Arc<Mu
             return None;
         }
         Err(e) => {
-            state.update(id, |v| v.status = Status::Failed(format!("Kunci sesi gagal: {e}")));
+            state.update(id, |v| v.status = Status::Failed(crate::trf!("Session lock failed: {e}", "Kunci sesi gagal: {e}")));
             return None;
         }
     };
@@ -449,7 +450,7 @@ pub async fn start(id: &str, registry: &Registry, state: &Updater, chats: Arc<Mu
     let device = match SqliteStore::open(&path.to_string_lossy()).await {
         Ok(store) => store,
         Err(e) => {
-            state.update(id, |v| v.status = Status::Failed(format!("Device store gagal dibuka: {e}")));
+            state.update(id, |v| v.status = Status::Failed(crate::trf!("Device store could not be opened: {e}", "Device store gagal dibuka: {e}")));
             return None;
         }
     };
@@ -488,7 +489,7 @@ pub async fn start(id: &str, registry: &Registry, state: &Updater, chats: Arc<Mu
             Some(Running { handle, client, queue, avatars, _lock: lock })
         }
         Err(e) => {
-            state.update(id, |v| v.status = Status::Failed(format!("Gagal memulai: {e}")));
+            state.update(id, |v| v.status = Status::Failed(crate::trf!("Failed to start: {e}", "Gagal memulai: {e}")));
             None
         }
     }
@@ -755,11 +756,11 @@ async fn on_event(
         }),
         Event::PairingQrCodesExhausted(_) => state.update(id, |v| {
             v.qr = None;
-            v.status = Status::Failed("QR kedaluwarsa, tautkan ulang".to_owned());
+            v.status = Status::Failed(tr("QR expired, link again", "QR kedaluwarsa, tautkan ulang").to_owned());
         }),
         Event::PairingCodeError(e) => state.update(id, |v| {
             v.pair_code = None;
-            v.status = Status::Failed(format!("Kode pairing gagal: {e:?}"));
+            v.status = Status::Failed(crate::trf!("Pairing code failed: {e:?}", "Kode pairing gagal: {e:?}"));
         }),
         Event::Connected(_) => {
             fetch_group_names(state, id, chats, client.clone());
@@ -989,7 +990,7 @@ async fn send_worker(
             other => other,
         };
         let outcome: Result<String, String> = match message.chat.parse::<Jid>() {
-            Err(e) => Err(format!("JID tidak valid: {e:?}")),
+            Err(e) => Err(crate::trf!("Invalid JID: {e:?}", "JID tidak valid: {e:?}")),
             Ok(jid) => match prepare(&client, &jid, message.body).await {
                 Err(e) => {
                     log::warn!("session {id}: file not sent: {e}");
@@ -1070,7 +1071,7 @@ async fn send_pin(id: &str, client: &Client, state: &Updater, chats: &Mutex<Stor
 /// Our own JID (no device part) as the author of a quoted message: the LID in
 /// LID-addressed groups, else the phone number, like the crate's own add-on keys.
 async fn own_author(client: &Client, chat: &Jid) -> Result<Jid, String> {
-    let pn = client.pn().ok_or("Nomor belum tertaut")?;
+    let pn = client.pn().ok_or(tr("Number is not linked yet", "Nomor belum tertaut"))?;
     if chat.is_group()
         && let Ok(routing) = client.groups().routing_info(chat).await
         && routing.addressing_mode == AddressingMode::Lid
@@ -1092,14 +1093,14 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
         Body::Sticker(path) => media::sticker_message(client, &path).await,
         Body::Voice(path) => media::voice_message(client, &path).await,
         Body::StatusReply { text, status } => {
-            let poster = status.sender.parse::<Jid>().map_err(|e| format!("JID pengirim status tidak valid: {e:?}"))?;
+            let poster = status.sender.parse::<Jid>().map_err(|e| crate::trf!("Invalid status sender JID: {e:?}", "JID pengirim status tidak valid: {e:?}"))?;
             // remote_jid = status@broadcast marks the quote as a status, like WA Web.
             let context = build_quote_context_with_info(status.id.clone(), &poster, &Jid::status_broadcast(), chat, &quoted_status(&status));
             Ok(wa::Message::text_with_context(text, context))
         }
         Body::Reply { text, quote, mentions } => {
             let participant = match &quote.participant {
-                Some(sender) => sender.parse::<Jid>().map_err(|e| format!("JID pengirim pesan tidak valid: {e:?}"))?.to_non_ad(),
+                Some(sender) => sender.parse::<Jid>().map_err(|e| crate::trf!("Invalid message sender JID: {e:?}", "JID pengirim pesan tidak valid: {e:?}"))?.to_non_ad(),
                 None => own_author(client, chat).await?,
             };
             // Same chat: no remote_jid, like a reply in WA Web.
@@ -1165,7 +1166,7 @@ pub fn request_pair_code(running: &Running, id: &str, phone: String, state: &Upd
         match client.pair_with_code(options).await {
             Ok(code) => state.update(&id, |v| v.pair_code = Some(code)),
             Err(e) => state.update(&id, |v| {
-                v.status = Status::Failed(format!("Kode pairing gagal: {e:?}"));
+                v.status = Status::Failed(crate::trf!("Pairing code failed: {e:?}", "Kode pairing gagal: {e:?}"));
             }),
         }
     });

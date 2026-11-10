@@ -126,10 +126,10 @@ pub const NAME_MAX: usize = 40;
 pub fn clean_name(raw: &str) -> Result<String, &'static str> {
     let name = raw.split_whitespace().collect::<Vec<_>>().join(" ");
     if name.is_empty() {
-        return Err("Nama tidak boleh kosong");
+        return Err(crate::i18n::tr("Name cannot be empty", "Nama tidak boleh kosong"));
     }
     if name.chars().count() > NAME_MAX {
-        return Err("Nama maksimal 40 karakter");
+        return Err(crate::i18n::tr("Name is at most 40 characters", "Nama maksimal 40 karakter"));
     }
     Ok(name)
 }
