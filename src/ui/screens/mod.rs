@@ -78,6 +78,10 @@ pub use crate::backend::short_jid;
 
 /// Contact or group name, else the masked number.
 pub fn chat_title(book: &Book, chat: &Chat) -> String {
+    // Anti-peek "hide names and numbers" (#57).
+    if crate::ui::privacy::hide_names() {
+        return if chat.is_group() { tr("Hidden group", "Grup tersembunyi") } else { tr("Hidden contact", "Kontak tersembunyi") }.to_owned();
+    }
     if let Some(name) = book.name_of(&chat.jid) {
         return name.to_owned();
     }
@@ -92,10 +96,16 @@ pub fn chat_title(book: &Book, chat: &Chat) -> String {
 
 /// A group member's name, else their masked number.
 pub fn sender_label(book: &Book, jid: &str) -> String {
+    if crate::ui::privacy::hide_names() {
+        return tr("Member", "Anggota").to_owned();
+    }
     book.name_of(jid).map(str::to_owned).unwrap_or_else(|| short_jid(jid))
 }
 
 pub fn chat_subtitle(chat: &Chat) -> String {
+    if crate::ui::privacy::hide_names() {
+        return "•••• ••••".to_owned();
+    }
     if chat.is_group() { tr("Group", "Grup").to_owned() } else { short_jid(&chat.jid) }
 }
 

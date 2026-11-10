@@ -104,7 +104,11 @@ pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, 
     }
     let (via, several) = state.session_name(session).unwrap_or_default();
     let unread = book.chats.iter().find(|c| c.jid == jid).map(|c| c.unread).unwrap_or(1);
-    let (title, mut body) = content(book, &jid, sender, push_name, text, group, several.then_some(via.as_str()), notify.preview, unread);
+    // Anti-peek mode keeps the text (and, if chosen, who it is) off the screen too.
+    let privacy = &settings.privacy;
+    let show_text = notify.preview && !privacy.blur_previews();
+    let (title, mut body) = content(book, &jid, sender, push_name, text, group, several.then_some(via.as_str()), show_text, unread);
+    let title = if privacy.hide_names() { "warust".to_owned() } else { title };
     if mentioned {
         body = crate::trf!("Mentioned you: {body}", "Menyebut kamu: {body}");
     }

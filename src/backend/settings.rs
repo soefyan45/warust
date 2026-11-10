@@ -72,6 +72,39 @@ impl Webhook {
 }
 
 /// Desktop notifications for incoming messages.
+/// Anti-peek mode (#57): keeps chats unreadable to people behind the user.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Privacy {
+    pub enabled: bool,
+    /// Message text and pictures stay frosted until the cursor is on them.
+    pub blur_chat: bool,
+    /// Chat list previews (and notification text) are frosted.
+    pub blur_previews: bool,
+    /// Contact names, numbers and pictures are hidden too.
+    pub hide_names: bool,
+    /// Lock after this many idle minutes (0: never).
+    pub lock_minutes: u32,
+}
+
+impl Default for Privacy {
+    fn default() -> Self {
+        Self { enabled: false, blur_chat: true, blur_previews: true, hide_names: false, lock_minutes: 2 }
+    }
+}
+
+impl Privacy {
+    pub fn blur_chat(&self) -> bool {
+        self.enabled && self.blur_chat
+    }
+    pub fn blur_previews(&self) -> bool {
+        self.enabled && self.blur_previews
+    }
+    pub fn hide_names(&self) -> bool {
+        self.enabled && self.hide_names
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Notify {
@@ -147,6 +180,7 @@ pub struct Settings {
     pub wallpaper_file: String,
     /// How much a custom picture is dimmed toward the chat colour, 0 to 80 %.
     pub wallpaper_dim: u8,
+    pub privacy: Privacy,
 }
 
 impl Default for Settings {
@@ -167,6 +201,7 @@ impl Default for Settings {
             wallpaper: "auto".to_owned(),
             wallpaper_file: String::new(),
             wallpaper_dim: 30,
+            privacy: Privacy::default(),
         }
     }
 }

@@ -201,6 +201,9 @@ pub fn show(
                 if several {
                     bound_banner(ui, &p, session);
                 }
+                if crate::ui::privacy::blur_chat() {
+                    privacy_banner(ui, &p);
+                }
                 if older_bar(ui, &p, state, session, chat) {
                     state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                     commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
@@ -786,6 +789,27 @@ fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count
     }
 }
 
+/// Anti-peek's strip over the thread (Pego `v5/Privasi`): what is going on,
+/// and the shortcut that turns it off.
+fn privacy_banner(ui: &mut Ui, p: &Palette) {
+    ui.add_space(8.0);
+    Frame::NONE.fill(p.accent_soft).corner_radius(R_MD).inner_margin(Margin::symmetric(12, 7)).show(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 8.0;
+            icons::show(ui, "shield", 14.0, p.accent_text);
+            ui.label(rich(
+                tr("Messages are blurred. Move the cursor over a message to read it.", "Isi pesan diburamkan. Arahkan kursor ke pesan untuk membacanya."),
+                12.5,
+                Weight::Medium,
+                p.accent_text,
+            ));
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                ui.label(rich_mono("Ctrl+Shift+P", 11.0, p.text_2));
+            });
+        });
+    });
+}
+
 /// "Percakapan ini terikat ke CS Utama…" above the messages, with several numbers.
 fn bound_banner(ui: &mut Ui, p: &Palette, session: &SessionView) {
     let phone = session.phone.clone().unwrap_or_else(|| tr("this number", "nomor ini").to_owned());
@@ -837,6 +861,7 @@ fn chat_row(
 ) -> egui::Response {
     // The same contact can chat with several numbers, so the id holds both.
     let resp = ui.interact(row, ui.scope_id().with(("chat_row", session, &chat.jid)), Sense::click());
+    let picture = picture.filter(|_| !crate::ui::privacy::hide_names());
     if selected {
         ui.painter().rect_filled(row, theme::r_inner(), p.selected);
     } else if resp.hovered() {
@@ -925,6 +950,7 @@ fn member_color(jid: &str, dark: bool) -> Color32 {
 
 /// A member's picture beside their bubbles, else their initials in their colour.
 fn paint_member_face(ui: &Ui, rect: Rect, initials: &str, picture: Option<&std::path::Path>, color: Color32) {
+    let picture = picture.filter(|_| !crate::ui::privacy::hide_names());
     if picture.is_some() {
         widgets::paint_avatar(ui, rect, initials, picture, false);
         return;
@@ -956,6 +982,11 @@ fn tick(p: &Palette, status: &Delivery, grey: Color32, dark: bool) -> Option<(&'
 /// The last message in a chat row; ours start with their tick, like WhatsApp.
 #[allow(clippy::too_many_arguments)]
 fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, size: f32, color: Color32, typing: Option<&str>) {
+    // Anti-peek: a bar of the same width for every chat, so nothing is read off it.
+    if crate::ui::privacy::blur_previews() {
+        crate::ui::privacy::frost_line(&ui.painter().with_clip_rect(rect), rect, 0.72, color.gamma_multiply(0.35));
+        return;
+    }
     if let Some(typing) = typing {
         widgets::paint_text(ui, rect, typing, fonts::ui(size, Weight::Medium), typing_color(p), Align::Min);
         return;
@@ -1861,6 +1892,12 @@ fn messages(
                             painter.rect_stroke(rect.expand(2.0), R_LG, Stroke::new(2.0, p.primary), StrokeKind::Outside);
                         }
                         let mut at = rect.min + vec2(14.0, 10.0);
+                        // Anti-peek: frosted until the cursor is on this bubble, then outlined.
+                        let veiled = crate::ui::privacy::blur_chat() && !ui.rect_contains_pointer(rect);
+                        if crate::ui::privacy::blur_chat() && !veiled {
+                            painter.rect_stroke(rect.expand(1.0), R_LG, Stroke::new(1.5, p.primary), StrokeKind::Outside);
+                        }
+                        let frost = if m.from_me { p.on_primary_muted.gamma_multiply(0.55) } else { p.border_strong.gamma_multiply(0.45) };
                         if let Some((name, jid, color)) = head {
                             let face = Rect::from_min_size(pos2(area.left(), y), vec2(FACE, FACE));
                             match avatars.get(&jid) {
@@ -1879,7 +1916,11 @@ fn messages(
                             let (fill, bar) = if m.from_me { (Color32::from_white_alpha(28), p.on_primary_muted) } else { (p.raised, p.primary) };
                             painter.rect_filled(boxed, R_MD, fill);
                             painter.rect_filled(Rect::from_min_size(boxed.min, vec2(3.0, boxed.height())), egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 }, bar);
-                            painter.galley(boxed.min + vec2(10.0, 5.0), quote, p.muted);
+                            if veiled {
+                                crate::ui::privacy::frost_galley(&painter, boxed.min + vec2(10.0, 5.0), &quote, frost);
+                            } else {
+                                painter.galley(boxed.min + vec2(10.0, 5.0), quote, p.muted);
+                            }
                             at.y += boxed.height() + 8.0;
                         }
                         if let Some((media, shown)) = &media {
@@ -1888,9 +1929,17 @@ fn messages(
                             if let Some(click) = paint_media(ui, p, media_rect, m, media, shown, downloads, auto_stickers) {
                                 clicked = Some(MsgEvent::Media(click));
                             }
+                            // Pictures, stickers and document pages go under a cover (voice notes show nothing).
+                            if veiled && !matches!(shown, MediaBox::Voice(_)) {
+                                painter.rect_filled(media_rect, R_MD, if m.from_me { p.primary } else { p.raised });
+                                icons::paint(ui, Rect::from_center_size(media_rect.center(), vec2(22.0, 22.0)), "eye-off", 22.0, frost);
+                            }
                             at.y += media_size.y + 8.0;
                         }
-                        if let Some(text) = text {
+                        if let Some(text) = text.as_ref().filter(|_| veiled) {
+                            crate::ui::privacy::frost_galley(&painter, at, text, frost);
+                            at.y += text.size().y + 4.0;
+                        } else if let Some(text) = text {
                             let height = text.size().y;
                             // Selectable label (drag to select, Cmd/Ctrl+C copies the selection). It sits above the
                             // bubble's click area, so it also needs its own context menu for right-click on text.
@@ -3227,6 +3276,7 @@ fn scope_chip(ui: &mut Ui, p: &Palette, label: &str, active: bool) -> egui::Resp
 fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: &Chat, picture: Option<&Path>, session: &str, via: Option<&SessionView>, typing: Option<&str>) -> egui::Response {
     use crate::ui::compact::{self as phone, PAD};
     let resp = ui.interact(row, ui.scope_id().with(("m_chat_row", session, &chat.jid)), Sense::click());
+    let picture = picture.filter(|_| !crate::ui::privacy::hide_names());
     if resp.hovered() {
         ui.painter().rect_filled(row, 0.0, p.raised);
     }
