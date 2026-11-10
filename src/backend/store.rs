@@ -166,9 +166,17 @@ impl Chat {
         if !self.is_group() {
             return false;
         }
-        let mine = self.messages.iter().rev().find(|m| m.from_me).map(|m| m.ts).unwrap_or(0);
-        let floor = mine.max(self.done_at.unwrap_or(0));
-        self.messages.iter().any(|m| !m.from_me && m.mentions_me && m.ts > floor)
+        // Newest first: stop at our own message or at anything already done.
+        let done_at = self.done_at.unwrap_or(0);
+        for m in self.messages.iter().rev() {
+            if m.from_me || m.ts <= done_at {
+                return false;
+            }
+            if m.mentions_me {
+                return true;
+            }
+        }
+        false
     }
 
     pub fn last_ts(&self) -> i64 {
@@ -254,7 +262,7 @@ impl Book {
 
     /// `text` with each `@<user part>` of `mentions` shown as `@<name>`. A
     /// token only counts at a word boundary on both sides (`@6281` is not in
-    /// `@62812`); a mention with no known name stays as it is.
+    /// `@62812`); a mention with no known name shows the masked number.
     pub fn with_mention_names(&self, text: &str, mentions: &[String]) -> String {
         if mentions.is_empty() || !text.contains('@') {
             return text.to_owned();
@@ -263,9 +271,9 @@ impl Book {
             let u = jid.split('@').next().unwrap_or(jid);
             u.split(':').next().unwrap_or(u).to_owned()
         };
-        let named: Vec<(String, &str)> = mentions
+        let named: Vec<(String, String)> = mentions
             .iter()
-            .filter_map(|jid| Some((user(jid), self.name_of(jid).filter(|n| !n.is_empty())?)))
+            .map(|jid| (user(jid), self.name_of(jid).filter(|n| !n.is_empty()).map(str::to_owned).unwrap_or_else(|| short_jid(jid))))
             .filter(|(token, _)| !token.is_empty())
             .collect();
         let mut out = String::with_capacity(text.len());
@@ -492,6 +500,21 @@ impl Book {
             }
             _ => {}
         }
+    }
+}
+
+/// Short, masked form of a JID for small labels; never a full number.
+pub fn short_jid(jid: &str) -> String {
+    let jid = bare(jid);
+    let jid = jid.as_str();
+    let user = jid.split('@').next().unwrap_or(jid);
+    let tail: String = user.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+    if jid.ends_with("@s.whatsapp.net") {
+        super::session::mask_phone(jid)
+    } else if jid.ends_with("@g.us") {
+        format!("grup …{tail}")
+    } else {
+        format!("lid …{tail}")
     }
 }
 
@@ -766,10 +789,12 @@ mod tests {
     }
 
     #[test]
-    fn unknown_mention_name_stays() {
+    fn unknown_mention_name_is_masked() {
         let b = book(&[push_record("6281@s.whatsapp.net", "Budi")]);
-        let men = vec!["7777@s.whatsapp.net".to_owned(), "6281@s.whatsapp.net".to_owned()];
-        assert_eq!(b.with_mention_names("@7777 @6281", &men), "@7777 @Budi");
+        let men = vec!["628121234410@s.whatsapp.net".to_owned(), "6281@s.whatsapp.net".to_owned()];
+        let out = b.with_mention_names("@628121234410 @6281", &men);
+        assert_eq!(out, "@+62 812-****-4410 @Budi");
+        assert!(!out.contains("628121234410"));
         assert_eq!(b.with_mention_names("tanpa mention", &men), "tanpa mention");
     }
 

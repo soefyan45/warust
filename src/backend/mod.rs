@@ -26,7 +26,7 @@ use session::{Body, Running};
 pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
 pub use session::mask_phone;
 pub use settings::Settings;
-pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost};
+pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost, short_jid};
 use store::Store;
 use webhook::Delivery as HookDelivery;
 
