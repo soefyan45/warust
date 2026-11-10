@@ -125,6 +125,8 @@ pub struct State {
     pub mention_query: String,
     /// Message the next text goes out as a reply to.
     pub reply: Option<ReplyTarget>,
+    /// Our own message the next text replaces (#73); its snippet is the old text.
+    pub editing: Option<ReplyTarget>,
     /// File waiting in the composer, sent with the text as its caption.
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.

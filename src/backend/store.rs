@@ -82,6 +82,8 @@ pub struct ChatMsg {
     pub forwarded: bool,
     /// Deleted for everyone by its sender: its content is gone (#72).
     pub deleted: bool,
+    /// Its text or caption was edited after it was sent (#73).
+    pub edited: bool,
 }
 
 impl ChatMsg {
@@ -525,6 +527,7 @@ impl Book {
                     mentions_me: record.get("mme").and_then(Value::as_bool).unwrap_or(false),
                     forwarded: record.get("fw").and_then(Value::as_bool).unwrap_or(false),
                     deleted: false,
+                    edited: false,
                 };
                 let unread = record.get("unread").and_then(Value::as_bool).unwrap_or(false);
                 let chat = self.chat_mut(&jid);
@@ -566,6 +569,21 @@ impl Book {
                     }
                     self.chats.retain(|c| !c.messages.is_empty());
                     self.hidden.insert(id);
+                }
+            }
+            Some("edit") => {
+                // A new text, or a new caption under the media's "[Gambar]"-style label.
+                if let (Some(id), Some(new)) = (text("id"), text("text")) {
+                    for chat in &mut self.chats {
+                        if let Some(m) = chat.messages.iter_mut().find(|m| m.id == id && !m.deleted) {
+                            m.text = match (&m.media, m.text.split_once(']')) {
+                                (Some(_), Some((label, _))) if m.text.starts_with('[') => format!("{label}] {new}").trim_end().to_owned(),
+                                _ => new,
+                            };
+                            m.edited = true;
+                            return;
+                        }
+                    }
                 }
             }
             Some("del") => {
@@ -854,6 +872,11 @@ pub fn pin_record(chat: &str, id: &str, ts: i64, secs: i64) -> Value {
 /// The message `id` was deleted for everyone.
 pub fn deleted_record(id: &str) -> Value {
     json!({ "t": "del", "id": id })
+}
+
+/// The message `id` now says `text` (a caption for media).
+pub fn edit_record(id: &str, text: &str) -> Value {
+    json!({ "t": "edit", "id": id, "text": text })
 }
 
 /// The message `id` was deleted for me.
@@ -1158,6 +1181,19 @@ mod tests {
         assert!(m.deleted);
         assert!(m.text.is_empty());
         assert!(!m.forwardable());
+    }
+
+    #[test]
+    fn an_edit_replaces_the_text_and_keeps_it() {
+        let b = book(&[
+            msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "old", 1, &Delivery::Received, false),
+            edit_record("x", "new"),
+            // History repeating the original does not bring the old text back.
+            msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "old", 1, &Delivery::Received, false),
+        ]);
+        let m = &b.chats[0].messages[0];
+        assert_eq!(m.text, "new");
+        assert!(m.edited);
     }
 
     #[test]

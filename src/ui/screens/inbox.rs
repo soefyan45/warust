@@ -1574,6 +1574,8 @@ enum MsgAction {
     Unpin,
     /// Ask how to delete the message.
     Delete,
+    /// Put the message's text in the composer to change it.
+    Edit,
 }
 
 /// What the user did on a message in the open chat.
@@ -1581,6 +1583,20 @@ enum MsgEvent {
     Media(MediaClick),
     /// A context menu action on the message with this id.
     Menu(MsgAction, String),
+}
+
+/// How long WhatsApp lets a sender edit a message.
+const EDIT_SECS: i64 = 15 * 60;
+
+/// Our own sent text message, recent enough for WhatsApp to take an edit.
+fn editable(m: &ChatMsg) -> bool {
+    m.from_me
+        && !m.deleted
+        && m.media.is_none()
+        && !m.id.starts_with("local-")
+        && !matches!(m.status, Delivery::Queued | Delivery::Failed(_))
+        && !m.text.trim().is_empty()
+        && time::now() - m.ts < EDIT_SECS
 }
 
 /// How long WhatsApp lets a sender delete a message for everyone (about two
@@ -1670,6 +1686,13 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         MsgEvent::Menu(MsgAction::Unpin, msg_id) => {
             commands.push(Command::Pin { id: session.id.clone(), chat: chat.jid.clone(), msg_id, pinned: false, length: PinLength::Days7 });
         }
+        MsgEvent::Menu(MsgAction::Edit, msg_id) => {
+            let Some(m) = chat.messages.iter().find(|m| m.id == msg_id).filter(|m| editable(m)) else { return };
+            state.reply = None;
+            state.composer = m.text.clone();
+            let snippet = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            state.editing = Some(ReplyTarget { session: session.id.clone(), chat: chat.jid.clone(), id: m.id.clone(), author: String::new(), snippet });
+        }
         MsgEvent::Menu(MsgAction::Delete, msg_id) => {
             let Some(m) = chat.messages.iter().find(|m| m.id == msg_id) else { return };
             // WhatsApp takes back only our own sent messages, and only for a while.
@@ -1680,8 +1703,12 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
     }
 }
 
-/// The text to send: a quoted reply when "Balas" is active in this chat.
+/// The text to send: the new text of the message being edited, a quoted reply
+/// when "Balas" is active in this chat, or a plain message.
 fn text_command(state: &mut State, id: String, chat: String, text: String, mentions: Vec<String>) -> Command {
+    if let Some(editing) = state.editing.take_if(|e| e.chat == chat && e.session == id) {
+        return Command::EditMessage { id, chat, msg_id: editing.id, text };
+    }
     match state.reply.take_if(|r| r.chat == chat && r.session == id) {
         Some(reply) => Command::Reply { id, chat, text, reply_to: reply.id, mentions },
         None => Command::Send { id, chat, text, mentions },
@@ -1693,6 +1720,12 @@ fn text_command(state: &mut State, id: String, chat: String, text: String, menti
 fn reply_bar(ui: &mut Ui, p: &Palette, state: &mut State, session: &str, chat: &str) {
     if state.reply.as_ref().is_some_and(|r| r.chat != chat || r.session != session) {
         state.reply = None;
+    }
+    if state.editing.as_ref().is_some_and(|e| e.chat != chat || e.session != session) {
+        state.editing = None;
+    }
+    if edit_bar(ui, p, state) {
+        return;
     }
     let Some(reply) = &state.reply else { return };
     let mut cancel = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
@@ -1717,6 +1750,36 @@ fn reply_bar(ui: &mut Ui, p: &Palette, state: &mut State, session: &str, chat: &
     if cancel {
         state.reply = None;
     }
+}
+
+/// "Editing message: <old text>" above the composer; x or Esc cancels and
+/// empties the composer. True when the bar is shown.
+fn edit_bar(ui: &mut Ui, p: &Palette, state: &mut State) -> bool {
+    let Some(editing) = &state.editing else { return false };
+    let mut cancel = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    let snippet: String = editing.snippet.chars().take(120).collect();
+    Frame::NONE
+        .fill(p.raised)
+        .corner_radius(R_MD)
+        .inner_margin(Margin { left: 10, right: 4, top: 4, bottom: 4 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                icons::show(ui, "pencil", 16.0, p.accent_text);
+                let label = crate::trf!("Editing message: {snippet}", "Mengedit pesan: {snippet}");
+                ui.add(egui::Label::new(rich(&label, 13.0, Weight::Regular, p.text_2)).truncate());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    cancel |= widgets::icon_button(ui, "x", 24.0, false).on_hover_text(tr("Cancel editing (Esc)", "Batalkan edit (Esc)")).clicked();
+                });
+            });
+        });
+    ui.add_space(6.0);
+    if cancel {
+        state.editing = None;
+        state.composer.clear();
+    }
+    true
 }
 
 /// Where a click on the pinned bar asks `messages` to scroll to (temp memory,
@@ -1787,6 +1850,9 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
                 }
             });
         }
+    }
+    if editable(m) && ui.button(tr("Edit", "Edit")).clicked() {
+        action = Some(MsgAction::Edit);
     }
     // A queued message is still on its way; one that failed or went out can go.
     if !matches!(m.status, Delivery::Queued) && ui.button(tr("Delete…", "Hapus…")).clicked() {
@@ -1911,6 +1977,7 @@ fn messages(
         };
         let meta = time::clock(m.ts);
         let tick = if m.from_me { tick(p, &m.status, meta_color, !sticker && is_dark(p.primary)) } else { None };
+        let meta = if m.edited { crate::trf!("Edited · {meta}", "Diedit · {meta}") } else { meta };
         let meta = if m.forwarded { crate::trf!("Forwarded · {meta}", "Diteruskan · {meta}") } else { meta };
         let head = who.filter(|_| group && new_run).map(|jid| {
             let color = member_color(&jid, dark);

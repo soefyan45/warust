@@ -172,6 +172,7 @@ Atur URL di **Webhook & API → Webhook**: satu URL global, dan bila perlu URL l
 |---|---|
 | `message.received` | Pesan masuk |
 | `message.status` | Pesan keluar terkirim, sampai, dibaca, atau gagal |
+| `message.edited` | Sebuah pesan diedit |
 | `message.deleted` | Sebuah pesan dihapus untuk semua orang |
 | `status.received` | Kontak memasang status |
 | `session.status` | Nomor tersambung, terputus, perlu pairing, dan seterusnya |
