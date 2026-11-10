@@ -21,7 +21,7 @@ use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG, R_MD};
 use crate::ui::widgets::{self, Kind, rich, rich_mono};
-use crate::ui::{ReplyTarget, State, UnreadAnchor, VoiceNote, VoiceStep, emoji, forward, icons, markup, mention, pdf, stickers, time};
+use crate::ui::{ReplyTarget, State, UnreadAnchor, VoiceNote, VoiceStep, emoji, forward, icons, lists, markup, mention, pdf, stickers, time};
 
 /// A panel's id; a number's own window salts it with the number, so its
 /// panel sizes and scroll positions are not the main window's.
@@ -2730,6 +2730,9 @@ fn composer(
     }
     // Enter belongs to the `@` picker while it is open; Shift+Enter is a new line.
     let mut send = connected && !mention.picked && ui.memory(|m| m.has_focus(id)) && ui.input_mut(enter_sends);
+    if !mention.picked && ui.memory(|m| m.has_focus(id)) {
+        continue_list(ui, &mut state.composer, id);
+    }
     let mut sendable = true;
     let mut sticker_sent = None;
     let mut edit_rect = None;
@@ -2914,6 +2917,30 @@ fn wire_text(group: bool, message: &str, picks: &[(String, String)]) -> (String,
     } else {
         (message.to_owned(), Vec::new())
     }
+}
+
+/// Shift+Enter (or Alt+Enter) inside a list: starts the next item, or ends the
+/// list on an empty one, in place of the text box's plain new line. With a
+/// selection the text box handles the key itself.
+fn continue_list(ui: &Ui, text: &mut String, id: egui::Id) {
+    let pressed = ui.input(|i| (i.modifiers.shift || i.modifiers.alt) && i.key_pressed(Key::Enter));
+    if !pressed {
+        return;
+    }
+    let mut edit = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+    let cursor = match edit.cursor.char_range() {
+        Some(range) if range.is_empty() => range.primary.index.0,
+        Some(_) => return,
+        None => text.chars().count(),
+    };
+    let Some((changed, cursor)) = lists::new_line(text, cursor) else { return };
+    ui.input_mut(|i| {
+        let modifiers = i.modifiers;
+        i.consume_key(modifiers, Key::Enter);
+    });
+    *text = changed;
+    edit.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor))));
+    edit.store(ui.ctx(), id);
 }
 
 /// Keys the composer keeps for itself. egui moves focus on Tab and drops it on
