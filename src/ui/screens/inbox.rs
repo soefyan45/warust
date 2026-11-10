@@ -1665,6 +1665,24 @@ fn pick_file(ctx: &egui::Context) -> std::sync::mpsc::Receiver<Option<PathBuf>> 
     rx
 }
 
+/// The file a paste really is: Finder (and Linux file managers) put the
+/// copied files' names (or paths) on the clipboard as text, one per line,
+/// beside the files themselves. When every pasted line is one of `files`,
+/// the paste is the first of them; any other text stays text.
+fn copied_file(pasted: &str, files: &[PathBuf]) -> Option<PathBuf> {
+    let lines: Vec<&str> = pasted.split(['\r', '\n']).map(str::trim).filter(|l| !l.is_empty()).collect();
+    let named = |line: &str, file: &PathBuf| {
+        file.as_os_str() == line || file.file_name().is_some_and(|name| name == line)
+    };
+    let all_files = !lines.is_empty() && lines.iter().all(|line| files.iter().any(|f| named(line, f)));
+    all_files.then(|| files.first().cloned()).flatten()
+}
+
+/// The files on the system clipboard, if it holds any.
+fn clipboard_files() -> Vec<PathBuf> {
+    arboard::Clipboard::new().and_then(|mut c| c.get().file_list()).unwrap_or_default()
+}
+
 /// Saves a pasted picture as `tempel-<time>.png` in `dir`; the sent bubble
 /// shows it from there, so it is kept.
 fn save_pasted_image(image: &egui::ColorImage, dir: &Path) -> Result<PathBuf, String> {
@@ -1985,6 +2003,21 @@ fn composer(
         })
     });
     let focus = ui.memory(|m| m.focused());
+    // Cmd+V on a file copied in Finder arrives as its name; attach the file
+    // instead, as dropping it would, and keep the name out of the text box.
+    let pasted_text = ui.input(|i| {
+        i.events.iter().find_map(|e| match e {
+            egui::Event::Paste(text) => Some(text.clone()),
+            _ => None,
+        })
+    });
+    if let Some(text) = pasted_text.filter(|_| focus.is_none() || focus == Some(id)) {
+        if let Some(file) = copied_file(&text, &clipboard_files()).filter(|f| f.is_file()) {
+            state.attachment = Some(file);
+            ui.input_mut(|i| i.events.retain(|e| !matches!(e, egui::Event::Paste(t) if *t == text)));
+            ui.memory_mut(|m| m.request_focus(id));
+        }
+    }
     if let Some(image) = pasted.filter(|_| focus.is_none() || focus == Some(id)) {
         match save_pasted_image(&image, &crate::platform::data_dir().join("pasted")) {
             Ok(path) => {
@@ -2575,6 +2608,26 @@ fn compact_chat(
         });
     });
     commands
+}
+
+#[cfg(test)]
+mod finder_paste_tests {
+    use super::*;
+
+    #[test]
+    fn finder_copy_is_a_file_not_its_name() {
+        let photo = PathBuf::from("/Users/a/Desktop/foto liburan.png");
+        let doc = PathBuf::from("/Users/a/nota.pdf");
+        // Finder puts the names on the clipboard as text, one per file.
+        assert_eq!(copied_file("foto liburan.png", std::slice::from_ref(&photo)), Some(photo.clone()));
+        assert_eq!(copied_file("foto liburan.png\rnota.pdf", &[photo.clone(), doc.clone()]), Some(photo.clone()));
+        // Linux file managers give the full path.
+        assert_eq!(copied_file("/Users/a/nota.pdf\n", std::slice::from_ref(&doc)), Some(doc.clone()));
+        // Text that is not those names stays text.
+        assert_eq!(copied_file("lihat foto liburan.png ya", std::slice::from_ref(&photo)), None);
+        assert_eq!(copied_file("foto liburan.png", &[]), None);
+        assert_eq!(copied_file("", std::slice::from_ref(&photo)), None);
+    }
 }
 
 #[cfg(test)]
