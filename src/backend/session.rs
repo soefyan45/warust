@@ -65,6 +65,8 @@ pub enum Body {
     /// Delete a message for everyone (our own messages only), or for me (this
     /// account's devices). Like a pin it shows no bubble of its own.
     Delete { target: PinTarget, everyone: bool },
+    /// A new text for one of our own sent text messages (#73).
+    Edit { target: PinTarget, text: String },
 }
 
 /// The message a `Body::Reply` quotes.
@@ -332,6 +334,13 @@ impl Running {
         let _ = self.queue.send(Outgoing { local_id: String::new(), chat, body: Body::Delete { target, everyone } });
     }
 
+    /// Queues a new text for one of our own messages; the bubble changes once
+    /// WhatsApp took the edit.
+    pub fn edit(&self, target: PinTarget, text: String) {
+        let chat = target.chat.clone();
+        let _ = self.queue.send(Outgoing { local_id: String::new(), chat, body: Body::Edit { target, text } });
+    }
+
     pub fn request_avatar(&self, jid: String) {
         let _ = self.avatars.send(jid);
     }
@@ -343,8 +352,8 @@ impl Running {
 
     /// Like `enqueue`, under an id the caller already handed out (the REST API).
     pub fn enqueue_as(&self, id: &str, chat: String, body: Body, local_id: String, state: &Updater, store: &Mutex<Store>) {
-        if matches!(body, Body::Pin { .. } | Body::Delete { .. }) {
-            return log::warn!("session {id}: pins and deletes go through `pin` and `delete`, not the message queue");
+        if matches!(body, Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. }) {
+            return log::warn!("session {id}: pins, deletes and edits go through `pin`, `delete` and `edit`, not the message queue");
         }
         let shown = match &body {
             Body::Text(text) => text.clone(),
@@ -352,14 +361,14 @@ impl Running {
             Body::Sticker(_) => "[Stiker]".to_owned(),
             Body::Voice(_) => "[Pesan suara]".to_owned(),
             Body::StatusReply { text, .. } | Body::Mention { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
-            Body::Pin { .. } | Body::Delete { .. } => unreachable!("returned above"),
+            Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. } => unreachable!("returned above"),
         };
         let media = match &body {
             Body::Text(_) | Body::StatusReply { .. } | Body::Mention { .. } | Body::Reply { .. } | Body::Forward(_) => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
             Body::Voice(path) => Some(media::describe_sent_voice(path)),
-            Body::Pin { .. } | Body::Delete { .. } => unreachable!("returned above"),
+            Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. } => unreachable!("returned above"),
         };
         let record = store::msg_record(&chat, &local_id, true, "", &shown, unix_secs(), &Delivery::Queued, false);
         let mut record = store::with_media(record, media);
@@ -623,6 +632,29 @@ fn pin_record_of(message: &wa::Message, chat: &str, ts: i64) -> Option<Value> {
     }
 }
 
+/// The id of the message an edit changes, and its new text or caption.
+fn edited(message: &wa::Message) -> Option<(String, String)> {
+    use wa::message::protocol_message::Type;
+    let protocol = message.get_base_message().protocol_message.as_option()?;
+    if protocol.r#type != Some(Type::MESSAGE_EDIT) {
+        return None;
+    }
+    let target = protocol.key.as_option()?.id.clone().filter(|id| !id.is_empty())?;
+    let new = protocol.edited_message.as_option()?;
+    let text = new.text_content().or_else(|| new.get_caption())?.to_owned();
+    Some((target, text))
+}
+
+/// An edit from the contact or from our phone: the bubble shows the new text.
+fn on_edit(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, chat: &str, target: &str, text: &str) {
+    let Some(book) = state.book(id) else { return };
+    if !book.chats.iter().flat_map(|c| &c.messages).any(|m| m.id == target) {
+        return log::info!("session {id}: edited message {target} is not here");
+    }
+    state.record(id, chats, &[store::edit_record(target, text)]);
+    state.emit(id, "message.edited", json!({ "id": target, "chat": chat, "text": text }));
+}
+
 /// Removes the downloaded file of a message that is being deleted.
 fn remove_media_file(state: &Updater, id: &str, msg_id: &str) {
     let file = state.book(id).and_then(|book| book.media_of(msg_id).and_then(|m| m.file.clone()));
@@ -727,6 +759,10 @@ fn on_message(
     }
     if let Some(target) = revoked(&ctx.message) {
         on_revoke(state, id, chats, &chat, &target);
+        return;
+    }
+    if let Some((target, text)) = edited(&ctx.message) {
+        on_edit(state, id, chats, &chat, &target, &text);
         return;
     }
     let Some(text) = body(&ctx.message) else {
@@ -1081,6 +1117,11 @@ async fn send_worker(
                 last = Some(Instant::now());
                 continue;
             }
+            Outgoing { body: Body::Edit { target, text }, .. } => {
+                send_edit(&id, &client, &state, &chats, target, text).await;
+                last = Some(Instant::now());
+                continue;
+            }
             other => other,
         };
         let outcome: Result<String, String> = match message.chat.parse::<Jid>() {
@@ -1190,6 +1231,25 @@ async fn send_delete(id: &str, client: &Client, state: &Updater, chats: &Mutex<S
     }
 }
 
+/// Sends a new text for one of our own messages.
+async fn send_edit(id: &str, client: &Client, state: &Updater, chats: &Mutex<Store>, target: PinTarget, text: String) {
+    let Ok(chat_jid) = target.chat.parse::<Jid>() else {
+        return;
+    };
+    let PinTarget { chat, msg_id, .. } = target;
+    let addressed = match MessageId::new(msg_id.as_str()).and_then(|mid| MessageRef::new(&chat_jid, mid, None, true)) {
+        Ok(addressed) => addressed,
+        Err(e) => return log::warn!("session {id}: cannot address message {msg_id} to edit: {e}"),
+    };
+    match client.edit_message(whatsapp_rust::EditRequest::new(addressed, wa::Message::text(text.clone()))).await {
+        Ok(_) => {
+            state.record(id, chats, &[store::edit_record(&msg_id, &text)]);
+            state.emit(id, "message.edited", json!({ "id": msg_id, "chat": chat, "text": text }));
+        }
+        Err(e) => log::warn!("session {id}: edit failed: {e}"),
+    }
+}
+
 /// Our own JID (no device part) as the author of a quoted message: the LID in
 /// LID-addressed groups, else the phone number, like the crate's own add-on keys.
 async fn own_author(client: &Client, chat: &Jid) -> Result<Jid, String> {
@@ -1232,7 +1292,7 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
         }
         // The original wa::Message is not kept, so the text is rebuilt with
         // the same markers `prepare_for_forward` sets (score 1: first hop).
-        Body::Pin { .. } | Body::Delete { .. } => Err("a pin or delete is not a message".to_owned()),
+        Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. } => Err("a pin, delete or edit is not a message".to_owned()),
         Body::Forward(text) => {
             let mut context = wa::ContextInfo::default();
             context.is_forwarded = Some(true);

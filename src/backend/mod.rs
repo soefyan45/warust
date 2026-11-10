@@ -274,6 +274,8 @@ pub enum Command {
     Pin { id: String, chat: String, msg_id: String, pinned: bool, length: store::PinLength },
     /// Delete a message for everyone (only our own) or just for me (#72).
     DeleteMessage { id: String, chat: String, msg_id: String, everyone: bool },
+    /// Give one of our own sent text messages a new text (#73).
+    EditMessage { id: String, chat: String, msg_id: String, text: String },
     /// Save new settings; restarts the API server when its part changed.
     SaveSettings(Settings),
     /// Send a `webhook.test` event to the global webhook URL.
@@ -898,6 +900,17 @@ async fn run(
                         r.delete(&id, target, everyone, &state, store);
                     }
                     _ => log::warn!("delete: session {id} is not running, the message is gone, or it isn't ours to delete for everyone"),
+                }
+            }
+            Command::EditMessage { id, chat, msg_id, text } => {
+                let found = state.book(&id).and_then(|book| {
+                    let jid = book.normalize(&chat);
+                    let c = book.chats.iter().find(|c| c.jid == jid)?;
+                    c.messages.iter().any(|m| m.id == msg_id && m.from_me && !m.deleted).then(|| c.jid.clone())
+                });
+                match (running.get(&id), found) {
+                    (Some(r), Some(chat)) => r.edit(session::PinTarget { chat, msg_id, sender: None }, text),
+                    _ => log::warn!("edit: session {id} is not running, or the message is gone or not ours"),
                 }
             }
             Command::Seen { id, chat } => {
