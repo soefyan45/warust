@@ -79,6 +79,18 @@ fn item(
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
+/// Right-click on a number: its inbox in a window of its own, or a new name.
+fn number_menu(row: &egui::Response, state: &mut State, session: &SessionView) {
+    row.context_menu(|ui| {
+        if ui.button("Buka di jendela baru").clicked() {
+            state.open_window_requested = Some(session.id.clone());
+        }
+        if ui.button("Ganti nama…").clicked() {
+            state.rename = Some((session.id.clone(), session.name.clone()));
+        }
+    });
+}
+
 pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) {
     ui.spacing_mut().item_spacing.y = 4.0;
     let connected: Vec<&SessionView> = sessions.iter().filter(|s| s.status == Status::Connected).collect();
@@ -107,9 +119,11 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
     for s in &connected {
         let phone = s.phone.clone().unwrap_or_default();
         let selected = state.inbox_scope.as_deref() == Some(s.id.as_str());
-        if item(ui, p, "smartphone", &s.name, &phone, p.muted, true, Some(p.green), unread(s), selected).clicked() {
+        let row = item(ui, p, "smartphone", &s.name, &phone, p.muted, true, Some(p.green), unread(s), selected);
+        if row.clicked() {
             state.inbox_scope = Some(s.id.clone());
         }
+        number_menu(&row, state, s);
     }
     if !others.is_empty() {
         ui.add_space(10.0);
@@ -120,9 +134,11 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
             let detail = if chats > 0 { format!("{label} · {chats} chat lama") } else { label };
             let selected = state.inbox_scope.as_deref() == Some(s.id.as_str());
             let dot = status_dot(p, &s.status);
-            if item(ui, p, icon, &s.name, &detail, dot, false, Some(dot), unread(s), selected).clicked() {
+            let row = item(ui, p, icon, &s.name, &detail, dot, false, Some(dot), unread(s), selected);
+            if row.clicked() {
                 state.inbox_scope = Some(s.id.clone());
             }
+            number_menu(&row, state, s);
         }
     }
     ui.add_space(12.0);
