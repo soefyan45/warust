@@ -5,6 +5,7 @@
 
 mod api;
 pub mod call;
+pub mod video;
 mod avatars;
 mod media;
 mod notify;
@@ -235,6 +236,12 @@ pub enum Command {
     /// Mute our microphone, or silence the caller on our speaker.
     MuteCall(bool),
     SpeakerOff(bool),
+    /// Video in the call (#55): our camera off or on, turn a voice call into
+    /// video, or answer the caller's request to.
+    CameraCall(bool),
+    StartVideo,
+    AcceptVideo,
+    DeclineVideo,
     /// "Tandai belum dibaca": a local unread marker, also synced to the phone.
     MarkUnread { id: String, chat: String },
     /// Archive a chat, or take it out of the archive; synced to the phone.
@@ -496,6 +503,12 @@ impl Updater {
         let shared = self.shared.lock().ok()?;
         let name = shared.sessions.iter().find(|s| s.id == id)?.name.clone();
         Some((name, shared.sessions.len() > 1))
+    }
+
+    /// Something a video thread can call to have a new frame drawn.
+    pub(crate) fn repaint_handle(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let ctx = self.ctx.clone();
+        Arc::new(move || ctx.request_repaint())
     }
 
     /// The call the UI shows (from `call`).
@@ -831,6 +844,10 @@ async fn run(
             Command::EndCall => call::end(&state),
             Command::MuteCall(muted) => call::set_muted(&state, muted),
             Command::SpeakerOff(off) => call::set_speaker_off(&state, off),
+            Command::CameraCall(on) => call::set_camera(&state, on),
+            Command::StartVideo => call::start_video(&state),
+            Command::AcceptVideo => call::accept_video(&state),
+            Command::DeclineVideo => call::decline_video(&state),
             Command::RecordingAudio { id, chat, on } => {
                 if state.settings().typing {
                     if let Some(r) = running.get(&id) {

@@ -4,5 +4,6 @@
 <dict>
   <!-- Voice notes: the hardened runtime blocks the microphone without this. -->
   <key>com.apple.security.device.audio-input</key><true/>
+  <key>com.apple.security.device.camera</key><true/>
 </dict>
 </plist>

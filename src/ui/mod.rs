@@ -143,6 +143,8 @@ pub struct State {
     /// shows it as a banner.
     pub call_now: Option<backend::call::CallView>,
     pub call_minimized: bool,
+    /// The call's video pictures as textures (#55).
+    pub call_textures: call::Textures,
     /// "Recording audio" last told to this chat, and when.
     pub recording_told: Option<(String, String, std::time::Instant)>,
     /// Chats whose profile picture was already asked for.
