@@ -182,6 +182,19 @@ impl Viewer {
 }
 
 const ZOOMS: [f32; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+/// Space inside the viewer's frame, around its content.
+const PADDING: f32 = 16.0;
+/// Gap kept between the viewer and the window's edges.
+const EDGE: f32 = 12.0;
+/// Below this content width the title row drops what does not fit.
+const NARROW: f32 = 520.0;
+
+/// The viewer's content size: most of the window, at least a useful size on a
+/// wide one, and never more than the window has room for.
+fn viewer_size(screen: egui::Vec2) -> egui::Vec2 {
+    let room = (screen - egui::Vec2::splat(2.0 * (EDGE + PADDING))).max(egui::Vec2::ZERO);
+    vec2((screen.x * 0.8).max(480.0).min(room.x), (screen.y * 0.88).max(360.0).min(room.y))
+}
 
 /// Draws the viewer over the window; clears `open` when it is closed.
 pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
@@ -196,10 +209,11 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                 .fill(p.panel)
                 .stroke(Stroke::new(1.0, p.border_strong))
                 .corner_radius(R_LG)
-                .inner_margin(Margin::same(16)),
+                .inner_margin(Margin::same(PADDING as i8)),
         )
         .show(ctx, |ui| {
-            let size = vec2((screen.width() * 0.8).max(480.0), (screen.height() * 0.88).max(360.0));
+            let size = viewer_size(screen.size());
+            let narrow = size.x < NARROW;
             ui.set_width(size.x);
             ui.set_height(size.y);
             widgets::row(
@@ -208,15 +222,29 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                 |ui| {
                     icons::show(ui, "file-text", 16.0, p.text_2);
                     ui.add_space(6.0);
-                    ui.label(rich(&viewer.title, 14.0, Weight::SemiBold, p.text));
-                    if let Some(info) = info {
-                        ui.label(rich(&format!("{} halaman", info.pages), 12.0, Weight::Regular, p.muted));
+                    // The page count first, so the title takes what is left and truncates.
+                    let pages = info.filter(|_| !narrow).map(|info| format!("{} halaman", info.pages));
+                    let pages_width = pages
+                        .as_ref()
+                        .map(|text| ui.painter().layout_no_wrap(text.clone(), fonts::ui(12.0, Weight::Regular), p.muted).size().x + 8.0)
+                        .unwrap_or(0.0);
+                    let title_width = (ui.available_width() - pages_width).max(0.0);
+                    ui.allocate_ui(vec2(title_width, 20.0), |ui| {
+                        ui.add(egui::Label::new(rich(&viewer.title, 14.0, Weight::SemiBold, p.text)).truncate());
+                    });
+                    if let Some(pages) = pages {
+                        ui.label(rich(&pages, 12.0, Weight::Regular, p.muted));
                     }
                 },
                 |ui| {
                     close = widgets::icon_button(ui, "x", 28.0, false).on_hover_text("Tutup (Esc)").clicked();
                     ui.add_space(8.0);
-                    if widgets::button(ui, None, "Buka di aplikasi lain", Kind::Secondary).clicked() {
+                    let open_elsewhere = if narrow {
+                        widgets::icon_button(ui, "arrow-up-right", 28.0, false).on_hover_text("Buka di aplikasi lain")
+                    } else {
+                        widgets::button(ui, None, "Buka di aplikasi lain", Kind::Secondary)
+                    };
+                    if open_elsewhere.clicked() {
                         crate::platform::open(&viewer.file);
                     }
                     ui.add_space(8.0);
@@ -276,6 +304,20 @@ fn rich_zoom(zoom: f32, p: &theme::Palette) -> egui::RichText {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewer_fits_the_window() {
+        // A wide window: most of it, as before.
+        assert_eq!(viewer_size(vec2(1440.0, 900.0)), vec2(1152.0, 792.0));
+        // The smallest window warust allows: all of the viewer stays inside.
+        let small = vec2(360.0, 560.0);
+        let size = viewer_size(small);
+        let outer = size + egui::Vec2::splat(2.0 * PADDING);
+        assert!(outer.x <= small.x - 2.0 * EDGE && outer.y <= small.y - 2.0 * EDGE, "{outer:?}");
+        assert!(size.x >= 280.0 && size.y >= 360.0, "{size:?}");
+        // Never negative, whatever the window reports.
+        assert_eq!(viewer_size(vec2(10.0, 10.0)), egui::Vec2::ZERO);
+    }
 
     #[test]
     fn reads_pdfinfo_output() {
