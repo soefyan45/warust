@@ -4720,7 +4720,7 @@ dependencies = [
 
 [[package]]
 name = "warust"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "axum",
  "block2 0.6.2",
