@@ -29,6 +29,8 @@ pub enum Action {
     Relink(String),
     Logout(String),
     Remove(String),
+    /// The number's inbox in a window of its own.
+    Window(String),
 }
 
 pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) -> Option<Action> {
@@ -365,6 +367,10 @@ pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView) -> 
     let mut action = None;
     egui::Popup::menu(anchor).show(|ui| {
         ui.set_min_width(180.0);
+        if ui.button("Buka di jendela baru").clicked() {
+            action = Some(Action::Window(session.id.clone()));
+        }
+        ui.separator();
         if !connected && ui.button("Tautkan / tampilkan pairing").clicked() {
             action = Some(fix(session));
         }

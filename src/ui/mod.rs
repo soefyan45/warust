@@ -90,6 +90,10 @@ pub struct State {
     /// and whether "every number" is split into one section per number.
     pub inbox_scope: Option<String>,
     pub inbox_grouped: bool,
+    /// The number this state belongs to when it is a number's own window.
+    pub window: Option<String>,
+    /// A number to open in a window of its own.
+    pub open_window_requested: Option<String>,
     /// "Tautkan nomor" was clicked in the Inbox's device panel.
     pub add_number_requested: bool,
     /// Ringkasan "Pesan terbaru": 0 = belum dibalas, 1 = semua.
@@ -138,6 +142,32 @@ pub struct App {
     pairing_id: Option<String>,
     /// The chat last reported to the notifier as on screen.
     viewing: Option<(String, String)>,
+    /// Numbers open in windows of their own (issue #28).
+    windows: Vec<NumberWindow>,
+}
+
+/// One number's inbox in its own OS window, with its own chat, composer and
+/// scroll positions. It shares the connection with the main window.
+struct NumberWindow {
+    id: String,
+    state: State,
+}
+
+impl NumberWindow {
+    fn new(id: String) -> Self {
+        let state = State {
+            inbox_scope: Some(id.clone()),
+            inbox_session: Some(id.clone()),
+            window: Some(id.clone()),
+            contact_panel: true,
+            ..State::default()
+        };
+        Self { id, state }
+    }
+
+    fn viewport(&self) -> egui::ViewportId {
+        egui::ViewportId::from_hash_of(("number_window", &self.id))
+    }
 }
 
 impl App {
@@ -181,6 +211,7 @@ impl App {
             // Dev aid: WARUST_PAIR=<session id> opens its pairing screen.
             pairing_id: std::env::var("WARUST_PAIR").ok(),
             viewing: None,
+            windows: Vec::new(),
             state: State {
                 contact_panel: true,
                 // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
@@ -468,6 +499,62 @@ impl App {
             }
         }
         self.screen = Screen::Nomor;
+    }
+
+    /// Opens a number's window, or brings it up when it is already open.
+    fn open_window(&mut self, ctx: &egui::Context, id: String) {
+        if let Some(open) = self.windows.iter().find(|w| w.id == id) {
+            ctx.send_viewport_cmd_to(open.viewport(), egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd_to(open.viewport(), egui::ViewportCommand::Focus);
+        } else if self.sessions.iter().any(|s| s.id == id) {
+            self.windows.push(NumberWindow::new(id));
+        }
+    }
+
+    /// Draws the numbers' windows; returns the open chat of the one in focus.
+    fn number_windows(&mut self, ctx: &egui::Context) -> Option<(String, String)> {
+        let mut closed: Vec<String> = Vec::new();
+        let mut focused_chat = None;
+        for w in &mut self.windows {
+            let Some(session) = self.sessions.iter().find(|s| s.id == w.id) else {
+                closed.push(w.id.clone());
+                continue;
+            };
+            w.state.settings = self.settings.clone();
+            let builder = egui::ViewportBuilder::default()
+                .with_title(format!("{} · warust", session.name))
+                .with_app_id("warust")
+                .with_inner_size([1000.0, 720.0])
+                .with_min_inner_size([380.0, 480.0]);
+            let one = std::slice::from_ref(session);
+            let mut commands = Vec::new();
+            ctx.show_viewport_immediate(w.viewport(), builder, |ui, _| {
+                if ui.input(|i| i.viewport().close_requested()) {
+                    closed.push(w.id.clone());
+                }
+                let p = theme::palette(ui.ctx());
+                let phone = compact::is_compact(ui.ctx());
+                egui::CentralPanel::default().frame(Frame::NONE.fill(p.bg)).show(ui, |ui| {
+                    commands = if phone {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        screens::inbox::compact(ui, &mut w.state, one, &self.avatars, &self.downloads, self.settings.auto_stickers)
+                    } else {
+                        screens::inbox::show(ui, &mut w.state, one, &self.avatars, &self.downloads, self.settings.auto_stickers)
+                    };
+                });
+                pdf::show(ui.ctx(), &mut w.state.pdf_view);
+                let open = w.state.inbox_session.clone().zip(w.state.chat_selected.clone());
+                commands.extend(screens::inbox::typing_signal(ui.ctx(), &mut w.state, open.clone()));
+                if ui.input(|i| i.viewport().focused).unwrap_or(false) {
+                    focused_chat = open;
+                }
+            });
+            for command in commands {
+                self.backend.send(command);
+            }
+        }
+        self.windows.retain(|w| !closed.contains(&w.id));
+        focused_chat
     }
 
     fn confirm_remove(&mut self, ctx: &egui::Context) {
@@ -789,6 +876,7 @@ impl eframe::App for App {
             }
             Some(screens::nomor::Action::Logout(id)) => self.backend.send(Command::Logout { id }),
             Some(screens::nomor::Action::Remove(id)) => self.state.confirm_remove = Some(id),
+            Some(screens::nomor::Action::Window(id)) => self.state.open_window_requested = Some(id),
             None => {}
         }
         if let (Some(id), Some(a)) = (self.pairing_id.clone(), pairing_action) {
@@ -810,12 +898,16 @@ impl eframe::App for App {
         for command in screens::inbox::typing_signal(ui.ctx(), &mut self.state, open_chat) {
             self.backend.send(command);
         }
+        if let Some(id) = self.state.open_window_requested.take() {
+            self.open_window(ui.ctx(), id);
+        }
+        let in_window = self.number_windows(ui.ctx());
         // The open chat in a focused window gets no notification.
         let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);
         let viewing = if focused && self.screen == Screen::Inbox {
             self.state.inbox_session.clone().zip(self.state.chat_selected.clone())
         } else {
-            None
+            in_window
         };
         if viewing != self.viewing {
             self.backend.set_viewing(viewing.clone());

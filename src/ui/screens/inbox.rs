@@ -21,6 +21,15 @@ use crate::ui::theme::{self, Palette, R_LG, R_MD};
 use crate::ui::widgets::{self, Kind, rich, rich_mono};
 use crate::ui::{State, emoji, icons, markup, pdf, stickers, time};
 
+/// A panel's id; a number's own window salts it with the number, so its
+/// panel sizes and scroll positions are not the main window's.
+fn panel_id(state: &State, name: &'static str) -> egui::Id {
+    match &state.window {
+        Some(id) => egui::Id::unique(name).with(id),
+        None => egui::Id::unique(name),
+    }
+}
+
 const ROW: f32 = 60.0;
 /// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai".
 pub const TAB_REPLY: usize = 0;
@@ -73,7 +82,7 @@ pub fn show(
     let several = sessions.len() > 1;
     let forest = theme::template().top_nav();
     if state.devices_panel {
-        Panel::left("devices")
+        Panel::left(panel_id(state, "devices"))
             .default_size(if forest { 250.0 } else { 230.0 })
             .size_range(210.0..=320.0)
             .resizable(true)
@@ -81,7 +90,7 @@ pub fn show(
             .frame(theme::pane(ui.ctx(), p.panel, Margin { left: 10, right: 10, top: 0, bottom: 10 }))
             .show(ui, |ui| super::devices::show(ui, &p, state, sessions));
     }
-    Panel::left("chat_list")
+    Panel::left(panel_id(state, "chat_list"))
         .default_size(if forest { 360.0 } else { 300.0 })
         .size_range(if forest { 330.0..=460.0 } else { 260.0..=420.0 })
         .resizable(true)
@@ -107,7 +116,7 @@ pub fn show(
 
     // The contact panel only when the conversation keeps room to breathe.
     if state.contact_panel && ui.available_width() >= 980.0 {
-        Panel::right("contact")
+        Panel::right(panel_id(state, "contact"))
             .default_size(300.0)
             .size_range(260.0..=400.0)
             .resizable(true)
@@ -120,7 +129,7 @@ pub fn show(
     ui.set_min_size(ui.available_size());
     let surface = theme::pane_bg(ui.ctx());
     let typing_now = typing_label(state, &session.id, &book, chat);
-    Panel::top("conversation_header")
+    Panel::top(panel_id(state, "conversation_header"))
         .exact_size(52.0)
         .resizable(false)
         .frame(Frame::NONE.fill(surface).corner_radius(theme::top_corners()).inner_margin(Margin { left: 24, right: 16, top: 0, bottom: 0 }))
@@ -160,7 +169,7 @@ pub fn show(
                 },
             );
         });
-    Panel::bottom("composer")
+    Panel::bottom(panel_id(state, "composer"))
         .resizable(false)
         .frame(Frame::NONE.fill(surface).corner_radius(theme::bottom_corners()).inner_margin(Margin { left: 32, right: 32, top: 8, bottom: 20 }))
         .show_separator_line(false)
@@ -421,7 +430,11 @@ fn chat_list(
                 continue;
             }
             match line {
-                Line::Header(s, count) => section_header(ui, p, rect, s, *count),
+                Line::Header(s, count) => {
+                    if section_header(ui, p, rect, s, *count) {
+                        state.open_window_requested = Some(s.id.clone());
+                    }
+                }
                 Line::Chat(s, chat) => {
                     // Pictures are asked only for rows on screen; the backend paces them.
                     if !avatars.contains_key(&chat.jid) && state.avatar_asked.insert(chat.jid.clone()) {
@@ -478,7 +491,9 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
 }
 
 /// "● CS Utama  4410 ........ 3 chat", red when the number cannot reply.
-fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count: usize) {
+/// A number's band in "Pisah per nomor"; true when its "open in a new
+/// window" button is clicked.
+fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count: usize) -> bool {
     let band = rect.shrink2(vec2(0.0, 4.0));
     let down = session.status != Status::Connected;
     ui.painter().rect_filled(band, theme::r_inner(), if down { p.red_soft } else { p.raised });
@@ -486,7 +501,7 @@ fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count
     ui.painter().circle_filled(pos2(band.left() + 14.0, band.center().y), 3.5, dot);
     let name = Rect::from_min_max(pos2(band.left() + 26.0, band.top()), pos2(band.right() - 90.0, band.bottom()));
     widgets::paint_text(ui, name, &super::devices::chip_label(session), fonts::ui(13.0, Weight::SemiBold), p.text, Align::Min);
-    let right = Rect::from_min_max(pos2(band.right() - 90.0, band.top()), pos2(band.right() - 12.0, band.bottom()));
+    let right = Rect::from_min_max(pos2(band.right() - 120.0, band.top()), pos2(band.right() - 38.0, band.bottom()));
     let (label, color) = if down {
         let (_, _, label, _) = super::nomor::describe(p, &session.status);
         (label, p.red)
@@ -494,6 +509,13 @@ fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count
         (format!("{count} chat"), p.muted)
     };
     widgets::paint_text(ui, right, &label, fonts::ui(12.0, Weight::Medium), color, Align::Max);
+    let button = Rect::from_center_size(pos2(band.right() - 20.0, band.center().y), vec2(24.0, 24.0));
+    let response = ui.interact(button, ui.scope_id().with(("open_window", &session.id)), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(button, theme::R_SM, p.selected);
+    }
+    icons::paint(ui, button, "arrow-up-right", 14.0, if response.hovered() { p.text } else { p.muted });
+    response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Buka di jendela baru").clicked()
 }
 
 /// "Percakapan ini terikat ke CS Utama…" above the messages, with several numbers.
@@ -1526,7 +1548,7 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
     let mut commands = Vec::new();
     let several = sessions.len() > 1;
     let combined = state.inbox_scope.is_none() && several;
-    Panel::top("m_inbox_head")
+    Panel::top(panel_id(state, "m_inbox_head"))
         .resizable(false)
         .show_separator_line(false)
         .frame(Frame::NONE.fill(p.bg).inner_margin(Margin { left: PAD as i8, right: PAD as i8, top: 12, bottom: 14 }))
@@ -1619,7 +1641,11 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                     continue;
                 }
                 match line {
-                    Line::Header(s, count) => section_header(ui, &p, rect.shrink2(vec2(PAD - 8.0, 0.0)), s, *count),
+                    Line::Header(s, count) => {
+                        if section_header(ui, &p, rect.shrink2(vec2(PAD - 8.0, 0.0)), s, *count) {
+                            state.open_window_requested = Some(s.id.clone());
+                        }
+                    }
                     Line::Chat(s, chat) => {
                         if !avatars.contains_key(&chat.jid) && state.avatar_asked.insert(chat.jid.clone()) {
                             commands.push(Command::Avatar { id: s.id.clone(), jid: chat.jid.clone() });
@@ -1715,7 +1741,7 @@ fn compact_chat(
     let book = &session.book;
     let title = super::chat_title(book, chat);
     let typing_now = typing_label(state, &session.id, book, chat);
-    Panel::top("m_chat_header")
+    Panel::top(panel_id(state, "m_chat_header"))
         .exact_size(64.0)
         .resizable(false)
         .show_separator_line(false)
@@ -1770,7 +1796,7 @@ fn compact_chat(
                 },
             );
         });
-    Panel::bottom("m_composer")
+    Panel::bottom(panel_id(state, "m_composer"))
         .resizable(false)
         .show_separator_line(false)
         .frame(Frame::NONE.fill(p.panel).inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 10 }))
