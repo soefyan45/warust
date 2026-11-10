@@ -4,6 +4,7 @@
 mod compact;
 mod emoji;
 mod fonts;
+mod forward;
 mod icons;
 mod markup;
 mod pdf;
@@ -35,6 +36,20 @@ pub enum Screen {
     More,
 }
 
+/// The message the composer is replying to (Balas), for one chat.
+pub struct ReplyTarget {
+    /// Number (session) the message belongs to; the same chat JID can exist under two numbers.
+    pub session: String,
+    /// JID of the chat; the reply is dropped when another chat opens.
+    pub chat: String,
+    /// Id of the quoted message.
+    pub id: String,
+    /// "Anda" or the sender's name.
+    pub author: String,
+    /// Start of its text, for the bar above the composer.
+    pub snippet: String,
+}
+
 /// UI state that survives between frames.
 #[derive(Default)]
 pub struct State {
@@ -58,10 +73,14 @@ pub struct State {
     /// already asked for this run.
     pub typing_now: std::sync::Arc<std::collections::HashMap<String, backend::Typing>>,
     pub presence_watched: std::collections::HashSet<(String, String)>,
+    /// Message the next text goes out as a reply to.
+    pub reply: Option<ReplyTarget>,
     /// File waiting in the composer, sent with the text as its caption.
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
     pub pdf_view: Option<pdf::Viewer>,
+    /// "Teruskan ke…" dialog for a message of the open chat.
+    pub forward: Option<forward::Dialog>,
     /// The file dialog running on its own thread; `None` inside when cancelled.
     pub picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
     /// Result of the last CSV export, shown for a few seconds.
@@ -82,6 +101,10 @@ pub struct State {
     pub qr: Option<qr::Qr>,
     /// Session waiting for the user to confirm its removal.
     pub confirm_remove: Option<String>,
+    /// "Ganti nama" dialog: the number and the name being typed.
+    pub rename: Option<(String, String)>,
+    /// "Tautkan ulang" waiting for a yes: it deletes the number's keys.
+    pub confirm_relink: Option<String>,
     /// The saved settings, for screens that show them (webhook per number).
     pub settings: std::sync::Arc<backend::Settings>,
     /// Settings being edited on the Pengaturan and Webhook & API screens.
@@ -90,6 +113,14 @@ pub struct State {
     /// and whether "every number" is split into one section per number.
     pub inbox_scope: Option<String>,
     pub inbox_grouped: bool,
+    /// The number this state belongs to when it is a number's own window.
+    pub window: Option<String>,
+    /// A number to open in a window of its own.
+    pub open_window_requested: Option<String>,
+    /// "Pisah per nomor": numbers whose section is folded.
+    pub folded: std::collections::HashSet<String>,
+    /// The chat list scrolls to the open chat once (it was opened elsewhere).
+    pub reveal_chat: bool,
     /// "Tautkan nomor" was clicked in the Inbox's device panel.
     pub add_number_requested: bool,
     /// Ringkasan "Pesan terbaru": 0 = belum dibalas, 1 = semua.
@@ -117,6 +148,18 @@ pub struct State {
     pub status_paused: bool,
     /// A screen asked to open this chat (session id, JID) in the Inbox.
     pub open_chat_requested: Option<(String, String)>,
+    /// Unread messages of the chat that was just opened, captured before `Seen` clears them.
+    pub unread_anchor: Option<UnreadAnchor>,
+}
+
+/// Where the unread messages of an opened chat start; `pending` is the
+/// one-shot "scroll to the divider" flag.
+#[derive(Clone, Debug)]
+pub struct UnreadAnchor {
+    pub jid: String,
+    pub count: usize,
+    pub first_id: String,
+    pub pending: bool,
 }
 
 pub struct App {
@@ -138,6 +181,34 @@ pub struct App {
     pairing_id: Option<String>,
     /// The chat last reported to the notifier as on screen.
     viewing: Option<(String, String)>,
+    /// The unread count last shown on the taskbar icon and the title.
+    shown_unread: Option<u32>,
+    /// Numbers open in windows of their own (issue #28).
+    windows: Vec<NumberWindow>,
+}
+
+/// One number's inbox in its own OS window, with its own chat, composer and
+/// scroll positions. It shares the connection with the main window.
+struct NumberWindow {
+    id: String,
+    state: State,
+}
+
+impl NumberWindow {
+    fn new(id: String) -> Self {
+        let state = State {
+            inbox_scope: Some(id.clone()),
+            inbox_session: Some(id.clone()),
+            window: Some(id.clone()),
+            contact_panel: true,
+            ..State::default()
+        };
+        Self { id, state }
+    }
+
+    fn viewport(&self) -> egui::ViewportId {
+        egui::ViewportId::from_hash_of(("number_window", &self.id))
+    }
 }
 
 impl App {
@@ -181,6 +252,8 @@ impl App {
             // Dev aid: WARUST_PAIR=<session id> opens its pairing screen.
             pairing_id: std::env::var("WARUST_PAIR").ok(),
             viewing: None,
+            windows: Vec::new(),
+            shown_unread: None,
             state: State {
                 contact_panel: true,
                 // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
@@ -470,17 +543,73 @@ impl App {
         self.screen = Screen::Nomor;
     }
 
-    fn confirm_remove(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.state.confirm_remove.clone() else {
-            return;
-        };
-        let Some(session) = self.sessions.iter().find(|s| s.id == id).cloned() else {
-            self.state.confirm_remove = None;
+    /// Opens a number's window, or brings it up when it is already open.
+    fn open_window(&mut self, ctx: &egui::Context, id: String) {
+        if let Some(open) = self.windows.iter().find(|w| w.id == id) {
+            ctx.send_viewport_cmd_to(open.viewport(), egui::ViewportCommand::Minimized(false));
+            ctx.send_viewport_cmd_to(open.viewport(), egui::ViewportCommand::Focus);
+        } else if self.sessions.iter().any(|s| s.id == id) {
+            self.windows.push(NumberWindow::new(id));
+        }
+    }
+
+    /// Draws the numbers' windows; returns the open chat of the one in focus.
+    fn number_windows(&mut self, ctx: &egui::Context) -> Option<(String, String)> {
+        let mut closed: Vec<String> = Vec::new();
+        let mut focused_chat = None;
+        for w in &mut self.windows {
+            let Some(session) = self.sessions.iter().find(|s| s.id == w.id) else {
+                closed.push(w.id.clone());
+                continue;
+            };
+            w.state.settings = self.settings.clone();
+            let builder = egui::ViewportBuilder::default()
+                .with_title(format!("{} · warust", session.name))
+                .with_app_id("warust")
+                .with_inner_size([1000.0, 720.0])
+                .with_min_inner_size([380.0, 480.0]);
+            let one = std::slice::from_ref(session);
+            let mut commands = Vec::new();
+            ctx.show_viewport_immediate(w.viewport(), builder, |ui, _| {
+                if ui.input(|i| i.viewport().close_requested()) {
+                    closed.push(w.id.clone());
+                }
+                let p = theme::palette(ui.ctx());
+                let phone = compact::is_compact(ui.ctx());
+                egui::CentralPanel::default().frame(Frame::NONE.fill(p.bg)).show(ui, |ui| {
+                    commands = if phone {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        screens::inbox::compact(ui, &mut w.state, one, &self.avatars, &self.downloads, self.settings.auto_stickers)
+                    } else {
+                        screens::inbox::show(ui, &mut w.state, one, &self.avatars, &self.downloads, self.settings.auto_stickers)
+                    };
+                });
+                pdf::show(ui.ctx(), &mut w.state.pdf_view);
+                commands.extend(forward::show(ui.ctx(), &mut w.state.forward, &self.sessions));
+                let open = w.state.inbox_session.clone().zip(w.state.chat_selected.clone());
+                commands.extend(screens::inbox::typing_signal(ui.ctx(), &mut w.state, open.clone()));
+                if ui.input(|i| i.viewport().focused).unwrap_or(false) {
+                    focused_chat = open;
+                }
+            });
+            for command in commands {
+                self.backend.send(command);
+            }
+        }
+        self.windows.retain(|w| !closed.contains(&w.id));
+        focused_chat
+    }
+
+    /// "Ganti nama": a new name for a number, used everywhere it shows.
+    fn rename_dialog(&mut self, ctx: &egui::Context) {
+        let Some((id, mut draft)) = self.state.rename.clone() else {
             return;
         };
         let p = theme::palette(ctx);
+        let checked = backend::clean_name(&draft);
         let mut close = false;
-        egui::Modal::new(egui::Id::unique("confirm_remove"))
+        let mut save = false;
+        let modal = egui::Modal::new(egui::Id::unique("rename_number"))
             .frame(
                 Frame::NONE
                     .fill(p.panel)
@@ -491,36 +620,147 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(380.0);
                 ui.spacing_mut().item_spacing.y = 12.0;
-                ui.label(rich(&format!("Hapus {}?", session.name), 16.0, Weight::SemiBold, p.text));
+                ui.label(rich("Ganti nama nomor", 16.0, Weight::SemiBold, p.text));
                 ui.add(
                     egui::Label::new(rich(
-                        "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus. Tidak bisa dibatalkan; untuk memakai nomor ini lagi harus pairing ulang.",
+                        "Dipakai di daftar Nomor, Inbox, notifikasi, Ringkasan dan Log. Nama perangkat yang terlihat di HP tidak berubah.",
                         13.0,
                         Weight::Regular,
                         p.text_2,
                     ))
                     .wrap(),
                 );
-                ui.add_space(4.0);
+                let field = ui.add(
+                    egui::TextEdit::singleline(&mut draft)
+                        .desired_width(f32::INFINITY)
+                        .char_limit(backend::NAME_MAX + 10)
+                        .hint_text("mis. CS Utama"),
+                );
+                if !field.has_focus() && !field.lost_focus() {
+                    field.request_focus();
+                }
+                if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    save = true;
+                }
+                if let Err(why) = &checked {
+                    ui.label(rich(why, 12.0, Weight::Regular, p.red_text));
+                }
                 widgets::row(
                     ui,
                     32.0,
                     |_| {},
                     |ui| {
-                        if widgets::button(ui, Some("x"), "Hapus", Kind::Primary).clicked() {
-                            self.backend.send(Command::Remove { id: id.clone() });
-                            close = true;
-                        }
+                        let ok = ui.add_enabled_ui(checked.is_ok(), |ui| widgets::button(ui, Some("check"), "Simpan", Kind::Primary));
+                        save |= ok.inner.clicked();
                         if widgets::button(ui, None, "Batal", Kind::Secondary).clicked() {
                             close = true;
                         }
                     },
                 );
             });
-        if close {
+        if modal.should_close() {
+            close = true;
+        }
+        if save {
+            if let Ok(name) = backend::clean_name(&draft) {
+                self.backend.send(Command::Rename { id: id.clone(), name });
+                close = true;
+            }
+        }
+        self.state.rename = if close { None } else { Some((id, draft)) };
+    }
+
+    fn relink(&mut self, id: String) {
+        self.backend.send(Command::Relink { id: id.clone() });
+        self.open_pairing(id);
+    }
+
+    fn confirm_remove(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.state.confirm_remove.clone() else {
+            return;
+        };
+        let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
+            self.state.confirm_remove = None;
+            return;
+        };
+        let answer = confirm(
+            ctx,
+            "confirm_remove",
+            &format!("Hapus {}?", session.name),
+            "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus. Tidak bisa dibatalkan; untuk memakai nomor ini lagi harus pairing ulang.",
+            "x",
+            "Hapus",
+        );
+        if answer == Some(true) {
+            self.backend.send(Command::Remove { id });
+        }
+        if answer.is_some() {
             self.state.confirm_remove = None;
         }
     }
+
+    fn confirm_relink(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.state.confirm_relink.clone() else {
+            return;
+        };
+        let Some(session) = self.sessions.iter().find(|s| s.id == id) else {
+            self.state.confirm_relink = None;
+            return;
+        };
+        let answer = confirm(
+            ctx,
+            "confirm_relink",
+            &format!("Tautkan ulang {}?", session.name),
+            "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus, lalu QR baru ditampilkan. Nomor ini terputus sampai dipindai lagi dari HP. Chat tetap tersimpan.",
+            "rotate-cw",
+            "Tautkan ulang",
+        );
+        if answer == Some(true) {
+            self.relink(id);
+        }
+        if answer.is_some() {
+            self.state.confirm_relink = None;
+        }
+    }
+}
+
+/// A yes/no dialog for a step that cannot be undone: `Some(true)` when
+/// confirmed, `Some(false)` when cancelled, `None` while it is open.
+fn confirm(ctx: &egui::Context, salt: &str, title: &str, text: &str, icon: &str, label: &str) -> Option<bool> {
+    let p = theme::palette(ctx);
+    let mut answer = None;
+    let modal = egui::Modal::new(egui::Id::unique(salt))
+        .frame(
+            Frame::NONE
+                .fill(p.panel)
+                .stroke(Stroke::new(1.0, p.border_strong))
+                .corner_radius(theme::R_LG)
+                .inner_margin(Margin::same(24)),
+        )
+        .show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.spacing_mut().item_spacing.y = 12.0;
+            ui.label(rich(title, 16.0, Weight::SemiBold, p.text));
+            ui.add(egui::Label::new(rich(text, 13.0, Weight::Regular, p.text_2)).wrap());
+            ui.add_space(4.0);
+            widgets::row(
+                ui,
+                32.0,
+                |_| {},
+                |ui| {
+                    if widgets::button(ui, Some(icon), label, Kind::Primary).clicked() {
+                        answer = Some(true);
+                    }
+                    if widgets::button(ui, None, "Batal", Kind::Secondary).clicked() {
+                        answer = Some(false);
+                    }
+                },
+            );
+        });
+    if answer.is_none() && modal.should_close() {
+        answer = Some(false);
+    }
+    answer
 }
 
 /// "API berjalan v0.1.0" in a white pill (Forest top bar).
@@ -758,8 +998,8 @@ impl eframe::App for App {
             None => {}
         }
         if let Some((session, jid)) = self.state.open_chat_requested.take() {
-            self.state.inbox_session = Some(session.clone());
-            self.state.chat_selected = Some(jid.clone());
+            let chat = self.sessions.iter().find(|s| s.id == session).and_then(|s| s.book.chats.iter().find(|c| c.jid == jid));
+            screens::inbox::open_chat(&mut self.state, &session, &jid, chat);
             self.state.chat_tab = screens::inbox::TAB_ALL;
             self.backend.send(Command::Seen { id: session, chat: jid });
             self.screen = Screen::Inbox;
@@ -770,8 +1010,8 @@ impl eframe::App for App {
         match summary_action {
             Some(screens::ringkasan::Action::Nomor(a)) => action = Some(a),
             Some(screens::ringkasan::Action::OpenChat { session, jid }) => {
-                self.state.inbox_session = Some(session.clone());
-                self.state.chat_selected = Some(jid.clone());
+                let chat = self.sessions.iter().find(|s| s.id == session).and_then(|s| s.book.chats.iter().find(|c| c.jid == jid));
+                screens::inbox::open_chat(&mut self.state, &session, &jid, chat);
                 self.state.chat_tab = screens::inbox::TAB_ALL;
                 self.backend.send(Command::Seen { id: session, chat: jid });
                 self.screen = Screen::Inbox;
@@ -784,11 +1024,20 @@ impl eframe::App for App {
             Some(screens::nomor::Action::Add) => self.add_number(),
             Some(screens::nomor::Action::Open(id)) => self.open_pairing(id),
             Some(screens::nomor::Action::Relink(id)) => {
-                self.backend.send(Command::Relink { id: id.clone() });
-                self.open_pairing(id);
+                // A linked number loses its keys, so that asks first.
+                if self.sessions.iter().any(|s| s.id == id && s.phone.is_some()) {
+                    self.state.confirm_relink = Some(id);
+                } else {
+                    self.relink(id);
+                }
             }
             Some(screens::nomor::Action::Logout(id)) => self.backend.send(Command::Logout { id }),
             Some(screens::nomor::Action::Remove(id)) => self.state.confirm_remove = Some(id),
+            Some(screens::nomor::Action::Window(id)) => self.state.open_window_requested = Some(id),
+            Some(screens::nomor::Action::Rename(id)) => {
+                let name = self.sessions.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_default();
+                self.state.rename = Some((id, name));
+            }
             None => {}
         }
         if let (Some(id), Some(a)) = (self.pairing_id.clone(), pairing_action) {
@@ -800,6 +1049,8 @@ impl eframe::App for App {
             }
         }
         self.confirm_remove(ui.ctx());
+        self.rename_dialog(ui.ctx());
+        self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
         // "Sedang mengetik" for the chat on screen while its reply is typed.
         let open_chat = if self.screen == Screen::Inbox {
@@ -810,12 +1061,26 @@ impl eframe::App for App {
         for command in screens::inbox::typing_signal(ui.ctx(), &mut self.state, open_chat) {
             self.backend.send(command);
         }
+        for command in forward::show(ui.ctx(), &mut self.state.forward, &self.sessions) {
+            self.backend.send(command);
+        }
+        if let Some(id) = self.state.open_window_requested.take() {
+            self.open_window(ui.ctx(), id);
+        }
+        let in_window = self.number_windows(ui.ctx());
+        // Unread messages on the taskbar/Dock icon and in the window title.
+        let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).map(|c| c.unread).sum();
+        if self.shown_unread != Some(unread) {
+            crate::platform::set_unread_badge(unread);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(crate::platform::window_title(unread)));
+            self.shown_unread = Some(unread);
+        }
         // The open chat in a focused window gets no notification.
         let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);
         let viewing = if focused && self.screen == Screen::Inbox {
             self.state.inbox_session.clone().zip(self.state.chat_selected.clone())
         } else {
-            None
+            in_window
         };
         if viewing != self.viewing {
             self.backend.set_viewing(viewing.clone());
