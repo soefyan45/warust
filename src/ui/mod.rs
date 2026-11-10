@@ -9,6 +9,7 @@ mod icons;
 mod mention;
 mod markup;
 mod pdf;
+pub mod privacy;
 mod qr;
 mod screens;
 mod stickers;
@@ -217,6 +218,8 @@ pub struct UnreadAnchor {
 }
 
 pub struct App {
+    /// Anti-peek mode's auto-lock (#57).
+    lock: privacy::Lock,
     screen: Screen,
     search: String,
     state: State,
@@ -306,6 +309,7 @@ impl App {
             // Dev aid: WARUST_PAIR=<session id> opens its pairing screen.
             pairing_id: std::env::var("WARUST_PAIR").ok(),
             viewing: None,
+            lock: privacy::Lock::default(),
             windows: Vec::new(),
             shown_unread: None,
             state: State {
@@ -473,6 +477,7 @@ impl App {
                         if toggle.clicked() {
                             self.toggle_theme(dark);
                         }
+                        self.privacy_pill(ui);
                         self.topbar_actions(ui);
                     });
                 });
@@ -521,6 +526,7 @@ impl App {
                             self.screen = Screen::Settings;
                         }
                         api_pill(ui, &p, &self.api);
+                        self.privacy_pill(ui);
                         self.topbar_actions(ui);
                     });
                 });
@@ -567,6 +573,66 @@ impl App {
 
 impl App {
     /// Saved, so the next start opens in the same theme.
+    /// Changes the anti-peek options and saves them at once.
+    fn set_privacy(&mut self, change: impl FnOnce(&mut backend::settings::Privacy)) {
+        let mut settings = (*self.settings).clone();
+        change(&mut settings.privacy);
+        if let Some(draft) = self.state.settings_form.draft.as_mut() {
+            draft.privacy = settings.privacy.clone();
+        }
+        privacy::set(&settings.privacy);
+        self.settings = std::sync::Arc::new(settings.clone());
+        self.backend.send(Command::SaveSettings(settings));
+    }
+
+    /// "Anti-peek" in the top bar (Pego `v5/Privasi · Mode anti-intip`): a pill
+    /// that is forest while on, opening the mode's options.
+    fn privacy_pill(&mut self, ui: &mut Ui) {
+        let p = theme::palette(ui.ctx());
+        let on = self.settings.privacy.enabled;
+        let label = if on { tr("Anti-peek on", "Anti-intip aktif") } else { tr("Anti-peek", "Anti-intip") };
+        let (fill, fg, stroke) = if on { (p.primary, p.on_primary, Stroke::NONE) } else { (p.panel, p.text, Stroke::new(1.0, p.border)) };
+        let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(13.0, Weight::Medium), fg);
+        let size = egui::vec2(galley.size().x + 58.0, 36.0);
+        let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
+        let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+        ui.painter().rect(rect, 18.0, if on { fill } else { fill.lerp_to_gamma(p.raised, hover) }, stroke, egui::StrokeKind::Inside);
+        icons::paint(ui, egui::Rect::from_center_size(egui::pos2(rect.left() + 20.0, rect.center().y), egui::vec2(15.0, 15.0)), "eye-off", 15.0, fg);
+        ui.painter().galley(egui::pos2(rect.left() + 34.0, rect.center().y - galley.size().y / 2.0), galley, fg);
+        icons::paint(ui, egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(12.0, 12.0)), "chevron-down", 12.0, fg);
+        let response = response.on_hover_text(tr("Anti-peek mode (Ctrl+Shift+P)", "Mode anti-intip (Ctrl+Shift+P)")).on_hover_cursor(CursorIcon::PointingHand);
+        let mut privacy = self.settings.privacy.clone();
+        egui::Popup::menu(&response).show(|ui| {
+            ui.set_width(330.0);
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.label(rich(tr("Anti-peek mode", "Mode anti-intip"), 14.0, Weight::SemiBold, p.text));
+            ui.add(egui::Label::new(rich(
+                tr("Keeps customer chats from people behind you when you work in busy places.", "Lindungi chat pelanggan dari orang di belakang Anda saat bekerja di tempat ramai."),
+                12.0,
+                Weight::Regular,
+                p.muted,
+            )).wrap());
+            widgets::toggle(ui, &mut privacy.enabled, tr("On (Ctrl+Shift+P)", "Aktif (Ctrl+Shift+P)"));
+            ui.separator();
+            widgets::toggle(ui, &mut privacy.blur_chat, tr("Blur chat content: clear while the cursor is on a message", "Buramkan isi chat: terbaca saat kursor di atas pesan"));
+            widgets::toggle(ui, &mut privacy.blur_previews, tr("Blur chat list previews and notification text", "Buramkan pratinjau daftar chat dan isi notifikasi"));
+            widgets::toggle(ui, &mut privacy.hide_names, tr("Hide names and numbers, for presentations and recordings", "Sembunyikan nama & nomor, untuk presentasi atau rekaman"));
+            ui.horizontal(|ui| {
+                ui.label(rich(tr("Lock when idle", "Kunci otomatis saat ditinggal"), 13.0, Weight::Regular, p.text));
+                let options: [(u32, &str); 5] = [(0, tr("Never", "Tidak")), (1, "1 min"), (2, "2 min"), (5, "5 min"), (10, "10 min")];
+                let shown = options.iter().find(|(m, _)| *m == privacy.lock_minutes).map(|(_, l)| *l).unwrap_or("2 min");
+                egui::ComboBox::from_id_salt("privacy_lock").selected_text(shown).show_ui(ui, |ui| {
+                    for (minutes, label) in options {
+                        ui.selectable_value(&mut privacy.lock_minutes, minutes, label);
+                    }
+                });
+            });
+        });
+        if privacy != self.settings.privacy {
+            self.set_privacy(|p| *p = privacy);
+        }
+    }
+
     fn toggle_theme(&mut self, dark: bool) {
         let theme = if dark { "light" } else { "dark" };
         let mut settings = (*self.settings).clone();
@@ -620,6 +686,7 @@ impl App {
     fn number_windows(&mut self, ctx: &egui::Context) -> Option<(String, String)> {
         let mut closed: Vec<String> = Vec::new();
         let mut focused_chat = None;
+        let locked = self.lock.locked;
         for w in &mut self.windows {
             let Some(session) = self.sessions.iter().find(|s| s.id == w.id) else {
                 closed.push(w.id.clone());
@@ -648,6 +715,9 @@ impl App {
                     };
                 });
                 pdf::show(ui.ctx(), &mut w.state.pdf_view);
+                if locked {
+                    lock_cover(ui.ctx());
+                }
                 commands.extend(forward::show(ui.ctx(), &mut w.state.forward, &self.sessions));
                 let open = w.state.inbox_session.clone().zip(w.state.chat_selected.clone());
                 let shown = open.as_ref().map(|(session, chat)| (session.as_str(), chat.as_str()));
@@ -837,6 +907,26 @@ fn confirm(ctx: &egui::Context, salt: &str, title: &str, text: &str, icon: &str,
     answer
 }
 
+/// The anti-peek lock: the whole window frosted, with how to come back.
+fn lock_cover(ctx: &egui::Context) {
+    let p = theme::palette(ctx);
+    let screen = ctx.content_rect();
+    egui::Area::new(egui::Id::unique("privacy_lock"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(screen.size(), egui::Sense::click());
+            ui.painter().rect_filled(rect, 0.0, p.bg);
+            let card = egui::Rect::from_center_size(rect.center(), egui::vec2(320.0, 150.0));
+            ui.painter().rect(card, theme::R_LG, p.panel, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
+            icons::paint(ui, egui::Rect::from_center_size(card.center() - egui::vec2(0.0, 36.0), egui::vec2(26.0, 26.0)), "lock", 26.0, p.primary);
+            let title = egui::Rect::from_center_size(card.center() + egui::vec2(0.0, 6.0), egui::vec2(300.0, 22.0));
+            widgets::paint_text(ui, title, tr("warust is locked", "warust terkunci"), fonts::ui(16.0, Weight::SemiBold), p.text, egui::Align::Center);
+            let hint = egui::Rect::from_center_size(card.center() + egui::vec2(0.0, 34.0), egui::vec2(300.0, 18.0));
+            widgets::paint_text(ui, hint, tr("Click or press any key to continue", "Klik atau tekan tombol apa saja untuk lanjut"), fonts::ui(12.5, Weight::Regular), p.muted, egui::Align::Center);
+        });
+}
+
 /// "API berjalan v0.1.0" in a white pill (Forest top bar).
 fn api_pill(ui: &mut Ui, p: &theme::Palette, api: &backend::ApiState) {
     let (color, label) = match api {
@@ -926,6 +1016,10 @@ impl eframe::App for App {
         self.webhooks = snapshot.webhooks;
         self.api = snapshot.api;
         crate::i18n::set(&self.settings.language);
+        privacy::set(&self.settings.privacy);
+        if ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::P))) {
+            self.set_privacy(|p| p.enabled = !p.enabled);
+        }
         widgets::set_wallpaper(&self.settings.wallpaper, &self.settings.wallpaper_file, self.settings.wallpaper_dim);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
@@ -1174,6 +1268,13 @@ impl eframe::App for App {
             self.viewing = viewing;
         }
         // Last, so the resize edges sit above the panels.
+        // Anti-peek auto-lock: covers everything until a click or a key.
+        if let Some(wake) = self.lock.update(ui.ctx(), &self.settings.privacy) {
+            ui.ctx().request_repaint_after(wake);
+        }
+        if self.lock.locked {
+            lock_cover(ui.ctx());
+        }
         window::edges(ui);
     }
 }
