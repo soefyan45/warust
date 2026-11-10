@@ -142,6 +142,10 @@ curl -X POST http://127.0.0.1:8787/sessions/<id>/messages/text \
 butuh nomor yang terhubung (`409 not_connected`) dan chat yang sudah ada (`404 chat_not_found`).
 Centang biru hanya terkirim bila **Kirim tanda dibaca** di Pengaturan menyala (bawaan: nyala).
 
+Untuk membalas (kutipan) sebuah pesan, tambahkan `"reply_to": "<id pesan>"` di body
+`messages/text`. Id-nya dari `message.received`, `GET /sessions/{id}/chats`, atau id kembalian kirim
+sebelumnya; pesannya harus ada di chat `to`, kalau tidak jawabannya `404 reply_not_found`.
+
 Pesan ke nomor yang belum pernah chat dengan nomormu ditolak (`403 cold_contact`) kecuali request
 menyertakan `"allow_cold": true`. Ini sengaja, karena pesan ke kontak dingin adalah penyebab umum
 nomor diblokir.

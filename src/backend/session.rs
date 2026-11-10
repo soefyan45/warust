@@ -45,6 +45,31 @@ pub enum Body {
     /// A comment or reaction on a contact's status, quoting it (sent to the
     /// poster's chat, as WhatsApp does).
     StatusReply { text: String, status: store::StatusPost },
+    /// A text that quotes an earlier message of the same chat.
+    Reply { text: String, quote: ReplyQuote },
+}
+
+/// The message a `Body::Reply` quotes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplyQuote {
+    /// Id of the quoted message.
+    pub id: String,
+    /// Who wrote it, as WhatsApp sent it; `None` for our own message.
+    pub participant: Option<String>,
+    /// Its text or caption, for the quote box.
+    pub text: String,
+}
+
+/// Builds the reply body for `text` quoting message `reply_to` (a real or
+/// local id) of `chat`; `None` when that chat has no such message.
+pub fn reply_body(book: &store::Book, chat: &str, text: String, reply_to: &str) -> Option<Body> {
+    let real = book.aliases.get(reply_to).map(String::as_str).unwrap_or(reply_to);
+    let quoted = book.chats.iter().find(|c| c.jid == chat)?.messages.iter().find(|m| m.id == real || m.id == reply_to)?;
+    Some(Body::Reply { text, quote: reply_quote(quoted) })
+}
+
+fn reply_quote(m: &store::ChatMsg) -> ReplyQuote {
+    ReplyQuote { id: m.id.clone(), participant: (!m.from_me).then(|| m.sender.clone()), text: m.text.clone() }
 }
 
 pub struct Running {
@@ -213,10 +238,10 @@ impl Running {
             Body::Text(text) => text.clone(),
             Body::File { path, caption } => media::label(path, caption),
             Body::Sticker(_) => "[Stiker]".to_owned(),
-            Body::StatusReply { text, .. } => text.clone(),
+            Body::StatusReply { text, .. } | Body::Reply { text, .. } => text.clone(),
         };
         let media = match &body {
-            Body::Text(_) | Body::StatusReply { .. } => None,
+            Body::Text(_) | Body::StatusReply { .. } | Body::Reply { .. } => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
         };
@@ -225,6 +250,9 @@ impl Running {
         if let Body::StatusReply { status, .. } = &body {
             let text = if status.media.is_some() && status.caption().is_empty() { status.text.clone() } else { status.caption() };
             record = store::with_quote(record, &store::Quote { id: status.id.clone(), text, status: true });
+        }
+        if let Body::Reply { quote, .. } = &body {
+            record = store::with_quote(record, &store::Quote { id: quote.id.clone(), text: quote.text.clone(), status: false });
         }
         state.record(id, store, &[record]);
         state.update(id, |v| v.queue += 1);
@@ -285,13 +313,18 @@ fn restore_queue(id: &str, queue: &UnboundedSender<Outgoing>, state: &Updater, s
     }
 }
 
-/// What a stored queued message sends: its text, file, sticker or status reply.
+/// What a stored queued message sends: its text, file, sticker, or a reply to a status or message.
 fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
     if let Some(quote) = m.quote.as_ref().filter(|q| q.status) {
         let status = book.statuses.iter().find(|s| s.id == quote.id)?.clone();
         return Some(Body::StatusReply { text: m.text.clone(), status });
     }
     let Some(media) = &m.media else {
+        if let Some(quote) = &m.quote {
+            // A reply: the quoted message must still be in the book (it gives the participant).
+            let quoted = book.chats.iter().flat_map(|c| &c.messages).find(|q| q.id == quote.id)?;
+            return Some(Body::Reply { text: m.text.clone(), quote: reply_quote(quoted) });
+        }
         return Some(Body::Text(m.text.clone()));
     };
     let path = media.file.clone().filter(|p| p.is_file())?;
@@ -834,6 +867,15 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
             let context = build_quote_context_with_info(status.id.clone(), &poster, &Jid::status_broadcast(), chat, &quoted_status(&status));
             Ok(wa::Message::text_with_context(text, context))
         }
+        Body::Reply { text, quote } => {
+            let participant = match &quote.participant {
+                Some(sender) => sender.parse::<Jid>().map_err(|e| format!("JID pengirim pesan tidak valid: {e:?}"))?,
+                None => client.pn().ok_or("Nomor belum tertaut")?,
+            };
+            // Same chat: no remote_jid, like a reply in WA Web.
+            let context = build_quote_context_with_info(quote.id, &participant, chat, chat, &wa::Message::text(quote.text));
+            Ok(wa::Message::text_with_context(text, context))
+        }
     }
 }
 
@@ -902,7 +944,7 @@ pub fn mask_phone(jid: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, mask_phone, queued_body};
+    use super::{Body, ReplyQuote, mask_phone, queued_body, reply_body};
     use crate::backend::store::{self, Delivery, Quote, Store};
 
     /// A stored queued message comes back as what it was: text, file with
@@ -932,6 +974,37 @@ mod tests {
         assert!(matches!(body("b"), Some(Body::File { path, caption }) if path == doc && caption == "tolong dicek"));
         assert!(body("c").is_none());
         assert!(matches!(body("d"), Some(Body::StatusReply { text, status }) if text == "👍" && status.id == "ST1"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reply keeps its quote through a restart; the participant is the
+    /// sender of the quoted message, or `None` for our own.
+    #[test]
+    fn queued_replies_rebuild_their_quote() {
+        let dir = std::env::temp_dir().join(format!("warust-reply-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let group = "120363000000000001@g.us";
+        let them = "628111000002@s.whatsapp.net";
+        let incoming = store::msg_record(group, "IN1", false, them, "kapan kirim?", 90, &Delivery::Received, false);
+        let own = store::msg_record(group, "OUT1", true, "", "besok", 95, &Delivery::Sent, false);
+        let reply = |id: &str, to: &str, text: &str| {
+            let record = store::msg_record(group, id, true, "", text, 100, &Delivery::Queued, false);
+            store::with_quote(record, &Quote { id: to.to_owned(), text: "x".to_owned(), status: false })
+        };
+        let records = [incoming, own, reply("r1", "IN1", "jam 5"), reply("r2", "OUT1", "ok"), reply("r3", "GONE", "?")];
+        let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, lines).unwrap();
+        let (_, book) = Store::open(&path);
+        let body = |id: &str| queued_body(&book, book.chats[0].messages.iter().find(|m| m.id == id).unwrap());
+        let quote = |id: &str, participant: Option<&str>, text: &str| ReplyQuote { id: id.to_owned(), participant: participant.map(str::to_owned), text: text.to_owned() };
+        assert!(matches!(body("r1"), Some(Body::Reply { text, quote: q }) if text == "jam 5" && q == quote("IN1", Some(them), "kapan kirim?")));
+        assert!(matches!(body("r2"), Some(Body::Reply { quote: q, .. }) if q == quote("OUT1", None, "besok")));
+        assert!(body("r3").is_none());
+        // The REST/UI path builds the same quote; an unknown id gives nothing.
+        assert!(matches!(reply_body(&book, group, "hai".to_owned(), "IN1"), Some(Body::Reply { quote: q, .. }) if q == quote("IN1", Some(them), "kapan kirim?")));
+        assert!(reply_body(&book, group, "hai".to_owned(), "NOPE").is_none());
+        assert!(reply_body(&book, "other@g.us", "hai".to_owned(), "IN1").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

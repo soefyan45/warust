@@ -35,6 +35,18 @@ pub enum Screen {
     More,
 }
 
+/// The message the composer is replying to (Balas), for one chat.
+pub struct ReplyTarget {
+    /// JID of the chat; the reply is dropped when another chat opens.
+    pub chat: String,
+    /// Id of the quoted message.
+    pub id: String,
+    /// "Anda" or the sender's name.
+    pub author: String,
+    /// Start of its text, for the bar above the composer.
+    pub snippet: String,
+}
+
 /// UI state that survives between frames.
 #[derive(Default)]
 pub struct State {
@@ -58,6 +70,8 @@ pub struct State {
     /// already asked for this run.
     pub typing_now: std::sync::Arc<std::collections::HashMap<String, backend::Typing>>,
     pub presence_watched: std::collections::HashSet<(String, String)>,
+    /// Message the next text goes out as a reply to.
+    pub reply: Option<ReplyTarget>,
     /// File waiting in the composer, sent with the text as its caption.
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.

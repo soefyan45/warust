@@ -18,7 +18,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use whatsapp_rust::serde_json::{Value, json};
 
-use super::session::Body;
+use super::session::{Body, reply_body};
 use super::{ApiState, Backend, Book, Command, SessionView, Shared, Status, Updater, media};
 
 #[derive(Clone)]
@@ -397,6 +397,8 @@ fn queued(local_id: &str, id: &str) -> Response {
 struct SendText {
     to: String,
     text: String,
+    /// Id of a message in the same chat to quote.
+    reply_to: Option<String>,
     #[serde(default)]
     allow_cold: bool,
 }
@@ -407,8 +409,13 @@ async fn send_text(_: Authed, State(context): State<Context>, Path(id): Path<Str
         return Err(error(StatusCode::BAD_REQUEST, "invalid_text", "`text` kosong atau terlalu panjang"));
     }
     let chat = check_target(&view, &to_jid(&body.to)?, body.allow_cold)?;
+    let message = match body.reply_to.as_deref().filter(|r| !r.is_empty()) {
+        None => Body::Text(body.text),
+        Some(reply_to) => reply_body(&view.book, &chat, body.text, reply_to)
+            .ok_or_else(|| error(StatusCode::NOT_FOUND, "reply_not_found", "`reply_to` tidak ditemukan di chat ini"))?,
+    };
     let local_id = new_local_id();
-    send(&context, Command::Enqueue { id: id.clone(), chat, body: Body::Text(body.text), local_id: local_id.clone() })?;
+    send(&context, Command::Enqueue { id: id.clone(), chat, body: message, local_id: local_id.clone() })?;
     Ok(queued(&local_id, &id))
 }
 

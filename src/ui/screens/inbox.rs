@@ -3,7 +3,7 @@
 //! paced queue) and the contact panel.
 
 use egui::{
-    Align, CentralPanel, Color32, CursorIcon, Frame, Key, KeyboardShortcut, Margin, Modifiers, Panel, Rect, ScrollArea,
+    Align, CentralPanel, Color32, CursorIcon, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, Panel, Rect, ScrollArea,
     Sense, Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
@@ -19,7 +19,7 @@ type Downloads = HashMap<String, Option<String>>;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG, R_MD};
 use crate::ui::widgets::{self, Kind, rich, rich_mono};
-use crate::ui::{State, emoji, icons, markup, pdf, stickers, time};
+use crate::ui::{ReplyTarget, State, emoji, icons, markup, pdf, stickers, time};
 
 const ROW: f32 = 60.0;
 /// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai", "Diarsipkan".
@@ -168,8 +168,9 @@ pub fn show(
         .show(ui, |ui| {
             let to = super::chat_title(&book, chat);
             let (id, jid) = (session.id.clone(), chat.jid.clone());
+            reply_bar(ui, &p, state, &jid);
             match composer(ui, &p, state, &to, session, &book, several, false) {
-                Some(Outgoing::Text(text)) => commands.push(Command::Send { id, chat: jid, text }),
+                Some(Outgoing::Text(text)) => commands.push(text_command(state, id, jid, text)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
                 None => {}
@@ -930,6 +931,7 @@ fn paint_media(
 /// it inline in `messages` when it needs no backend, like `Copy`).
 enum MsgAction {
     Copy,
+    Reply,
 }
 
 /// What the user did on a message in the open chat.
@@ -942,18 +944,65 @@ enum MsgEvent {
 /// Turns a message event into commands or UI state; shared by the wide and
 /// compact layouts.
 fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, chat: &Chat, commands: &mut Vec<Command>) {
-    let _ = chat;
     match event {
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
         // Handled inline where the menu is shown.
         MsgEvent::Menu(MsgAction::Copy, _) => {}
+        MsgEvent::Menu(MsgAction::Reply, msg_id) => {
+            let Some(m) = chat.messages.iter().find(|m| m.id == msg_id) else { return };
+            let author = if m.from_me { "Anda".to_owned() } else { super::sender_label(&session.book, &m.sender) };
+            let snippet = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            state.reply = Some(ReplyTarget { chat: chat.jid.clone(), id: m.id.clone(), author, snippet });
+        }
+    }
+}
+
+/// The text to send: a quoted reply when "Balas" is active in this chat.
+fn text_command(state: &mut State, id: String, chat: String, text: String) -> Command {
+    match state.reply.take_if(|r| r.chat == chat) {
+        Some(reply) => Command::Reply { id, chat, text, reply_to: reply.id },
+        None => Command::Send { id, chat, text },
+    }
+}
+
+/// "Membalas <nama>: <cuplikan>" above the composer; x or Esc cancels. A reply
+/// started in another chat is dropped.
+fn reply_bar(ui: &mut Ui, p: &Palette, state: &mut State, chat: &str) {
+    if state.reply.as_ref().is_some_and(|r| r.chat != chat) {
+        state.reply = None;
+    }
+    let Some(reply) = &state.reply else { return };
+    let mut cancel = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+    let snippet: String = reply.snippet.chars().take(120).collect();
+    Frame::NONE
+        .fill(p.raised)
+        .corner_radius(R_MD)
+        .inner_margin(Margin { left: 10, right: 4, top: 4, bottom: 4 })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                icons::show(ui, "message-circle", 16.0, p.text_2);
+                let label = format!("Membalas {}: {snippet}", reply.author);
+                ui.add(egui::Label::new(rich(&label, 13.0, Weight::Regular, p.text_2)).truncate());
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    cancel |= widgets::icon_button(ui, "x", 24.0, false).on_hover_text("Batalkan balasan (Esc)").clicked();
+                });
+            });
+        });
+    ui.add_space(6.0);
+    if cancel {
+        state.reply = None;
     }
 }
 
 /// Right-click / long-press menu of a message bubble; returns the chosen action.
 fn message_menu(ui: &mut Ui, m: &ChatMsg) -> Option<MsgAction> {
     let mut action = None;
+    if ui.button("Balas").clicked() {
+        action = Some(MsgAction::Reply);
+    }
     // Media without a caption has nothing to copy.
     if !caption(m).is_empty() && ui.button("Salin").clicked() {
         action = Some(MsgAction::Copy);
@@ -1784,8 +1833,9 @@ fn compact_chat(
                 ui.add_space(8.0);
             }
             let (id, jid) = (session.id.clone(), chat.jid.clone());
+            reply_bar(ui, &p, state, &jid);
             match composer(ui, &p, state, &title, session, book, several, true) {
-                Some(Outgoing::Text(text)) => commands.push(Command::Send { id, chat: jid, text }),
+                Some(Outgoing::Text(text)) => commands.push(text_command(state, id, jid, text)),
                 Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
                 Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
                 None => {}

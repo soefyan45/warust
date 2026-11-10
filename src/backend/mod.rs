@@ -184,6 +184,8 @@ pub enum Command {
     Remove { id: String },
     /// Queue a text message. `chat` is a JID from the session's book.
     Send { id: String, chat: String, text: String },
+    /// Queue a text that quotes message `reply_to` of `chat`.
+    Reply { id: String, chat: String, text: String, reply_to: String },
     /// Queue a photo or document with an optional caption.
     SendFile { id: String, chat: String, path: PathBuf, caption: String },
     /// The user opened a chat: clear its unread count and, unless "Kirim
@@ -588,6 +590,13 @@ async fn run(
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::Text(text), &state, store),
                 _ => log::warn!("send: session {id} is not running"),
             },
+            Command::Reply { id, chat, text, reply_to } => {
+                let body = state.book(&id).and_then(|book| session::reply_body(&book, &chat, text, &reply_to));
+                match (running.get(&id), stores.get(&id), body) {
+                    (Some(r), Some(store), Some(body)) => r.enqueue(&id, chat, body, &state, store),
+                    _ => log::warn!("reply: session {id} is not running or the quoted message is gone"),
+                }
+            }
             Command::SendFile { id, chat, path, caption } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::File { path, caption }, &state, store),
                 _ => log::warn!("send file: session {id} is not running"),
