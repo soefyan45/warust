@@ -1,0 +1,47 @@
+[package]
+name = "warust"
+version = "0.1.0"
+edition = "2024"
+description = "Desktop WhatsApp gateway: many numbers in one inbox, a local REST API, signed webhooks and triggers"
+license = "MIT"
+repository = "https://github.com/soefyan45/warust"
+readme = "README.md"
+# `cargo run` starts the desktop app; the Phase 0 spike is `cargo run --bin spike`.
+default-run = "warust"
+
+[dependencies]
+# A pinned commit of the crmne fork of upstream main. crates.io 0.7.0 fails
+# pairing with 401 signature-mismatch; the fix is upstream #1440, not yet
+# released. Builds on stable without the `simd` feature. Back to crates.io once
+# a release includes #1440.
+whatsapp-rust = { git = "https://github.com/crmne/whatsapp-rust", rev = "94f7c1376f8f6a77c55d85570a260600ad27de0b", default-features = false, features = ["sqlite-storage", "sqlite-storage-bundled", "tokio-transport", "tokio-runtime", "ureq-client", "tokio-native", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time", "sync"] }
+log = "0.4"
+env_logger = "0.11"
+# Desktop UI. glow avoids the larger wgpu dependency.
+eframe = { version = "0.37", default-features = false, features = ["glow", "wayland", "x11", "default_fonts", "accesskit"] }
+# Same version eframe pulls in; named directly so the UI code can `use egui::…`.
+egui = "0.37"
+# Already in the tree through egui; color_fonts draws the colour bitmaps of the
+# bundled Noto Color Emoji (assets/fonts) instead of missing-glyph boxes.
+epaint = { version = "0.37", features = ["color_fonts"] }
+# Loaders: SVG for the embedded lucide icons, image for cached profile pictures.
+egui_extras = { version = "0.37", default-features = false, features = ["svg", "image"] }
+# Already in the tree through eframe (with png); jpeg decodes profile pictures
+# and encodes photos sent from the composer; webp (adds image-webp) reads and
+# writes stickers.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# Local REST API (127.0.0.1 only); only the parts in use.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
+serde = { version = "1", features = ["derive"] }
+# Already in the tree through whatsapp-rust: webhook delivery (ureq) and its
+# HMAC-SHA256 signature.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
+# Already in the tree through env_logger; webhook trigger conditions. Unicode
+# case folding so "abaikan huruf besar/kecil" also covers non-ASCII text.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-case", "unicode-perl"] }
+# Encodes the pairing QR, painted as vectors in egui.
+qrcode = { version = "0.14", default-features = false }
+
