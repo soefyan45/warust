@@ -84,6 +84,11 @@ impl Registry {
         let _ = fs::remove_file(self.lock_path(id));
     }
 
+    /// Whether another process holds the session's lock right now.
+    pub fn in_use(&self, id: &str) -> bool {
+        matches!(self.lock(id), Ok(None))
+    }
+
     pub fn db_path(&self, id: &str) -> PathBuf {
         self.dir.join(format!("{id}.db"))
     }

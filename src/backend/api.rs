@@ -18,8 +18,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinHandle;
 use whatsapp_rust::serde_json::{Value, json};
 
-use super::session::Body;
-use super::{ApiState, Backend, Book, Command, SessionView, Shared, Status, Updater, media};
+use super::session::{Body, reply_body};
+use super::{ApiState, Backend, Book, Command, SessionView, Shared, Status, Updater, media, store};
 
 #[derive(Clone)]
 pub struct Context {
@@ -63,10 +63,14 @@ fn router(context: Context) -> Router {
         .route("/sessions/{id}/pair-code", post(pair_code))
         .route("/sessions/{id}/logout", post(logout))
         .route("/sessions/{id}/chats", get(list_chats))
+        .route("/sessions/{id}/chats/{jid}/read", post(mark_read))
+        .route("/sessions/{id}/chats/{jid}/archive", post(archive_chat))
         .route("/sessions/{id}/statuses", get(list_statuses))
         .route("/sessions/{id}/messages/text", post(send_text))
         .route("/sessions/{id}/messages/media", post(send_media))
         .route("/sessions/{id}/messages/{msg_id}", get(get_message))
+        .route("/sessions/{id}/messages/{msg_id}/forward", post(forward_message))
+        .route("/sessions/{id}/messages/{msg_id}/pin", post(pin_message))
         .route("/sessions/{id}/webhook", put(put_webhook))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "not_found", "Endpoint tidak ada") })
         .with_state(context)
@@ -260,12 +264,65 @@ async fn list_chats(
                 "name": book.name_of(&c.jid),
                 "is_group": c.is_group(),
                 "unread": c.unread,
+                "archived": c.archived,
                 "last_timestamp": c.last_ts(),
                 "last_text": last.map(|m| &m.text),
             })
         })
         .collect();
     Ok(Json(json!({ "chats": chats })).into_response())
+}
+
+/// The chat in the session's book, for the actions that need a connection.
+fn known_chat(view: &SessionView, jid: &str) -> Result<String, Response> {
+    if view.status != Status::Connected {
+        let (status, _) = view.status.code();
+        return Err(error(StatusCode::CONFLICT, "not_connected", format!("Sesi tidak terhubung ({status})")));
+    }
+    let chat = view.book.normalize(jid);
+    if view.book.chats.iter().any(|c| c.jid == chat) {
+        Ok(chat)
+    } else {
+        Err(error(StatusCode::NOT_FOUND, "chat_not_found", format!("Chat {jid} tidak ada")))
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct MarkRead {
+    /// `false` marks the chat unread; the default is read.
+    read: Option<bool>,
+}
+
+/// Sends read receipts and syncs "read" (or "unread") to the phone.
+async fn mark_read(
+    _: Authed,
+    State(context): State<Context>,
+    Path((id, jid)): Path<(String, String)>,
+    body: Option<Json<MarkRead>>,
+) -> Answer {
+    let view = session(&context, &id)?;
+    let chat = known_chat(&view, &jid)?;
+    let read = body.and_then(|Json(b)| b.read).unwrap_or(true);
+    let command = if read { Command::Seen { id: id.clone(), chat: chat.clone() } } else { Command::MarkUnread { id: id.clone(), chat: chat.clone() } };
+    send(&context, command)?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "session": id, "chat": chat, "read": read }))).into_response())
+}
+
+#[derive(Deserialize)]
+struct ArchiveBody {
+    archived: bool,
+}
+
+async fn archive_chat(
+    _: Authed,
+    State(context): State<Context>,
+    Path((id, jid)): Path<(String, String)>,
+    Json(body): Json<ArchiveBody>,
+) -> Answer {
+    let view = session(&context, &id)?;
+    let chat = known_chat(&view, &jid)?;
+    send(&context, Command::Archive { id: id.clone(), chat: chat.clone(), archived: body.archived })?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "session": id, "chat": chat, "archived": body.archived }))).into_response())
 }
 
 /// Status updates of the last 24 hours, by poster.
@@ -354,6 +411,8 @@ fn queued(local_id: &str, id: &str) -> Response {
 struct SendText {
     to: String,
     text: String,
+    /// Id of a message in the same chat to quote.
+    reply_to: Option<String>,
     #[serde(default)]
     allow_cold: bool,
 }
@@ -364,8 +423,19 @@ async fn send_text(_: Authed, State(context): State<Context>, Path(id): Path<Str
         return Err(error(StatusCode::BAD_REQUEST, "invalid_text", "`text` kosong atau terlalu panjang"));
     }
     let chat = check_target(&view, &to_jid(&body.to)?, body.allow_cold)?;
+    let message = match body.reply_to.as_deref().filter(|r| !r.is_empty()) {
+        None => Body::Text(body.text),
+        Some(reply_to) => {
+            let real = view.book.aliases.get(reply_to).map(String::as_str).unwrap_or(reply_to);
+            if real.starts_with("local-") {
+                return Err(error(StatusCode::CONFLICT, "reply_not_sent", "`reply_to` masih di antrean, belum terkirim"));
+            }
+            reply_body(&view.book, &chat, body.text, reply_to)
+                .ok_or_else(|| error(StatusCode::NOT_FOUND, "reply_not_found", "`reply_to` tidak ditemukan di chat ini"))?
+        }
+    };
     let local_id = new_local_id();
-    send(&context, Command::Enqueue { id: id.clone(), chat, body: Body::Text(body.text), local_id: local_id.clone() })?;
+    send(&context, Command::Enqueue { id: id.clone(), chat, body: message, local_id: local_id.clone() })?;
     Ok(queued(&local_id, &id))
 }
 
@@ -464,6 +534,107 @@ async fn get_message(_: Authed, State(context): State<Context>, Path((id, msg_id
         "error": failure,
     }))
     .into_response())
+}
+
+/// WhatsApp forwards to at most this many chats at once.
+const MAX_FORWARD_TARGETS: usize = 5;
+
+#[derive(Deserialize)]
+struct Forward {
+    to: Vec<String>,
+    #[serde(default)]
+    allow_cold: bool,
+}
+
+/// Forwards a stored text message to other chats through the paced queue.
+/// Media messages are refused for now.
+async fn forward_message(
+    _: Authed,
+    State(context): State<Context>,
+    Path((id, msg_id)): Path<(String, String)>,
+    Json(body): Json<Forward>,
+) -> Answer {
+    let view = session(&context, &id)?;
+    if body.to.is_empty() || body.to.len() > MAX_FORWARD_TARGETS {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "invalid_to",
+            format!("`to` harus berisi 1 sampai {MAX_FORWARD_TARGETS} tujuan"),
+        ));
+    }
+    let real = view.book.aliases.get(&msg_id).cloned().unwrap_or_else(|| msg_id.clone());
+    let found = view.book.chats.iter().flat_map(|c| &c.messages).find(|m| m.id == real || m.id == msg_id);
+    let Some(message) = found else {
+        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Pesan tidak ditemukan"));
+    };
+    if !message.forwardable() {
+        return Err(error(
+            StatusCode::BAD_REQUEST,
+            "not_forwardable",
+            "Hanya pesan teks yang bisa diteruskan (media belum didukung)",
+        ));
+    }
+    // Check every target first so a bad one queues nothing.
+    let mut chats = Vec::new();
+    for to in &body.to {
+        let chat = check_target(&view, &to_jid(to)?, body.allow_cold)?;
+        if !chats.contains(&chat) {
+            chats.push(chat);
+        }
+    }
+    let mut queued = Vec::new();
+    for chat in chats {
+        let local_id = new_local_id();
+        send(
+            &context,
+            Command::Enqueue { id: id.clone(), chat: chat.clone(), body: Body::Forward(message.text.clone()), local_id: local_id.clone() },
+        )?;
+        queued.push(json!({ "to": chat, "id": local_id, "status": "queued", "next": format!("GET /sessions/{id}/messages/{local_id}") }));
+    }
+    Ok((StatusCode::ACCEPTED, Json(json!({ "messages": queued }))).into_response())
+}
+
+#[derive(Deserialize)]
+struct PinBody {
+    pinned: bool,
+    /// `24h`, `7d` (default) or `30d`; only used when pinning.
+    duration: Option<String>,
+}
+
+async fn pin_message(
+    _: Authed,
+    State(context): State<Context>,
+    Path((id, msg_id)): Path<(String, String)>,
+    Json(body): Json<PinBody>,
+) -> Answer {
+    let view = session(&context, &id)?;
+    if view.status != Status::Connected {
+        return Err(error(StatusCode::CONFLICT, "not_connected", "Nomor belum terhubung"));
+    }
+    let length = match body.duration.as_deref() {
+        None => store::PinLength::Days7,
+        Some(code) => store::PinLength::parse(code)
+            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_duration", "duration harus 24h, 7d atau 30d"))?,
+    };
+    let real = view.book.aliases.get(&msg_id).cloned().unwrap_or_else(|| msg_id.clone());
+    let Some(chat) = view.book.chats.iter().find(|c| c.messages.iter().any(|m| m.id == real)) else {
+        return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Pesan tidak ditemukan"));
+    };
+    if real.starts_with("local-") {
+        return Err(error(StatusCode::CONFLICT, "not_sent_yet", "Pesan masih dalam antrean"));
+    }
+    let chat = chat.jid.clone();
+    send(&context, Command::Pin { id: id.clone(), chat: chat.clone(), msg_id: real.clone(), pinned: body.pinned, length })?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({
+            "status": if body.pinned { "pinning" } else { "unpinning" },
+            "id": real,
+            "chat": chat,
+            "duration": body.pinned.then_some(length.code()),
+        })),
+    )
+        .into_response())
 }
 
 #[derive(Deserialize)]
