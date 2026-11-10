@@ -229,6 +229,7 @@ impl Backend {
         let shared = Arc::new(Mutex::new(Shared { settings: Arc::new(settings), ..Shared::default() }));
         let (hooks, hook_events) = unbounded_channel();
         let state = Updater { shared: shared.clone(), ctx, data_dir: data_dir.clone(), hooks, commands: commands.clone() };
+        notify::init(&state);
         let api_commands = commands.clone();
         std::thread::Builder::new()
             .name("whatsapp".to_owned())
