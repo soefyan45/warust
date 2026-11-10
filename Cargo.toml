@@ -85,6 +85,10 @@ objc2 = "0.6"
 block2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSDictionary", "NSBundle", "NSError", "NSObject", "NSSet"] }
 objc2-user-notifications = { version = "0.3", default-features = false, features = ["std", "block2", "bitflags", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationSound", "UNNotificationTrigger", "UNUserNotificationCenter"] }
+# PDF previews with macOS's own renderer (CoreGraphics), so no poppler is
+# needed there; both crates are already in the tree through arboard and winit.
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFURL", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage", "CGPDFDocument", "CGPDFPage"] }
 # The unread count on the Dock icon; already in the tree through winit.
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder"] }
 
