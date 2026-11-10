@@ -130,9 +130,28 @@ pub struct Chat {
     pub jid: String,
     pub unread: u32,
     pub messages: Vec<ChatMsg>,
+    /// When the chat was marked done (Unix seconds); a later incoming message
+    /// makes it need a reply again.
+    pub done_at: Option<i64>,
 }
 
 impl Chat {
+    /// Time of the contact's latest message, 0 when there is none.
+    pub fn last_incoming_ts(&self) -> i64 {
+        self.messages.iter().rev().find(|m| !m.from_me).map(|m| m.ts).unwrap_or(0)
+    }
+
+    /// Marked done, and nothing came in since.
+    pub fn is_done(&self) -> bool {
+        self.done_at.is_some_and(|at| at >= self.last_incoming_ts())
+    }
+
+    /// A private chat whose last message is from the contact and that is not
+    /// marked done ("Perlu balas").
+    pub fn needs_reply(&self) -> bool {
+        !self.is_group() && self.messages.last().is_some_and(|m| !m.from_me) && !self.is_done()
+    }
+
     pub fn last_ts(&self) -> i64 {
         self.messages.last().map(|m| m.ts).unwrap_or(0)
     }
@@ -249,6 +268,7 @@ impl Book {
             jid: jid.to_owned(),
             unread: 0,
             messages: Vec::new(),
+            done_at: None,
         });
         self.chats.last_mut().expect("just pushed")
     }
@@ -370,6 +390,16 @@ impl Book {
                             media.file = Some(PathBuf::from(path));
                             return;
                         }
+                    }
+                }
+            }
+            Some("done") => {
+                // ts 0 takes the mark off again.
+                if let Some(chat) = text("chat") {
+                    let jid = self.normalize(&chat);
+                    let at = record.get("ts").and_then(Value::as_i64).unwrap_or(0);
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        c.done_at = (at > 0).then_some(at);
                     }
                 }
             }
@@ -511,6 +541,11 @@ pub fn rekey_record(old: &str, new: &str) -> Value {
     json!({ "t": "rekey", "old": old, "new": new })
 }
 
+/// Marks a chat done at `ts`, or (with 0) needing a reply again.
+pub fn done_record(chat: &str, ts: i64) -> Value {
+    json!({ "t": "done", "chat": chat, "ts": ts })
+}
+
 pub fn seen_record(chat: &str) -> Value {
     json!({ "t": "seen", "chat": chat })
 }
@@ -527,6 +562,22 @@ mod tests {
         let m = &b.chats[0].messages[0];
         let q = m.quote.as_ref().expect("quote kept");
         assert_eq!((q.id.as_str(), q.text.as_str(), q.status), ("ST1", "Pesanan katering", true));
+    }
+
+    #[test]
+    fn done_until_the_contact_writes_again() {
+        let chat = "628111000001@s.whatsapp.net";
+        let msg = |id: &str, me: bool, ts: i64| msg_record(chat, id, me, chat, "x", ts, &Delivery::Received, false);
+        let b = book(&[msg("a", false, 10)]);
+        assert!(b.chats[0].needs_reply() && !b.chats[0].is_done());
+        let b = book(&[msg("a", false, 10), done_record(chat, 20)]);
+        assert!(!b.chats[0].needs_reply() && b.chats[0].is_done());
+        let b = book(&[msg("a", false, 10), done_record(chat, 20), msg("b", false, 30)]);
+        assert!(b.chats[0].needs_reply() && !b.chats[0].is_done(), "a new message reopens it");
+        let b = book(&[msg("a", false, 10), msg("b", true, 15)]);
+        assert!(!b.chats[0].needs_reply(), "answered");
+        let b = book(&[msg("a", false, 10), done_record(chat, 20), done_record(chat, 0)]);
+        assert!(b.chats[0].needs_reply(), "unmarked");
     }
 
     fn book(records: &[Value]) -> Book {

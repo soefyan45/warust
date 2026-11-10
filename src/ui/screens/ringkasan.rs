@@ -70,8 +70,9 @@ fn today(sessions: &[SessionView]) -> Today {
     t
 }
 
+/// Needs a reply (see `Chat::needs_reply`) and came in within a day.
 fn waiting(chat: &Chat, now: i64) -> bool {
-    !chat.is_group() && chat.messages.last().is_some_and(|m| !m.from_me && now - m.ts < 24 * 3600)
+    chat.needs_reply() && chat.messages.last().is_some_and(|m| now - m.ts < 24 * 3600)
 }
 
 /// Thousands with a dot, as Indonesian text writes them: `1.332`.

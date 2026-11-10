@@ -22,6 +22,10 @@ use crate::ui::widgets::{self, Kind, rich, rich_mono};
 use crate::ui::{State, emoji, icons, markup, pdf, stickers, time};
 
 const ROW: f32 = 60.0;
+/// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai".
+pub const TAB_REPLY: usize = 0;
+pub const TAB_ALL: usize = 1;
+pub const TAB_DONE: usize = 2;
 /// Older messages stay in the store; the view paints the latest ones.
 const SHOWN: usize = 300;
 
@@ -139,6 +143,16 @@ pub fn show(
                     if widgets::icon_button(ui, "panel-right", 32.0, state.contact_panel).clicked() {
                         state.contact_panel = !state.contact_panel;
                     }
+                    if !chat.is_group() {
+                        ui.add_space(4.0);
+                        if let Some(done) = done_button(ui, chat) {
+                            commands.push(Command::MarkDone { id: session.id.clone(), chat: chat.jid.clone(), done });
+                        }
+                        if chat.needs_reply() {
+                            ui.add_space(4.0);
+                            reply_badge(ui, &p);
+                        }
+                    }
                 },
             );
         });
@@ -178,6 +192,28 @@ pub fn show(
         });
     });
     commands
+}
+
+/// "Tandai selesai", or "Selesai" on a done chat (a click opens it again).
+/// Returns the new state when clicked.
+fn done_button(ui: &mut Ui, chat: &Chat) -> Option<bool> {
+    let done = chat.is_done();
+    let (icon, label, hint) = if done {
+        ("check", "Selesai", "Tandai perlu balas lagi")
+    } else {
+        ("check", "Tandai selesai", "Pindahkan ke tab Selesai sampai ada pesan baru")
+    };
+    let kind = if done { Kind::Primary } else { Kind::Secondary };
+    widgets::button(ui, Some(icon), label, kind).on_hover_text(hint).clicked().then_some(!done)
+}
+
+/// The soft orange "Belum dibalas" tag (Pego `v5/Inbox · Chat`).
+fn reply_badge(ui: &mut Ui, p: &Palette) {
+    let galley = ui.painter().layout_no_wrap("Belum dibalas".to_owned(), fonts::ui(12.0, Weight::SemiBold), theme::FOREST_ORANGE);
+    let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 20.0, 24.0), Sense::hover());
+    let (fill, color) = if theme::template().top_nav() { (p.orange_soft, theme::FOREST_ORANGE) } else { (p.raised, p.amber) };
+    ui.painter().rect_filled(rect, 12.0, fill);
+    widgets::paint_text(ui, rect, "Belum dibalas", fonts::ui(12.0, Weight::SemiBold), color, Align::Center);
 }
 
 /// "Load older messages from the phone". Returns true when clicked.
@@ -263,14 +299,15 @@ fn chat_list(
         });
         ui.add_space(4.0);
     }
-    // Statuses have their own page now; a tab left over from before falls back to "Semua".
-    if state.chat_tab > 2 {
-        state.chat_tab = 0;
+    if state.chat_tab > TAB_DONE {
+        state.chat_tab = TAB_REPLY;
     }
     ui.horizontal(|ui| {
         ui.add_space(6.0);
-        let unread_label = if unread > 0 { format!("Belum dibaca {unread}") } else { "Belum dibaca".to_owned() };
-        widgets::tabs(ui, &["Semua", &unread_label, "Grup"], &mut state.chat_tab);
+        let waiting = chats.iter().filter(|(_, c)| c.needs_reply()).count();
+        let labels = [format!("Perlu balas · {waiting}"), format!("Semua · {}", chats.len()), "Selesai".to_owned()];
+        let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+        widgets::tabs(ui, &labels, &mut state.chat_tab);
     });
     // Classic tabs sit on a rule; Forest's pills need none.
     if !theme::template().top_nav() {
@@ -290,7 +327,12 @@ fn chat_list(
     let total: f32 = lines.iter().map(|l| height(l) + 2.0).sum();
     if lines.is_empty() {
         ui.add_space(20.0);
-        ui.vertical_centered(|ui| ui.label(rich("Tidak ada chat di sini.", 13.0, Weight::Regular, p.muted)));
+        let empty = match state.chat_tab {
+            TAB_REPLY => "Semua chat sudah dibalas.",
+            TAB_DONE => "Belum ada chat yang ditandai selesai.",
+            _ => "Tidak ada chat di sini.",
+        };
+        ui.vertical_centered(|ui| ui.label(rich(empty, 13.0, Weight::Regular, p.muted)));
         return commands;
     }
     // Only the lines on screen are drawn, so hundreds of chats stay cheap.
@@ -333,14 +375,14 @@ fn chat_list(
     commands
 }
 
-/// The rows of the chat list: filtered by the search and `tab` (1 unread,
-/// 2 groups), newest first, or one section per number when `grouped`.
+/// The rows of the chat list: filtered by the search and `tab` (`TAB_*`),
+/// newest first, or one section per number when `grouped`.
 fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped: bool) -> Vec<Line<'a>> {
     let query = state.chat_search.trim().to_lowercase();
     let keep = |s: &SessionView, c: &Chat| {
         let tab = match tab {
-            1 => c.unread > 0,
-            2 => c.is_group(),
+            TAB_REPLY => c.needs_reply(),
+            TAB_DONE => c.is_done(),
             _ => true,
         };
         tab && (query.is_empty() || super::chat_title(&s.book, c).to_lowercase().contains(&query) || c.jid.contains(&query))
@@ -1348,7 +1390,7 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
         Some(id) => sessions.iter().filter(|s| &s.id == id).collect(),
         None => sessions.iter().collect(),
     };
-    let lines = lines_for(state, &scoped, 0, combined && state.inbox_grouped);
+    let lines = lines_for(state, &scoped, TAB_ALL, combined && state.inbox_grouped);
     let via = combined && !state.inbox_grouped;
     CentralPanel::default().frame(Frame::NONE.fill(p.panel)).show(ui, |ui| {
         ui.painter().hline(ui.max_rect().x_range(), ui.max_rect().top(), Stroke::new(1.0, p.border));
@@ -1514,6 +1556,12 @@ fn compact_chat(
                         }
                         if ui.button("Salin nomor").clicked() {
                             ui.ctx().copy_text(chat.jid.split('@').next().unwrap_or_default().to_owned());
+                        }
+                        if !chat.is_group() {
+                            let done = chat.is_done();
+                            if ui.button(if done { "Tandai perlu balas" } else { "Tandai selesai" }).clicked() {
+                                commands.push(Command::MarkDone { id: session.id.clone(), chat: chat.jid.clone(), done: !done });
+                            }
                         }
                     });
                 },

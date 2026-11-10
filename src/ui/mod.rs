@@ -746,7 +746,7 @@ impl eframe::App for App {
         if let Some((session, jid)) = self.state.open_chat_requested.take() {
             self.state.inbox_session = Some(session.clone());
             self.state.chat_selected = Some(jid.clone());
-            self.state.chat_tab = 0;
+            self.state.chat_tab = screens::inbox::TAB_ALL;
             self.backend.send(Command::Seen { id: session, chat: jid });
             self.screen = Screen::Inbox;
         }
@@ -758,7 +758,7 @@ impl eframe::App for App {
             Some(screens::ringkasan::Action::OpenChat { session, jid }) => {
                 self.state.inbox_session = Some(session.clone());
                 self.state.chat_selected = Some(jid.clone());
-                self.state.chat_tab = 0;
+                self.state.chat_tab = screens::inbox::TAB_ALL;
                 self.backend.send(Command::Seen { id: session, chat: jid });
                 self.screen = Screen::Inbox;
             }

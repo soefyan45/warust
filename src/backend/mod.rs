@@ -163,6 +163,8 @@ pub enum Command {
     SendFile { id: String, chat: String, path: PathBuf, caption: String },
     /// The user opened a chat: clear its unread count.
     Seen { id: String, chat: String },
+    /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
+    MarkDone { id: String, chat: String, done: bool },
     /// Ask the phone for messages older than the oldest one we have in `chat`.
     LoadOlder { id: String, chat: String },
     /// Fetch (or load from cache) the profile picture of a chat shown on screen.
@@ -597,6 +599,12 @@ async fn run(
             Command::Seen { id, chat } => {
                 if let Some(store) = stores.get(&id) {
                     state.record(&id, store, &[store::seen_record(&chat)]);
+                }
+            }
+            Command::MarkDone { id, chat, done } => {
+                if let Some(store) = stores.get(&id) {
+                    let at = if done { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(1) } else { 0 };
+                    state.record(&id, store, &[store::done_record(&chat, at)]);
                 }
             }
         }
