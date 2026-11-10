@@ -101,6 +101,29 @@ fn windows_camera() -> Option<String> {
     text.lines().filter(|l| l.contains("(video)")).find_map(|l| l.split('"').nth(1).map(str::to_owned))
 }
 
+/// Takes one photo with the camera into `dir` as a JPEG (#71). The first
+/// frames are skipped, while the camera still sets its exposure.
+pub fn snapshot(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    let path = ffmpeg().ok_or(tr("Taking a photo needs ffmpeg installed", "Mengambil foto butuh ffmpeg terpasang"))?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let out = dir.join(format!("camera-{stamp}.jpg"));
+    let status = crate::platform::command(path)
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-y"])
+        .args(camera_input()?)
+        .args(["-vf", "select=gte(n\\,15)", "-frames:v", "1", "-q:v", "2"])
+        .arg(&out)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|e| e.to_string())?;
+    if status.success() && out.is_file() {
+        Ok(out)
+    } else {
+        Err(tr("The camera could not take a photo", "Kamera tidak bisa mengambil foto").to_owned())
+    }
+}
+
 /// Starts the camera. Access units go to the returned channel, from the
 /// first keyframe on; the mirrored preview goes to `preview`.
 pub fn open_camera(preview: Latest, repaint: Arc<dyn Fn() + Send + Sync>) -> Result<(Camera, async_channel::Receiver<Vec<u8>>), String> {

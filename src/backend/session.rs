@@ -59,6 +59,8 @@ pub enum Body {
     Reply { text: String, quote: ReplyQuote, mentions: Vec<String> },
     /// A forwarded text message (stage 1: no media).
     Forward(String),
+    /// A contact card: the name and the phone number (digits only) (#71).
+    Contact { name: String, number: String },
     /// A pin or unpin (`None`). Not a chat message: it shows no bubble, is
     /// never stored as queued, and so is lost if the app closes before it goes out.
     Pin { target: PinTarget, length: Option<store::PinLength> },
@@ -360,11 +362,12 @@ impl Running {
             Body::File { path, caption } => media::label(path, caption),
             Body::Sticker(_) => "[Stiker]".to_owned(),
             Body::Voice(_) => "[Pesan suara]".to_owned(),
+            Body::Contact { name, .. } => format!("[Kontak] {name}"),
             Body::StatusReply { text, .. } | Body::Mention { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
             Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. } => unreachable!("returned above"),
         };
         let media = match &body {
-            Body::Text(_) | Body::StatusReply { .. } | Body::Mention { .. } | Body::Reply { .. } | Body::Forward(_) => None,
+            Body::Text(_) | Body::StatusReply { .. } | Body::Mention { .. } | Body::Reply { .. } | Body::Forward(_) | Body::Contact { .. } => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
             Body::Voice(path) => Some(media::describe_sent_voice(path)),
@@ -478,6 +481,10 @@ fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
         if !m.mentions.is_empty() {
             return Some(Body::Mention { text: m.text.clone(), mentions: m.mentions.clone() });
         }
+        // A contact card keeps only its label here: it cannot go out again.
+        if m.text.starts_with("[Kontak]") {
+            return None;
+        }
         return Some(Body::Text(m.text.clone()));
     };
     let path = media.file.clone().filter(|p| p.is_file())?;
@@ -582,8 +589,9 @@ fn body(message: &wa::Message) -> Option<String> {
     if base.location_message.as_option().is_some() {
         return Some("[Lokasi]".to_owned());
     }
-    if base.contact_message.as_option().is_some() {
-        return Some("[Kontak]".to_owned());
+    if let Some(card) = base.contact_message.as_option() {
+        let name = card.display_name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        return Some(name.map_or_else(|| "[Kontak]".to_owned(), |n| format!("[Kontak] {n}")));
     }
     None
 }
@@ -1250,6 +1258,13 @@ async fn send_edit(id: &str, client: &Client, state: &Updater, chats: &Mutex<Sto
     }
 }
 
+/// A vCard 3.0 for one phone number, as WhatsApp sends contact cards; the
+/// `waid` lets the card open the person's chat.
+fn vcard(name: &str, number: &str) -> String {
+    let name = name.replace(['\r', '\n'], " ").replace(';', "\\;").replace(',', "\\,");
+    format!("BEGIN:VCARD\nVERSION:3.0\nN:;{name};;;\nFN:{name}\nTEL;type=CELL;type=VOICE;waid={number}:+{number}\nEND:VCARD")
+}
+
 /// Our own JID (no device part) as the author of a quoted message: the LID in
 /// LID-addressed groups, else the phone number, like the crate's own add-on keys.
 async fn own_author(client: &Client, chat: &Jid) -> Result<Jid, String> {
@@ -1274,6 +1289,14 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
         Body::File { path, caption } => media::message(client, &path, &caption).await,
         Body::Sticker(path) => media::sticker_message(client, &path).await,
         Body::Voice(path) => media::voice_message(client, &path).await,
+        Body::Contact { name, number } => {
+            let mut card = wa::message::ContactMessage::default();
+            card.display_name = Some(name.clone());
+            card.vcard = Some(vcard(&name, &number));
+            let mut message = wa::Message::default();
+            message.contact_message = MessageField::some(card);
+            Ok(message)
+        }
         Body::StatusReply { text, status } => {
             let poster = status.sender.parse::<Jid>().map_err(|e| crate::trf!("Invalid status sender JID: {e:?}", "JID pengirim status tidak valid: {e:?}"))?;
             // remote_jid = status@broadcast marks the quote as a status, like WA Web.
@@ -1367,8 +1390,17 @@ pub fn mask_phone(jid: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, HISTORY_MENTION_WINDOW, ReplyQuote, history_mentions_me, mask_phone, mentions_me, queued_body, reply_body};
+    use super::{Body, HISTORY_MENTION_WINDOW, ReplyQuote, history_mentions_me, mask_phone, mentions_me, queued_body, reply_body, vcard};
     use crate::backend::store::{self, Delivery, Quote, Store};
+
+    #[test]
+    fn a_contact_card_is_a_vcard_with_the_whatsapp_id() {
+        let card = vcard("Budi; Santoso, Jr", "6281234567890");
+        assert!(card.starts_with("BEGIN:VCARD\nVERSION:3.0\n"));
+        assert!(card.contains("FN:Budi\\; Santoso\\, Jr\n"));
+        assert!(card.contains("TEL;type=CELL;type=VOICE;waid=6281234567890:+6281234567890\n"));
+        assert!(card.ends_with("END:VCARD"));
+    }
 
     /// A stored queued message comes back as what it was: text, file with
     /// its caption, a reply to a status, a voice note; a file that is gone

@@ -90,8 +90,21 @@ pub fn open_url(url: &str) {
 /// Asks for one file with the OS's dialog; blocks, so call it off the UI
 /// thread. `None` when cancelled or when no dialog is available.
 pub fn pick_file(title: &str, images_only: bool) -> Option<PathBuf> {
+    let images: &[&str] = &["png", "jpg", "jpeg", "webp"];
+    pick(title, images_only.then_some((crate::i18n::tr("Pictures", "Gambar"), images)))
+}
+
+/// Like `pick_file`, for the photos and videos WhatsApp sends with a preview.
+pub fn pick_media(title: &str) -> Option<PathBuf> {
+    pick(title, Some((crate::i18n::tr("Photos & videos", "Foto & video"), &["jpg", "jpeg", "png", "mp4", "m4v", "mov"])))
+}
+
+/// The dialog itself, limited to `filter` (its label and extensions) when given.
+fn pick(title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
     let output = if cfg!(windows) {
-        let filter = if images_only { "$d.Filter = 'Gambar|*.png;*.jpg;*.jpeg;*.webp';" } else { "" };
+        let filter = filter
+            .map(|(label, exts)| format!("$d.Filter = '{label}|{}';", exts.iter().map(|e| format!("*.{e}")).collect::<Vec<_>>().join(";")))
+            .unwrap_or_default();
         let script = format!(
             "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.OpenFileDialog; \
              $d.Title = '{}'; {filter} if ($d.ShowDialog() -eq 'OK') {{ [Console]::OutputEncoding = [Text.Encoding]::UTF8; $d.FileName }}",
@@ -99,14 +112,16 @@ pub fn pick_file(title: &str, images_only: bool) -> Option<PathBuf> {
         );
         command("powershell").args(["-NoProfile", "-STA", "-Command", &script]).output()
     } else if cfg!(target_os = "macos") {
-        let kind = if images_only { " of type {\"public.image\"}" } else { "" };
+        let kind = filter
+            .map(|(_, exts)| format!(" of type {{{}}}", exts.iter().map(|e| format!("\"{e}\"")).collect::<Vec<_>>().join(", ")))
+            .unwrap_or_default();
         let script = format!("POSIX path of (choose file with prompt \"{}\"{kind})", applescript_quote(title));
         command("osascript").args(["-e", &script]).output()
     } else {
         let mut zenity = command("zenity");
         zenity.args(["--file-selection", &format!("--title={title}")]);
-        if images_only {
-            zenity.arg("--file-filter=Gambar | *.png *.jpg *.jpeg *.webp");
+        if let Some((label, exts)) = filter {
+            zenity.arg(format!("--file-filter={label} | {}", exts.iter().map(|e| format!("*.{e}")).collect::<Vec<_>>().join(" ")));
         }
         zenity.output()
     };

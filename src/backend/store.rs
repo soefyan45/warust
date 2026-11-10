@@ -90,7 +90,7 @@ impl ChatMsg {
     /// Stage 1 of forwarding: plain text only. Media, locations and
     /// contacts are only a label here, not something to send again.
     pub fn forwardable(&self) -> bool {
-        !self.deleted && self.media.is_none() && !self.text.trim().is_empty() && !matches!(self.text.as_str(), "[Lokasi]" | "[Kontak]")
+        !self.deleted && self.media.is_none() && !self.text.trim().is_empty() && self.text != "[Lokasi]" && !self.text.starts_with("[Kontak]")
     }
 }
 
@@ -348,6 +348,19 @@ impl Book {
             }
         }
         bare
+    }
+
+    /// Phone contacts with a name (JID, name), by name: what a contact card
+    /// can be made of.
+    pub fn contacts(&self) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .names
+            .iter()
+            .filter(|(jid, name)| jid.ends_with("@s.whatsapp.net") && !name.trim().is_empty())
+            .map(|(jid, name)| (jid.clone(), name.clone()))
+            .collect();
+        out.sort_by_key(|(_, name)| name.to_lowercase());
+        out
     }
 
     /// Contact name or group subject, else the person's own push name.

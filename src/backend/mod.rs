@@ -256,6 +256,8 @@ pub enum Command {
     SendSticker { id: String, chat: String, path: PathBuf },
     /// Queue a voice note recorded in the composer (an Ogg Opus file).
     SendVoice { id: String, chat: String, path: PathBuf },
+    /// Share a phone contact as a contact card (#71). `number` is its digits.
+    SendContact { id: String, chat: String, name: String, number: String },
     /// Download a received photo, video, sticker, voice note or document.
     Download { id: String, msg_id: String },
     /// Send a message that failed again (#70).
@@ -828,6 +830,10 @@ async fn run(
                     _ => log::warn!("status reply: session {id} is not running or the status is gone"),
                 }
             }
+            Command::SendContact { id, chat, name, number } => match (running.get(&id), stores.get(&id)) {
+                (Some(r), Some(store)) => r.enqueue(&id, chat, Body::Contact { name, number }, &state, store),
+                _ => log::warn!("send contact: session {id} is not running"),
+            },
             Command::Retry { id, msg_id } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => r.retry(&id, &msg_id, &state, store),
                 _ => log::warn!("retry: session {id} is not running"),
