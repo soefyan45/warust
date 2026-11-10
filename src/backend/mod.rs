@@ -258,6 +258,8 @@ pub enum Command {
     SendVoice { id: String, chat: String, path: PathBuf },
     /// Download a received photo, video, sticker, voice note or document.
     Download { id: String, msg_id: String },
+    /// Send a message that failed again (#70).
+    Retry { id: String, msg_id: String },
     /// Send the "seen" receipt for a status update shown in the viewer.
     StatusSeen { id: String, msg_id: String },
     /// Comment or react (one emoji) on a contact's status, from the number
@@ -822,6 +824,10 @@ async fn run(
                     _ => log::warn!("status reply: session {id} is not running or the status is gone"),
                 }
             }
+            Command::Retry { id, msg_id } => match (running.get(&id), stores.get(&id)) {
+                (Some(r), Some(store)) => r.retry(&id, &msg_id, &state, store),
+                _ => log::warn!("retry: session {id} is not running"),
+            },
             Command::Download { id, msg_id } => {
                 let media = state.book(&id).and_then(|book| book.media_of(&msg_id).map(|m| m.raw.clone()));
                 match (running.get(&id), stores.get(&id), media) {
