@@ -47,6 +47,38 @@ pub fn rich_mono(text: &str, size: f32, color: Color32) -> RichText {
     RichText::new(text).font(fonts::mono(size)).color(color)
 }
 
+/// The warust mark (Pego `Logo · Warust`): a chat bubble with its tail at the
+/// bottom left and a stroked W, drawn in `rect` from the 96-unit artwork.
+pub fn logo(ui: &Ui, rect: Rect, bubble: Color32, mark: Color32) {
+    let unit = rect.width().min(rect.height()) / 96.0;
+    let origin = rect.center() - vec2(48.0, 48.0) * unit;
+    let at = |x: f32, y: f32| origin + vec2(x, y) * unit;
+    let painter = ui.painter();
+    // The body: a rounded box with a square bottom-left corner where the tail
+    // starts. The tail overlaps the body a little so no seam shows.
+    let corner = (16.0 * unit).round() as u8;
+    let radius = egui::CornerRadius { nw: corner, ne: corner, sw: 0, se: corner };
+    painter.rect_filled(Rect::from_min_max(at(14.0, 14.0), at(82.0, 74.0)), radius, bubble);
+    // The tail ends in the curve C17 86 14 84 14 81 from (20, 84).
+    let curve = |t: f32| {
+        let s = 1.0 - t;
+        let (p0, p1, p2, p3) = ((20.0, 84.0), (17.0, 86.0), (14.0, 84.0), (14.0, 81.0));
+        let x = s * s * s * p0.0 + 3.0 * s * s * t * p1.0 + 3.0 * s * t * t * p2.0 + t * t * t * p3.0;
+        let y = s * s * s * p0.1 + 3.0 * s * s * t * p1.1 + 3.0 * s * t * t * p2.1 + t * t * t * p3.1;
+        at(x, y)
+    };
+    let mut tail = vec![at(14.0, 70.0), at(34.0, 70.0), at(34.0, 74.0)];
+    tail.extend((0..=6).map(|i| curve(i as f32 / 6.0)));
+    painter.add(egui::Shape::convex_polygon(tail, bubble, Stroke::NONE));
+    // The W, with round caps and joins.
+    let width = 8.5 * unit;
+    let w = [at(28.0, 34.0), at(37.0, 58.0), at(48.0, 42.0), at(59.0, 58.0), at(68.0, 34.0)];
+    painter.add(egui::Shape::line(w.to_vec(), Stroke::new(width, mark)));
+    for point in w {
+        painter.circle_filled(point, width / 2.0, mark);
+    }
+}
+
 /// Paints one line of text inside `rect`, cut with an ellipsis when too wide.
 pub fn paint_text(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32, align: Align) {
     let mut job = LayoutJob { break_on_newline: false, ..Default::default() };

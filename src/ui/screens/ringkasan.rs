@@ -626,10 +626,9 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView], deliveries: &[HookDelivery
             let width = ui.available_width();
             // Brand.
             widgets::row(ui, 44.0, |ui| {
-                let (logo, _) = ui.allocate_exact_size(vec2(28.0, 28.0), Sense::hover());
-                ui.painter().rect_filled(logo, 8.0, p.primary);
+                let (logo, _) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::hover());
                 let mark = if forest() { p.accent } else { p.on_primary };
-                widgets::paint_text(ui, logo, "w", fonts::ui(15.0, Weight::SemiBold), mark, Align::Center);
+                widgets::logo(ui, logo, p.primary, mark);
                 ui.add_space(4.0);
                 ui.label(widgets::rich("warust", 18.0, Weight::SemiBold, p.text));
             }, |_| {});
