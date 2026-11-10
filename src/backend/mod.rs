@@ -12,6 +12,7 @@ pub mod rules;
 mod session;
 pub mod settings;
 pub mod store;
+pub mod player;
 pub mod voice;
 pub mod webhook;
 
@@ -220,6 +221,9 @@ pub enum Command {
     WatchPresence { id: String, chat: String },
     /// Show (or stop showing) "sedang mengetik" in the chat on the contact's side.
     Typing { id: String, chat: String, typing: bool },
+    /// Show (or stop showing) "recording audio" on the contact's side while a
+    /// voice note is recorded for this chat.
+    RecordingAudio { id: String, chat: String, on: bool },
     /// "Tandai belum dibaca": a local unread marker, also synced to the phone.
     MarkUnread { id: String, chat: String },
     /// Archive a chat, or take it out of the archive; synced to the phone.
@@ -801,6 +805,13 @@ async fn run(
             Command::WatchPresence { id, chat } => {
                 if let Some(r) = running.get(&id) {
                     r.watch_presence(&id, &chat);
+                }
+            }
+            Command::RecordingAudio { id, chat, on } => {
+                if state.settings().typing {
+                    if let Some(r) = running.get(&id) {
+                        r.recording_state(&id, &chat, on);
+                    }
                 }
             }
             Command::Typing { id, chat, typing } => {

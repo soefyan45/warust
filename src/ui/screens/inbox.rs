@@ -282,6 +282,29 @@ pub fn typing_signal(ctx: &egui::Context, state: &mut State, open: Option<(Strin
             }
         }
     }
+    // "Recording audio" for the chat a voice note is being recorded in, sent
+    // again while it goes on, and stopped on pause, send or cancel.
+    let recording = state.voice.as_ref().and_then(|v| match &v.step {
+        VoiceStep::Recording(r) if !r.is_paused() && r.elapsed() > std::time::Duration::ZERO => Some((v.session.clone(), v.chat.clone())),
+        _ => None,
+    });
+    match (&recording, state.recording_told.clone()) {
+        (Some((session, chat)), told) => {
+            let same = told.as_ref().is_some_and(|(s, c, _)| s == session && c == chat);
+            if let Some((s, c, _)) = told.as_ref().filter(|_| !same) {
+                commands.push(Command::RecordingAudio { id: s.clone(), chat: c.clone(), on: false });
+            }
+            if !same || told.is_some_and(|(_, _, at)| now - at >= TYPING_RESEND) {
+                commands.push(Command::RecordingAudio { id: session.clone(), chat: chat.clone(), on: true });
+                state.recording_told = Some((session.clone(), chat.clone(), now));
+            }
+        }
+        (None, Some((session, chat, _))) => {
+            commands.push(Command::RecordingAudio { id: session, chat, on: false });
+            state.recording_told = None;
+        }
+        (None, None) => {}
+    }
     if state.typing.is_some() {
         // Wakes up to notice the pause even when nothing else repaints.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
@@ -975,6 +998,8 @@ enum MediaBox {
     /// A document with a first-page preview above its card: the rendered PDF
     /// once downloaded, else the thumbnail that came with the message.
     Document { pdf: Option<PathBuf>, thumb: Option<PathBuf> },
+    /// A voice note: play button, waveform and length (Pego `FM/VN/Bubble`).
+    Voice(f32),
 }
 
 /// What a click on media asks for.
@@ -996,6 +1021,7 @@ impl MediaBox {
             MediaBox::Card => CARD,
             MediaBox::Sticker(_) => STICKER,
             MediaBox::Document { .. } => vec2(CARD.x, PREVIEW_HEIGHT + CARD.y),
+            MediaBox::Voice(width) => vec2(*width, VOICE_HEIGHT),
         }
     }
 }
@@ -1003,6 +1029,9 @@ impl MediaBox {
 fn media_box(media: &Media, wrap: f32) -> MediaBox {
     if media.kind == "sticker" {
         return MediaBox::Sticker(media.file.clone());
+    }
+    if media.kind == "audio" && media.voice {
+        return MediaBox::Voice(wrap.clamp(200.0, 280.0));
     }
     if media.kind == "document" {
         let pdf = media.file.clone().filter(|f| pdf::is_pdf(f));
@@ -1117,6 +1146,172 @@ fn media_action(m: &ChatMsg, media: &Media, downloads: &Downloads) -> MediaState
     }
 }
 
+const VOICE_HEIGHT: f32 = 46.0;
+/// Bars in a voice bubble: the waveform's peaks in this many equal slices,
+/// so every bubble is as wide whatever its length.
+const VOICE_BARS: usize = 34;
+
+/// Length and waveform of voice notes read from their files, for notes
+/// whose record does not carry them (sent before they were stored).
+fn voice_file_info(ctx: &egui::Context, path: &Path) -> Option<(u32, Vec<u8>)> {
+    use std::sync::{Mutex, OnceLock};
+    static INFO: OnceLock<Mutex<HashMap<PathBuf, Option<(u32, Vec<u8>)>>>> = OnceLock::new();
+    let info = INFO.get_or_init(Mutex::default);
+    let mut map = info.lock().ok()?;
+    if let Some(found) = map.get(path) {
+        return found.clone();
+    }
+    map.insert(path.to_owned(), None);
+    let (path, ctx) = (path.to_owned(), ctx.clone());
+    // Decoding takes a moment for long notes: off the UI thread.
+    std::thread::spawn(move || {
+        let found = std::fs::read(&path).ok().and_then(|bytes| crate::backend::voice::inspect(&bytes).ok());
+        if let Some(info) = INFO.get().and_then(|i| i.lock().ok()).as_mut() {
+            info.insert(path, found);
+        }
+        ctx.request_repaint();
+    });
+    None
+}
+
+/// `VOICE_BARS` heights from 0 to 1: the peak of each slice of `wave`.
+fn voice_bars(wave: &[u8]) -> Vec<f32> {
+    if wave.is_empty() {
+        return vec![0.15; VOICE_BARS];
+    }
+    (0..VOICE_BARS)
+        .map(|bar| {
+            let from = bar * wave.len() / VOICE_BARS;
+            let to = ((bar + 1) * wave.len() / VOICE_BARS).max(from + 1).min(wave.len());
+            f32::from(wave[from..to].iter().copied().max().unwrap_or(0)) / 100.0
+        })
+        .collect()
+}
+
+/// `m:ss`.
+fn clock_of(seconds: f32) -> String {
+    let s = seconds.max(0.0).round() as u32;
+    format!("{}:{:02}", s / 60, s % 60)
+}
+
+/// A voice note's bubble (Pego `FM/VN/Bubble/Out` and `/In`): ▶/⏸, the
+/// waveform filling as it plays with a knob to seek, the length (or the time
+/// played), and the speed chip while it is loaded. A note not downloaded yet
+/// downloads on ▶.
+fn paint_voice(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, downloads: &Downloads) -> Option<MediaClick> {
+    use crate::backend::player;
+    let forest = theme::template().top_nav();
+    let (button, glyph, played, rest, sub) = if m.from_me {
+        let button = if forest { p.accent } else { p.on_primary };
+        (button, p.primary, button, p.on_primary_muted, p.on_primary_muted)
+    } else {
+        (p.primary, p.on_primary, p.primary, p.border_strong, p.muted)
+    };
+    let file = media.file.as_deref();
+    let status = player::status(&m.id);
+    let loading = player::is_loading(&m.id) || matches!(downloads.get(&m.id), Some(None));
+    let from_file = if media.waveform.is_empty() || media.seconds.is_none() { file.and_then(|f| voice_file_info(ui.ctx(), f)) } else { None };
+    let wave = if media.waveform.is_empty() { from_file.as_ref().map(|(_, w)| w.as_slice()).unwrap_or_default() } else { &media.waveform };
+    let duration = status.map(|s| s.duration).or(media.seconds.map(|s| s as f32)).or(from_file.as_ref().map(|(s, _)| *s as f32));
+    let fraction = status.map(|s| (s.position / s.duration.max(0.01)).clamp(0.0, 1.0)).unwrap_or(0.0);
+    if status.is_some_and(|s| s.playing) || loading {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+    }
+
+    // ▶ / ⏸
+    let center = pos2(rect.left() + 20.0, rect.top() + 20.0);
+    let play = Rect::from_center_size(center, vec2(38.0, 38.0));
+    let play_response = ui.interact(play, ui.scope_id().with(("voice_play", &m.id)), Sense::click());
+    let radius = if play_response.hovered() { 19.0 } else { 18.0 };
+    ui.painter().circle_filled(center, radius, button);
+    let icon = if loading {
+        "loader-circle"
+    } else if status.is_some_and(|s| s.playing) {
+        "pause"
+    } else if file.is_none() {
+        "download"
+    } else {
+        "play"
+    };
+    icons::paint(ui, Rect::from_center_size(center, vec2(18.0, 18.0)), icon, 18.0, glyph);
+
+    // Waveform; played bars full, the rest muted, the knob where it is.
+    let bars_rect = Rect::from_min_max(pos2(rect.left() + 48.0, rect.top() + 6.0), pos2(rect.right() - 4.0, rect.top() + 30.0));
+    let bars = voice_bars(wave);
+    let step = bars_rect.width() / VOICE_BARS as f32;
+    let width = (step * 0.55).clamp(2.0, 3.0);
+    for (i, value) in bars.iter().enumerate() {
+        let x = bars_rect.left() + step * (i as f32 + 0.5);
+        let height = 3.0 + value.powf(0.7) * (bars_rect.height() - 3.0);
+        let done = status.is_some() && (i as f32 + 0.5) / VOICE_BARS as f32 <= fraction;
+        let bar = Rect::from_center_size(pos2(x, bars_rect.center().y), vec2(width, height));
+        ui.painter().rect_filled(bar, width / 2.0, if done { played } else { rest });
+    }
+    let seek = ui.interact(bars_rect.expand2(vec2(0.0, 4.0)), ui.scope_id().with(("voice_seek", &m.id)), Sense::click_and_drag());
+    if status.is_some() {
+        let knob = pos2(bars_rect.left() + bars_rect.width() * fraction, bars_rect.center().y);
+        ui.painter().circle_filled(knob, if seek.hovered() || seek.dragged() { 7.0 } else { 6.0 }, played);
+    }
+
+    // Length (or the time played), the mic on received notes, the speed chip.
+    let row_y = rect.top() + 38.0;
+    let mut x = bars_rect.left();
+    if !m.from_me {
+        icons::paint(ui, Rect::from_center_size(pos2(x + 6.0, row_y), vec2(12.0, 12.0)), "mic", 12.0, played);
+        x += 16.0;
+    }
+    let shown = match (status, duration) {
+        (Some(s), _) if s.playing || s.position > 0.0 => clock_of(s.position),
+        (_, Some(d)) => clock_of(d),
+        _ => match media.size {
+            Some(size) => human_size(size),
+            None => String::new(),
+        },
+    };
+    let time = ui.painter().layout_no_wrap(shown, fonts::mono(11.0), sub);
+    ui.painter().galley(pos2(x, row_y - time.size().y / 2.0), time, sub);
+    let mut speed_clicked = false;
+    if let Some(s) = status {
+        let label = if s.speed == 1.0 { "1×".to_owned() } else { format!("{}×", s.speed).replace('.', if crate::i18n::indonesian() { "," } else { "." }) };
+        let galley = ui.painter().layout_no_wrap(label, fonts::ui(11.0, Weight::SemiBold), if m.from_me { p.on_primary } else { p.text });
+        let chip = Rect::from_center_size(pos2(bars_rect.center().x, row_y), vec2(galley.size().x + 14.0, 16.0));
+        let chip_response = ui.interact(chip, ui.scope_id().with(("voice_speed", &m.id)), Sense::click());
+        let fill = if m.from_me { p.on_primary_muted.gamma_multiply(0.35) } else { p.raised };
+        ui.painter().rect_filled(chip, 8.0, fill);
+        ui.painter().galley(chip.center() - galley.size() / 2.0, galley, if m.from_me { p.on_primary } else { p.text });
+        speed_clicked = chip_response
+            .on_hover_text(tr("Playback speed", "Kecepatan putar"))
+            .on_hover_cursor(CursorIcon::PointingHand)
+            .clicked();
+        if speed_clicked {
+            player::set_speed(player::next_speed(s.speed));
+        }
+    }
+
+    let play_hint = match (file.is_some(), status.is_some_and(|s| s.playing)) {
+        (false, _) => match downloads.get(&m.id) {
+            Some(Some(reason)) => crate::trf!("Download failed: {reason}", "Gagal mengunduh: {reason}"),
+            _ => tr("Download and play", "Unduh dan putar").to_owned(),
+        },
+        (true, true) => tr("Pause", "Jeda").to_owned(),
+        (true, false) => tr("Play", "Putar").to_owned(),
+    };
+    let play_clicked = play_response.on_hover_text(play_hint).on_hover_cursor(CursorIcon::PointingHand).clicked();
+    let Some(file) = file else {
+        let wants = play_clicked && media.downloadable() && !loading;
+        return wants.then(|| MediaClick::Download(m.id.clone()));
+    };
+    if play_clicked {
+        player::toggle(&m.id, file);
+    } else if !speed_clicked && (seek.clicked() || seek.dragged()) {
+        if let Some(at) = seek.interact_pointer_pos() {
+            player::seek(&m.id, file, (at.x - bars_rect.left()) / bars_rect.width());
+        }
+    }
+    let _ = seek.on_hover_cursor(CursorIcon::PointingHand);
+    None
+}
+
 /// Opens a downloaded file in the desktop's default app.
 fn open_file(path: &Path) {
     crate::platform::open(path);
@@ -1165,6 +1360,9 @@ fn paint_media(
     downloads: &Downloads,
     auto_stickers: bool,
 ) -> Option<MediaClick> {
+    if matches!(shown, MediaBox::Voice(_)) {
+        return paint_voice(ui, p, rect, m, media, downloads);
+    }
     let state = media_action(m, media, downloads);
     let action = state.label();
     let response = ui.interact(rect, ui.scope_id().with(("media", &m.id)), Sense::click());
@@ -1207,6 +1405,7 @@ fn paint_media(
             };
             paint_card(ui, p, rect, m, media, &detail);
         }
+        MediaBox::Voice(_) => unreachable!("drawn by paint_voice above"),
         MediaBox::Document { pdf: file, thumb } => {
             let preview = Rect::from_min_size(rect.min, vec2(rect.width(), PREVIEW_HEIGHT));
             let card = Rect::from_min_max(pos2(rect.left(), preview.bottom()), rect.max);
@@ -1899,83 +2098,337 @@ enum Recording {
     Keep,
     Cancel,
     Send,
+    Pause,
+    Resume,
+    /// Play or pause the paused note.
+    Listen,
+    /// The held mic slid up: keep recording without holding.
+    Lock,
 }
 
 /// How long an error about a voice note stays under the composer.
 const VOICE_ERROR_FOR: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// The composer while a voice note records: a red dot, the time, a level
-/// meter, cancel and send. Esc cancels, Enter sends. While the microphone
-/// opens, or the note is saved, it says so instead.
-fn recording_bar(ui: &mut Ui, p: &Palette, recorder: Option<&crate::backend::voice::Recorder>, compact: bool) -> Recording {
-    // Keeps the clock and meter moving.
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-    let recording = recorder.filter(|r| r.elapsed() > std::time::Duration::ZERO);
-    let elapsed = recording.map(|r| r.elapsed().as_secs()).unwrap_or(0);
-    if elapsed >= crate::backend::voice::MAX_SECONDS {
+/// The player id of the note being recorded, heard back while paused.
+const PREVIEW: &str = "voice-preview";
+/// A new bar of the live wave every 60 ms (Pego "Perilaku wave").
+const WAVE_EVERY: std::time::Duration = std::time::Duration::from_millis(60);
+/// About the last second of bars is drawn full, older ones faded.
+const WAVE_FRESH: usize = 16;
+
+/// Height of a wave bar for a microphone level (0 to 1): log scale from 3 to
+/// `max` px, so quiet speech still moves; under -50 dB it is a 3 px dot.
+fn wave_height(level: f32, max: f32) -> f32 {
+    let db = 20.0 * level.max(1e-5).log10();
+    let v = ((db + 50.0) / 50.0).clamp(0.0, 1.0);
+    3.0 + v * (max - 3.0)
+}
+
+/// The live wave: the newest bar enters at the right and the others slide
+/// left, smoothly between samples; the last second is full colour.
+fn paint_live_wave(ui: &Ui, rect: Rect, wave: &[f32], sampled: Option<std::time::Instant>, color: Color32) {
+    const STEP: f32 = 5.0;
+    let painter = ui.painter().with_clip_rect(rect);
+    let slide = sampled.map(|t| (t.elapsed().as_secs_f32() / WAVE_EVERY.as_secs_f32()).min(1.0)).unwrap_or(0.0) * STEP;
+    let fits = (rect.width() / STEP) as usize + 2;
+    // A thin baseline, as the bars fill it from the right.
+    painter.line_segment([pos2(rect.left(), rect.center().y), pos2(rect.right(), rect.center().y)], Stroke::new(1.0, color.gamma_multiply(0.2)));
+    for (age, level) in wave.iter().rev().take(fits).enumerate() {
+        let x = rect.right() - 2.0 - age as f32 * STEP - slide + STEP;
+        let height = wave_height(*level, rect.height());
+        let fill = if age < WAVE_FRESH { color } else { color.gamma_multiply(0.4) };
+        painter.rect_filled(Rect::from_center_size(pos2(x, rect.center().y), vec2(3.0, height)), 1.5, fill);
+    }
+}
+
+/// The whole note's wave while paused, 0..1 of it played.
+fn paint_note_wave(ui: &Ui, rect: Rect, wave: &[f32], played: f32, color: Color32, rest: Color32) {
+    let bars = ((rect.width() / 5.0) as usize).max(1);
+    let step = rect.width() / bars as f32;
+    for bar in 0..bars {
+        let from = bar * wave.len() / bars;
+        let to = ((bar + 1) * wave.len() / bars).max(from + 1).min(wave.len());
+        let level = wave.get(from..to).and_then(|w| w.iter().copied().reduce(f32::max)).unwrap_or(0.0);
+        let x = rect.left() + step * (bar as f32 + 0.5);
+        let done = (bar as f32 + 0.5) / bars as f32 <= played;
+        let height = wave_height(level, rect.height());
+        ui.painter().rect_filled(Rect::from_center_size(pos2(x, rect.center().y), vec2(3.0, height)), 1.5, if done { color } else { rest });
+    }
+    if played > 0.0 {
+        ui.painter().circle_filled(pos2(rect.left() + rect.width() * played, rect.center().y), 6.0, color);
+    }
+}
+
+/// A round icon button for the recorder.
+fn round_button(ui: &mut Ui, icon: &str, size: f32, fill: Color32, glyph: Color32, outline: Option<Color32>, hint: &str) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let grow = if response.hovered() { 1.0 } else { 0.0 };
+    ui.painter().circle_filled(rect.center(), size / 2.0 + grow, fill);
+    if let Some(outline) = outline {
+        ui.painter().circle_stroke(rect.center(), size / 2.0 - 0.5, Stroke::new(1.0, outline));
+    }
+    icons::paint(ui, Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, 18.0, glyph);
+    response.on_hover_text(hint).on_hover_cursor(CursorIcon::PointingHand).clicked()
+}
+
+/// A key hint chip: "Esc" beside "cancel".
+fn key_hint(ui: &mut Ui, p: &Palette, key: &str, what: &str) {
+    let galley = ui.painter().layout_no_wrap(key.to_owned(), fonts::mono(11.0), p.text_2);
+    let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(10.0, 6.0), Sense::hover());
+    ui.painter().rect(rect, 4.0, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, p.text_2);
+    ui.label(rich(what, 12.0, Weight::Regular, p.muted));
+}
+
+/// The composer while a voice note records (Pego `v5/VN · Rekam & putar`,
+/// `m5/VN 2` and `m5/VN 3`):
+/// - recording: 🗑, a red dot and the time, the live wave, ⏸ and send;
+/// - paused: 🗑, ▶ to listen, the whole wave as it plays, the time, "Resume"
+///   and send.
+/// A strip above names the number it goes out from, with Esc and Enter hints.
+/// While the microphone opens, or the note is saved, it says so instead.
+fn recording_bar(ui: &mut Ui, p: &Palette, note: Option<&mut VoiceNote>, from: &str, compact: bool) -> Recording {
+    let saving = note.as_ref().is_none_or(|n| !matches!(n.step, VoiceStep::Recording(_)));
+    let (recorder, mut wave, mut sampled) = match note {
+        Some(VoiceNote { step: VoiceStep::Recording(recorder), wave, sampled, .. }) => (Some(recorder), Some(wave), Some(sampled)),
+        _ => (None, None, None),
+    };
+    let paused = recorder.as_ref().is_some_and(|r| r.is_paused());
+    let recording = recorder.as_ref().is_some_and(|r| r.elapsed() > std::time::Duration::ZERO || r.is_paused());
+    let elapsed = recorder.as_ref().map(|r| r.elapsed().as_secs_f32()).unwrap_or(0.0);
+    if elapsed >= crate::backend::voice::MAX_SECONDS as f32 {
         return Recording::Send;
+    }
+    // A new bar every 60 ms while recording; the wave keeps sliding between.
+    if let (Some(recorder), Some(wave), Some(sampled)) = (&recorder, wave.as_deref_mut(), sampled.as_deref_mut()) {
+        if recording && !paused && sampled.is_none_or(|t| t.elapsed() >= WAVE_EVERY) {
+            wave.push(recorder.level());
+            *sampled = Some(std::time::Instant::now());
+        }
+    }
+    let listen = player_status_preview();
+    if (recording && !paused) || listen.is_some_and(|s| s.playing) || recorder.is_none() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+    } else {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
     let mut action = ui.input_mut(|i| {
         if recorder.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
             Recording::Cancel
-        } else if recording.is_some() && enter_sends(i) {
+        } else if recording && enter_sends(i) {
             Recording::Send
+        } else if recording && i.consume_key(Modifiers::NONE, Key::Space) {
+            if paused { Recording::Listen } else { Recording::Pause }
         } else {
             Recording::Keep
         }
     });
+
+    // The strip: what is happening, from which number, and the keys.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (icon, label) = if saving {
+            ("loader-circle", tr("Saving voice message…", "Menyimpan pesan suara…").to_owned())
+        } else if paused {
+            ("pause", tr("Paused · listen before sending", "Dijeda · dengarkan dulu sebelum kirim").to_owned())
+        } else {
+            ("lock", crate::trf!("Recording voice message · sent from {from}", "Merekam voice note · dikirim dari {from}"))
+        };
+        icons::show(ui, icon, 13.0, p.text_2);
+        ui.label(rich(&label, 12.0, Weight::Medium, p.text_2));
+        if !saving && !compact {
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                key_hint(ui, p, "Enter", tr("send", "kirim"));
+                key_hint(ui, p, "Esc", tr("cancel", "batal"));
+            });
+        }
+    });
+    ui.add_space(6.0);
+
     Frame::NONE
-        .fill(p.panel)
-        .stroke(Stroke::new(1.0, p.border_strong))
+        .fill(p.raised)
         .corner_radius(if compact { 24 } else { R_LG })
-        .inner_margin(Margin { left: 14, right: 8, top: 8, bottom: 8 })
+        .inner_margin(Margin { left: 6, right: 6, top: 6, bottom: 6 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.set_min_height(40.0);
-                let Some(recorder) = recorder else {
+                if saving {
+                    ui.add_space(8.0);
                     ui.label(rich(tr("Saving voice message…", "Menyimpan pesan suara…"), 14.0, Weight::Regular, p.muted));
                     return;
-                };
-                let cancel = widgets::icon_button(ui, "x", 32.0, false).on_hover_text(tr("Cancel recording (Esc)", "Batalkan rekaman (Esc)"));
-                if cancel.clicked() {
+                }
+                if round_button(ui, "trash", 36.0, p.red_soft, p.red, None, tr("Delete recording (Esc)", "Hapus rekaman (Esc)")) {
                     action = Recording::Cancel;
                 }
-                if recording.is_none() {
-                    ui.label(rich(tr("Preparing the microphone…", "Menyiapkan mikrofon…"), 14.0, Weight::Regular, p.muted));
+                if !recording {
+                    ui.label(rich(tr("Getting the microphone ready…", "Menyiapkan mikrofon…"), 14.0, Weight::Regular, p.muted));
                     return;
                 }
-                // Blinks once a second while recording.
-                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                let on = recorder.elapsed().as_millis() % 1000 < 600;
-                ui.painter().circle_filled(dot.center(), 5.0, if on { p.red } else { p.red.gamma_multiply(0.35) });
-                let clock = format!("{}:{:02}", elapsed / 60, elapsed % 60);
-                ui.label(rich_mono(&clock, 14.0, p.text));
-                let meter_w = (ui.available_width() - 60.0).max(40.0);
-                let (meter, _) = ui.allocate_exact_size(vec2(meter_w, 6.0), Sense::hover());
-                ui.painter().rect_filled(meter, 3.0, p.border);
-                // Speech peaks are low; the square root makes the bar readable.
-                let filled = meter.width() * recorder.level().sqrt();
-                ui.painter().rect_filled(egui::Rect::from_min_size(meter.min, vec2(filled, meter.height())), 3.0, p.primary);
-                let (rect, response) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
-                ui.painter().circle_filled(rect.center(), 20.0, p.primary);
-                icons::paint(ui, Rect::from_center_size(rect.center() + vec2(-1.0, 1.0), vec2(18.0, 18.0)), "send", 18.0, p.on_primary);
-                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tr("Send voice message (Enter)", "Kirim pesan suara (Enter)")).clicked() {
-                    action = Recording::Send;
+                let clock = format!("{}:{:02}", elapsed as u32 / 60, elapsed as u32 % 60);
+                let right = if paused { 36.0 + 40.0 + 130.0 + 30.0 } else { 36.0 + 40.0 + 20.0 };
+                if paused {
+                    let listening = listen.is_some_and(|s| s.playing);
+                    if round_button(ui, if listening { "pause" } else { "play" }, 36.0, p.primary, p.on_primary, None, tr("Listen (Space)", "Dengarkan (Spasi)")) {
+                        action = Recording::Listen;
+                    }
+                    let played = listen.map(|s| s.position / s.duration.max(0.01)).unwrap_or(0.0);
+                    let width = (ui.available_width() - right - 70.0).max(40.0);
+                    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+                    paint_note_wave(ui, rect, wave.as_deref().map(Vec::as_slice).unwrap_or(&[]), played, p.primary, p.border_strong);
+                    let heard = listen.map(|s| format!("{}:{:02} / ", s.position as u32 / 60, s.position as u32 % 60)).unwrap_or_default();
+                    ui.label(rich_mono(&format!("{heard}{clock}"), 13.0, p.text_2));
+                } else {
+                    // Blinks once a second while recording.
+                    let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                    let on = (elapsed * 1000.0) as u64 % 1000 < 600;
+                    ui.painter().circle_filled(dot.center(), 5.0, if on { p.red } else { p.red.gamma_multiply(0.35) });
+                    ui.label(rich_mono(&clock, 14.0, p.text));
+                    let width = (ui.available_width() - right).max(40.0);
+                    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+                    paint_live_wave(ui, rect, wave.as_deref().map(Vec::as_slice).unwrap_or(&[]), sampled.as_deref().copied().flatten(), p.primary);
                 }
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if round_button(ui, "send", 40.0, p.primary, p.on_primary, None, tr("Send voice message (Enter)", "Kirim pesan suara (Enter)")) {
+                        action = Recording::Send;
+                    }
+                    if paused {
+                        let resume = widgets::button(ui, Some("mic"), tr("Resume", "Lanjut rekam"), Kind::Secondary);
+                        if resume.clicked() {
+                            action = Recording::Resume;
+                        }
+                    } else if round_button(ui, "pause", 36.0, p.panel, p.text, Some(p.border_strong), tr("Pause (Space)", "Jeda (Spasi)")) {
+                        action = Recording::Pause;
+                    }
+                });
             });
         });
     action
 }
 
-/// The microphone button: starts recording a voice note for this chat.
-fn mic_button(ui: &mut Ui, voice: &mut Option<VoiceNote>, session: &str, chat: &str, size: f32, connected: bool) {
-    let button = ui.add_enabled_ui(connected, |ui| widgets::icon_button(ui, "mic", size, false)).inner;
-    if button.on_hover_text(tr("Record a voice message", "Rekam pesan suara")).clicked() {
-        let recorder = crate::backend::voice::Recorder::start();
-        *voice = Some(VoiceNote { session: session.to_owned(), chat: chat.to_owned(), step: VoiceStep::Recording(recorder) });
+/// Playback of the paused note, when it is the one in the player.
+fn player_status_preview() -> Option<crate::backend::player::Playback> {
+    crate::backend::player::status(PREVIEW)
+}
+
+
+/// Starts recording a voice note for this chat; `held` for the phone
+/// layout's hold-to-record.
+fn start_voice(voice: &mut Option<VoiceNote>, session: &str, chat: &str, held: bool) {
+    let recorder = crate::backend::voice::Recorder::start();
+    let mut note = VoiceNote::new(session, chat, VoiceStep::Recording(recorder));
+    note.held = held;
+    *voice = Some(note);
+}
+
+/// The round button at the end of the phone composer (Pego `m5/VN 4`): send
+/// when there is something to send, else the mic, which can also be held to
+/// record. Returns true when Send was clicked.
+#[allow(clippy::too_many_arguments)]
+fn send_or_mic(ui: &mut Ui, p: &Palette, voice: &mut Option<VoiceNote>, session: &str, chat: &str, connected: bool, empty: bool, size: f32) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), if connected { Sense::click_and_drag() } else { Sense::hover() });
+    // The icon turns between send and mic with a short crossfade.
+    let mic = ui.ctx().animate_bool_with_time(response.id.with("mic"), empty, 0.12);
+    let fill = if connected { p.primary } else { p.border_strong };
+    let grow = if response.hovered() && connected { 1.0 } else { 0.0 };
+    ui.painter().circle_filled(rect.center(), size / 2.0 + grow, fill);
+    if mic < 1.0 {
+        let icon_rect = Rect::from_center_size(rect.center() + vec2(-1.0, 1.0), vec2(20.0, 20.0));
+        icons::paint(ui, icon_rect, "send", 20.0, p.on_primary.gamma_multiply(1.0 - mic));
     }
+    if mic > 0.0 {
+        icons::paint(ui, Rect::from_center_size(rect.center(), vec2(20.0, 20.0)), "mic", 20.0, p.on_primary.gamma_multiply(mic));
+    }
+    if !connected {
+        return false;
+    }
+    if !empty {
+        return response.on_hover_text(tr("Send", "Kirim")).on_hover_cursor(CursorIcon::PointingHand).clicked();
+    }
+    // Held a moment: hold-to-record; a short click records hands-free.
+    let held_long = response.is_pointer_button_down_on() && ui.input(|i| i.pointer.press_start_time().is_some_and(|t| i.time - t > 0.25));
+    if response.is_pointer_button_down_on() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(30));
+    }
+    if held_long {
+        start_voice(voice, session, chat, true);
+    } else {
+        let hint = tr("Record a voice message (hold to talk)", "Rekam pesan suara (tahan untuk bicara)");
+        if response.on_hover_text(hint).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            start_voice(voice, session, chat, false);
+        }
+    }
+    false
+}
+
+/// The phone layout's hold-to-record (Pego `m5/VN 1`): a pill with the red
+/// dot, the time and the live wave, the mic with a lime ring that grows with
+/// the voice, a lock to slide up to, and "slide left to cancel".
+fn held_bar(ui: &mut Ui, p: &Palette, note: &mut VoiceNote) -> Recording {
+    let VoiceStep::Recording(recorder) = &note.step else { return Recording::Keep };
+    let elapsed = recorder.elapsed().as_secs_f32();
+    let level = recorder.level();
+    if elapsed > 0.0 && note.sampled.is_none_or(|t| t.elapsed() >= WAVE_EVERY) {
+        note.wave.push(level);
+        note.sampled = Some(std::time::Instant::now());
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+    // Where the pointer went since the press: left cancels, up locks.
+    let (down, moved) = ui.input(|i| {
+        let moved = i.pointer.press_origin().zip(i.pointer.latest_pos()).map(|(from, to)| to - from).unwrap_or_default();
+        (i.pointer.primary_down(), moved)
+    });
+    let mut action = if !down {
+        // Let go: a real note goes out, a slip of the finger does not.
+        if elapsed >= 0.5 { Recording::Send } else { Recording::Cancel }
+    } else if moved.x < -90.0 {
+        Recording::Cancel
+    } else if moved.y < -70.0 {
+        Recording::Lock
+    } else {
+        Recording::Keep
+    };
+    if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        action = Recording::Cancel;
+    }
+    // The lock above the mic rises as the finger does.
+    let rise = (-moved.y).clamp(0.0, 70.0) / 70.0;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 10.0;
+        let pill_w = ui.available_width() - 66.0;
+        Frame::NONE.fill(p.raised).corner_radius(24).inner_margin(Margin { left: 14, right: 12, top: 8, bottom: 8 }).show(ui, |ui| {
+            ui.set_width(pill_w - 26.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                let on = (elapsed * 1000.0) as u64 % 1000 < 600;
+                ui.painter().circle_filled(dot.center(), 5.0, if on { p.red } else { p.red.gamma_multiply(0.35) });
+                ui.label(rich_mono(&format!("{}:{:02}", elapsed as u32 / 60, elapsed as u32 % 60), 14.0, p.text));
+                let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), Sense::hover());
+                paint_live_wave(ui, rect, &note.wave, note.sampled, p.primary);
+            });
+        });
+        let (rect, _) = ui.allocate_exact_size(vec2(52.0, 52.0), Sense::hover());
+        // The ring grows 1.0 to 1.35 times with the voice, smoothed over 120 ms.
+        let loud = ((wave_height(level, 32.0) - 3.0) / 29.0).clamp(0.0, 1.0);
+        let smooth = ui.ctx().animate_value_with_time(egui::Id::unique("voice_ring"), loud, 0.12);
+        ui.painter().circle_filled(rect.center(), 26.0 * (1.0 + 0.35 * smooth), p.accent.gamma_multiply(0.85));
+        ui.painter().circle_filled(rect.center(), 24.0, p.primary);
+        icons::paint(ui, Rect::from_center_size(rect.center(), vec2(20.0, 20.0)), "mic", 20.0, p.on_primary);
+        let lock = Rect::from_center_size(rect.center() - vec2(0.0, 64.0 + 20.0 * rise), vec2(34.0, 54.0));
+        ui.painter().rect(lock, 17.0, p.panel, Stroke::new(1.0, p.border), StrokeKind::Inside);
+        let lock_color = if rise > 0.9 { p.primary } else { p.text_2 };
+        icons::paint(ui, Rect::from_center_size(lock.center() - vec2(0.0, 10.0), vec2(16.0, 16.0)), "lock", 16.0, lock_color);
+        icons::paint(ui, Rect::from_center_size(lock.center() + vec2(0.0, 12.0), vec2(14.0, 14.0)), "chevron-up", 14.0, p.muted);
+    });
+    ui.vertical_centered(|ui| {
+        let slide = (-moved.x).clamp(0.0, 90.0) / 90.0;
+        let color = if slide > 0.6 { p.red_text } else { p.muted };
+        ui.label(rich(tr("« Slide left to cancel", "« Geser ke kiri untuk batal"), 12.0, Weight::Regular, color));
+    });
+    action
 }
 
 /// Each frame, outside the composer: a voice note whose chat is no longer on
@@ -2026,7 +2479,7 @@ fn voice_note(ui: &mut Ui, p: &Palette, state: &mut State, session: &SessionView
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
                 if here {
-                    recording_bar(ui, p, None, compact);
+                    recording_bar(ui, p, None, &session.name, compact);
                     return Err(());
                 }
             }
@@ -2049,14 +2502,52 @@ fn voice_note(ui: &mut Ui, p: &Palette, state: &mut State, session: &SessionView
                 note.step = failed(e);
                 return Ok(None);
             }
-            match recording_bar(ui, p, Some(recorder), compact) {
+            // The paused note arrived from the recording thread: play it.
+            if let Some(pcm) = note.preview.as_ref().and_then(|r| r.try_recv().ok()) {
+                note.preview = None;
+                crate::backend::player::play_buffer(PREVIEW, pcm);
+            }
+            let asked = if note.held { held_bar(ui, p, note) } else { recording_bar(ui, p, Some(note), &session.name, compact) };
+            match asked {
                 Recording::Keep => {}
-                Recording::Cancel => state.voice = None,
+                Recording::Lock => {
+                    if let Some(note) = state.voice.as_mut() {
+                        note.held = false;
+                    }
+                }
+                Recording::Cancel => {
+                    crate::backend::player::forget(PREVIEW);
+                    state.voice = None;
+                }
+                Recording::Pause => {
+                    if let Some(VoiceNote { step: VoiceStep::Recording(recorder), .. }) = state.voice.as_mut() {
+                        recorder.pause();
+                    }
+                }
+                Recording::Resume => {
+                    crate::backend::player::forget(PREVIEW);
+                    if let Some(VoiceNote { step: VoiceStep::Recording(recorder), sampled, .. }) = state.voice.as_mut() {
+                        recorder.resume();
+                        *sampled = None;
+                    }
+                }
+                Recording::Listen => {
+                    if crate::backend::player::status(PREVIEW).is_some() {
+                        crate::backend::player::toggle(PREVIEW, Path::new(""));
+                    } else if let Some(note) = state.voice.as_mut() {
+                        if let VoiceStep::Recording(recorder) = &note.step {
+                            note.preview = Some(recorder.preview());
+                        }
+                    }
+                }
                 Recording::Send => {
-                    let VoiceStep::Recording(recorder) = std::mem::replace(&mut note.step, VoiceStep::Failed(String::new(), std::time::Instant::now())) else {
-                        unreachable!("matched above")
-                    };
-                    note.step = VoiceStep::Saving(recorder.finish(crate::platform::data_dir().join("voice")));
+                    crate::backend::player::forget(PREVIEW);
+                    if let Some(note) = state.voice.as_mut() {
+                        let VoiceStep::Recording(recorder) = std::mem::replace(&mut note.step, VoiceStep::Failed(String::new(), std::time::Instant::now())) else {
+                            unreachable!("matched above")
+                        };
+                        note.step = VoiceStep::Saving(recorder.finish(crate::platform::data_dir().join("voice")));
+                    }
                 }
             }
             return Err(());
@@ -2202,14 +2693,10 @@ fn composer(
                     if clip.clicked() && state.picking.is_none() {
                         state.picking = Some(pick_file(ui.ctx()));
                     }
-                    mic_button(ui, &mut state.voice, &session.id, chat, 32.0, connected);
                 });
             });
-            let (rect, response) = ui.allocate_exact_size(vec2(48.0, 48.0), if connected { Sense::click() } else { Sense::hover() });
-            let fill = if connected { p.primary } else { p.border_strong };
-            ui.painter().circle_filled(rect.center(), 24.0, fill);
-            icons::paint(ui, Rect::from_center_size(rect.center() + vec2(-1.0, 1.0), vec2(20.0, 20.0)), "send", 20.0, p.on_primary);
-            send |= connected && response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+            let empty = text.trim().is_empty() && state.attachment.is_none();
+            send |= send_or_mic(ui, p, &mut state.voice, &session.id, chat, connected, empty, 48.0);
         });
         if !connected {
             ui.add_space(4.0);
@@ -2245,6 +2732,7 @@ fn composer(
             );
             edit_rect = Some(edit.rect);
             ui.add_space(6.0);
+            let empty = text.trim().is_empty() && state.attachment.is_none();
             widgets::row(
                 ui,
                 32.0,
@@ -2258,7 +2746,6 @@ fn composer(
                     emoji::picker(ui, &smile, id, text);
                     let sticker = widgets::icon_button(ui, "sticker", 28.0, false).on_hover_text(tr("Sticker", "Stiker"));
                     sticker_sent = stickers::picker(ui, &sticker, book, connected);
-                    mic_button(ui, &mut state.voice, &session.id, chat, 28.0, connected);
                     ui.add_space(8.0);
                     let note = if connected && several {
                         crate::trf!(
@@ -2275,10 +2762,18 @@ fn composer(
                     ui.add(egui::Label::new(rich(&note, 12.0, Weight::Regular, color)).truncate());
                 },
                 |ui| {
-                    let button = ui.add_enabled_ui(connected, |ui| {
-                        widgets::button(ui, Some("arrow-up"), tr("Send", "Kirim"), Kind::Primary)
-                    });
-                    send |= connected && button.inner.clicked();
+                    // Send turns into the mic while there is nothing to send.
+                    if empty {
+                        let button = ui.add_enabled_ui(connected, |ui| widgets::button(ui, Some("mic"), tr("Record", "Rekam"), Kind::Primary));
+                        if connected && button.inner.on_hover_text(tr("Record a voice message", "Rekam pesan suara")).clicked() {
+                            start_voice(&mut state.voice, &session.id, chat, false);
+                        }
+                    } else {
+                        let button = ui.add_enabled_ui(connected, |ui| {
+                            widgets::button(ui, Some("arrow-up"), tr("Send", "Kirim"), Kind::Primary)
+                        });
+                        send |= connected && button.inner.clicked();
+                    }
                     ui.add_space(8.0);
                     let queue = if session.queue == 0 {
                         tr("Queued 0", "Antre 0").to_owned()
@@ -2897,6 +3392,23 @@ fn compact_chat(
         });
     });
     commands
+}
+
+#[cfg(test)]
+mod wave_tests {
+    use super::*;
+
+    #[test]
+    fn wave_heights_are_log_scaled() {
+        assert_eq!(wave_height(0.0, 32.0), 3.0);
+        assert_eq!(wave_height(1.0, 32.0), 32.0);
+        // Quiet speech (about -30 dB) is already well above the dot.
+        assert!(wave_height(0.03, 32.0) > 12.0);
+        assert_eq!(voice_bars(&[]).len(), VOICE_BARS);
+        let bars = voice_bars(&(0..64).map(|i| i as u8).collect::<Vec<_>>());
+        assert_eq!(bars.len(), VOICE_BARS);
+        assert!(bars.windows(2).all(|w| w[0] <= w[1]));
+    }
 }
 
 #[cfg(test)]

@@ -452,7 +452,7 @@ pub fn describe(message: &wa::Message, dir: &Path, msg_id: &str) -> Option<Value
         }
         _ => Value::Null,
     };
-    Some(json!({
+    let mut record = json!({
         "k": found.kind,
         "mime": found.mime,
         "size": found.size,
@@ -461,7 +461,16 @@ pub fn describe(message: &wa::Message, dir: &Path, msg_id: &str) -> Option<Value
         "name": found.name,
         "thumb": thumb,
         "dl": download,
-    }))
+    });
+    // A voice note's length and waveform, so its bubble draws before download.
+    if let Some(audio) = base.audio_message.as_option() {
+        record["secs"] = json!(audio.seconds);
+        record["ptt"] = json!(audio.ptt);
+        if let Some(wave) = audio.waveform.as_ref().filter(|w| !w.is_empty()) {
+            record["wave"] = json!(hex(wave));
+        }
+    }
+    Some(record)
 }
 
 /// Uploads a recorded voice note and wraps it as a push-to-talk message, with
@@ -484,7 +493,13 @@ pub async fn voice_message(client: &Client, path: &Path) -> Result<wa::Message, 
 /// The media part of a sent voice note's chat record.
 pub fn describe_sent_voice(path: &Path) -> Value {
     let size = std::fs::metadata(path).map(|m| m.len()).ok();
-    json!({ "k": "audio", "mime": "audio/ogg; codecs=opus", "size": size, "file": path.to_string_lossy() })
+    let mut record = json!({ "k": "audio", "mime": "audio/ogg; codecs=opus", "size": size, "file": path.to_string_lossy(), "ptt": true });
+    // Read back from the file, as the message itself carries them.
+    if let Some((seconds, wave)) = std::fs::read(path).ok().and_then(|bytes| super::voice::inspect(&bytes).ok()) {
+        record["secs"] = json!(seconds);
+        record["wave"] = json!(hex(&wave));
+    }
+    record
 }
 
 /// The media part of a sent sticker's chat record.

@@ -183,6 +183,21 @@ impl Running {
         });
     }
 
+    /// "Recording audio" (or stopped) for `chat`, as WhatsApp shows while a
+    /// voice note is recorded.
+    pub fn recording_state(&self, id: &str, chat: &str, on: bool) {
+        let Ok(jid) = chat.parse::<Jid>() else {
+            return;
+        };
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            let sent = if on { client.chatstate().send_recording(&jid).await } else { client.chatstate().send_paused(&jid).await };
+            if let Err(e) = sent {
+                log::debug!("session {id}: recording indicator not sent: {e}");
+            }
+        });
+    }
+
     /// Sends the "seen" receipt for a contact's status update, as opening it
     /// on the phone does; the poster sees this number among the viewers.
     pub fn mark_status_seen(&self, id: &str, sender: &str, msg_id: String, state: &Updater, store: Arc<Mutex<Store>>) {

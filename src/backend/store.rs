@@ -113,6 +113,12 @@ pub struct Media {
     pub thumb: Option<PathBuf>,
     /// The downloaded file, or the original for files sent from here.
     pub file: Option<PathBuf>,
+    /// Voice notes: length in seconds and the waveform (0 to 100 per bar)
+    /// the message carries, so the bubble draws before the file is here.
+    pub seconds: Option<u32>,
+    pub waveform: Vec<u8>,
+    /// A voice note (push to talk), not another audio file.
+    pub voice: bool,
     /// The stored record, which `media::download` reads.
     pub raw: Value,
 }
@@ -129,6 +135,10 @@ impl Media {
             height: number("h").map(|n| n as u32),
             thumb: text("thumb").map(PathBuf::from),
             file: text("file").map(PathBuf::from),
+            seconds: number("secs").map(|n| n as u32),
+            waveform: text("wave").map(|h| unhex(&h)).unwrap_or_default(),
+            voice: raw.get("ptt").and_then(Value::as_bool).unwrap_or(false)
+                || text("mime").is_some_and(|m| m.contains("opus") || m.starts_with("audio/ogg")),
             raw: raw.clone(),
         })
     }
@@ -823,6 +833,14 @@ pub fn archive_record(chat: &str, archived: bool) -> Value {
 /// Marks a chat unread again (at least one unread message).
 pub fn unread_record(chat: &str) -> Value {
     json!({ "t": "unread", "chat": chat })
+}
+
+/// Bytes from lowercase or uppercase hex; bad digits end it.
+fn unhex(text: &str) -> Vec<u8> {
+    text.as_bytes()
+        .chunks(2)
+        .map_while(|pair| std::str::from_utf8(pair).ok().and_then(|p| u8::from_str_radix(p, 16).ok()))
+        .collect()
 }
 
 #[cfg(test)]

@@ -5,7 +5,7 @@
 
 use crate::i18n::tr;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
@@ -251,6 +251,13 @@ impl Encoder {
 /// Length in whole seconds and the waveform of an Ogg Opus voice note, read
 /// back from the file so a queued note can be sent again from its path.
 pub fn inspect(ogg: &[u8]) -> Result<(u32, Vec<u8>), String> {
+    let audio = decode(ogg)?;
+    Ok((seconds_of(audio.len() as u64), waveform(&audio)))
+}
+
+/// The 48 kHz mono samples of an Ogg Opus file (ours, or a received voice
+/// note), without the encoder's priming samples.
+pub fn decode(ogg: &[u8]) -> Result<Vec<f32>, String> {
     let mut reader = ogg::PacketReader::new(std::io::Cursor::new(ogg));
     let head = reader.read_packet_expected().map_err(|e| crate::trf!("Not a voice message: {e}", "Bukan pesan suara: {e}"))?;
     if !head.data.starts_with(b"OpusHead") || head.data.len() < 19 {
@@ -258,6 +265,7 @@ pub fn inspect(ogg: &[u8]) -> Result<(u32, Vec<u8>), String> {
     }
     let pre_skip = usize::from(u16::from_le_bytes([head.data[10], head.data[11]]));
     reader.read_packet_expected().map_err(|e| crate::trf!("Broken voice message: {e}", "Pesan suara rusak: {e}"))?; // OpusTags
+    // Mono output also decodes stereo streams (libopus downmixes).
     let mut decoder = opus::Decoder::new(RATE, opus::Channels::Mono).map_err(|e| e.to_string())?;
     let (mut pcm, mut end) = (Vec::new(), 0u64);
     let mut out = vec![0.0f32; 5_760];
@@ -268,8 +276,9 @@ pub fn inspect(ogg: &[u8]) -> Result<(u32, Vec<u8>), String> {
     }
     // The last granule marks where the audio ends; the first `pre_skip` samples are priming.
     let end = usize::try_from(end).unwrap_or(usize::MAX).min(pcm.len());
-    let audio = pcm.get(pre_skip.min(end)..end).unwrap_or_default();
-    Ok((seconds_of(audio.len() as u64), waveform(audio)))
+    pcm.truncate(end);
+    pcm.drain(..pre_skip.min(pcm.len()));
+    Ok(pcm)
 }
 
 /// Where a recording stands.
@@ -284,6 +293,9 @@ enum Message {
     Audio(Vec<f32>),
     Finish(PathBuf),
     Cancel,
+    /// Asks for what was recorded so far, as 48 kHz mono, to listen to while
+    /// paused.
+    Preview(mpsc::Sender<Vec<f32>>),
 }
 
 /// A recording in progress. The microphone and the encoder run on their own
@@ -293,8 +305,12 @@ pub struct Recorder {
     opened: mpsc::Receiver<Result<(), String>>,
     saved: Option<mpsc::Receiver<Result<PathBuf, String>>>,
     level: Arc<AtomicU32>,
+    /// While set, what the microphone hears is not recorded.
+    paused: Arc<AtomicBool>,
     asked: Instant,
     started: Option<Instant>,
+    /// Time recorded before the current stretch (pauses left out).
+    before: Duration,
     failed: Option<String>,
 }
 
@@ -305,10 +321,11 @@ impl Recorder {
         let (ready, opened) = mpsc::channel();
         let (done, saved) = mpsc::channel();
         let level = Arc::new(AtomicU32::new(0));
-        let (audio, peak) = (to.clone(), level.clone());
-        let spawned = std::thread::Builder::new().name("mic".to_owned()).spawn(move || record(audio, peak, from, ready, done));
+        let paused = Arc::new(AtomicBool::new(false));
+        let (audio, peak, hold) = (to.clone(), level.clone(), paused.clone());
+        let spawned = std::thread::Builder::new().name("mic".to_owned()).spawn(move || record(audio, peak, hold, from, ready, done));
         let failed = spawned.err().map(|e| crate::trf!("The microphone cannot be used: {e}", "Mikrofon tidak bisa dipakai: {e}"));
-        Self { to, opened, saved: Some(saved), level, asked: Instant::now(), started: None, failed }
+        Self { to, opened, saved: Some(saved), level, paused, asked: Instant::now(), started: None, before: Duration::ZERO, failed }
     }
 
     pub fn poll(&mut self) -> Mic {
@@ -333,9 +350,37 @@ impl Recorder {
         self.poll()
     }
 
-    /// Time recorded (zero while the microphone opens).
+    /// Time recorded, pauses left out (zero while the microphone opens).
     pub fn elapsed(&self) -> Duration {
-        self.started.map(|t| t.elapsed()).unwrap_or_default()
+        let running = if self.is_paused() { Duration::ZERO } else { self.started.map(|t| t.elapsed()).unwrap_or_default() };
+        self.before + running
+    }
+
+    pub fn is_paused(&self) -> bool {
+        self.paused.load(Ordering::Relaxed)
+    }
+
+    /// Stops recording for now; `resume` goes on in the same note.
+    pub fn pause(&mut self) {
+        if self.started.is_some() && !self.is_paused() {
+            self.before = self.elapsed();
+            self.paused.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn resume(&mut self) {
+        if self.is_paused() {
+            self.started = Some(Instant::now());
+            self.paused.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// What was recorded so far, as 48 kHz mono, for listening while paused.
+    /// The answer comes from the recording thread.
+    pub fn preview(&self) -> mpsc::Receiver<Vec<f32>> {
+        let (answer, receive) = mpsc::channel();
+        let _ = self.to.send(Message::Preview(answer));
+        receive
     }
 
     /// Loudness of the latest audio, 0 to 1, for the recording meter.
@@ -366,6 +411,7 @@ impl Drop for Recorder {
 fn record(
     audio: mpsc::Sender<Message>,
     level: Arc<AtomicU32>,
+    paused: Arc<AtomicBool>,
     from: mpsc::Receiver<Message>,
     ready: mpsc::Sender<Result<(), String>>,
     done: mpsc::Sender<Result<PathBuf, String>>,
@@ -387,12 +433,24 @@ fn record(
     let _ = ready.send(Ok(()));
     let mut stream = Some(stream);
     let mut failure = None;
+    // A 16-bit copy at the microphone's rate, to listen to while paused.
+    let mut kept: Vec<i16> = Vec::new();
+    let keep_limit = rate as usize * MAX_SECONDS as usize;
     while let Ok(message) = from.recv() {
         match message {
             Message::Audio(mono) => {
+                if paused.load(Ordering::Relaxed) {
+                    continue;
+                }
                 if failure.is_none() {
                     failure = encoder.push(&mono).err();
                 }
+                if kept.len() < keep_limit {
+                    kept.extend(mono.iter().map(|s| (s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16));
+                }
+            }
+            Message::Preview(answer) => {
+                let _ = answer.send(to_rate(&kept, rate));
             }
             Message::Cancel => return,
             Message::Finish(dir) => {
@@ -416,6 +474,25 @@ fn record(
             }
         }
     }
+}
+
+/// 16-bit samples at `rate` as 48 kHz floats (linear interpolation).
+fn to_rate(kept: &[i16], rate: u32) -> Vec<f32> {
+    let scale = 1.0 / f32::from(i16::MAX);
+    if rate == RATE || kept.is_empty() {
+        return kept.iter().map(|&s| f32::from(s) * scale).collect();
+    }
+    let step = f64::from(rate) / f64::from(RATE);
+    let length = (kept.len() as f64 / step) as usize;
+    (0..length)
+        .map(|i| {
+            let at = i as f64 * step;
+            let j = at as usize;
+            let a = f32::from(kept[j.min(kept.len() - 1)]);
+            let b = f32::from(kept[(j + 1).min(kept.len() - 1)]);
+            (a + (b - a) * (at - j as f64) as f32) * scale
+        })
+        .collect()
 }
 
 fn save(dir: &std::path::Path, ogg: &[u8]) -> Result<PathBuf, String> {
@@ -465,6 +542,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paused_recording_resamples_to_48k() {
+        let kept: Vec<i16> = (0..44_100).map(|i| ((i as f32 / 10.0).sin() * 1000.0) as i16).collect();
+        let out = to_rate(&kept, 44_100);
+        assert!((out.len() as i64 - 48_000).abs() <= 1);
+        assert!(out.iter().all(|s| s.abs() <= 1.0));
+        assert_eq!(to_rate(&[], 44_100), Vec::<f32>::new());
+    }
 
     fn tone(rate: u32, seconds: f32, channels: usize, loudness: f32) -> Vec<f32> {
         let frames = (rate as f32 * seconds) as usize;
