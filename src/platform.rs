@@ -68,6 +68,25 @@ pub fn open(target: impl AsRef<OsStr>) {
     }
 }
 
+/// Opens an http(s) link in the default browser. The link is never passed
+/// through a shell (`cmd` would read `&` in a URL as a second command).
+pub fn open_url(url: &str) {
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) || url.chars().any(char::is_control) {
+        return;
+    }
+    let spawned = if cfg!(windows) {
+        command("rundll32").args(["url.dll,FileProtocolHandler", url]).spawn()
+    } else if cfg!(target_os = "macos") {
+        command("open").arg(url).spawn()
+    } else {
+        command("xdg-open").arg(url).spawn()
+    };
+    if let Err(e) = spawned {
+        log::warn!("cannot open link: {e}");
+    }
+}
+
 /// Asks for one file with the OS's dialog; blocks, so call it off the UI
 /// thread. `None` when cancelled or when no dialog is available.
 pub fn pick_file(title: &str, images_only: bool) -> Option<PathBuf> {

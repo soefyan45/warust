@@ -1431,7 +1431,15 @@ fn messages(
                             let height = text.size().y;
                             // Selectable label (drag to select, Cmd/Ctrl+C copies the selection). It sits above the
                             // bubble's click area, so it also needs its own context menu for right-click on text.
+                            let link = link_at(ui, &text, at);
                             let label = ui.put(Rect::from_min_size(at, text.size()), egui::Label::new(text).selectable(true));
+                            // A click (not a drag that selects text) on a link opens it.
+                            if let Some(url) = link.filter(|_| label.hovered()) {
+                                label.ctx.set_cursor_icon(CursorIcon::PointingHand);
+                                if ui.input(|i| i.pointer.primary_clicked()) {
+                                    crate::platform::open_url(&url);
+                                }
+                            }
                             label.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
                             at.y += height + 4.0;
                         }
@@ -1525,6 +1533,20 @@ fn save_pasted_image(image: &egui::ColorImage, dir: &Path) -> Result<PathBuf, St
     Ok(path)
 }
 
+/// The web link under the pointer in a bubble's text laid out at `at`.
+fn link_at(ui: &Ui, text: &std::sync::Arc<egui::Galley>, at: egui::Pos2) -> Option<String> {
+    let pointer = ui.input(|i| i.pointer.hover_pos())?;
+    let rect = Rect::from_min_size(at, text.size());
+    if !rect.contains(pointer) {
+        return None;
+    }
+    let index: usize = text.cursor_from_pos(pointer - at).index.into();
+    markup::links(text.text())
+        .into_iter()
+        .find(|(range, _)| range.start <= index && index < range.end)
+        .map(|(_, url)| url)
+}
+
 /// The file waiting to be sent: icon, name, size and a remove button.
 /// Returns false when the file cannot be sent (missing or too large).
 fn attachment_chip(ui: &mut Ui, p: &Palette, attachment: &mut Option<PathBuf>) -> bool {
@@ -1549,6 +1571,12 @@ fn attachment_chip(ui: &mut Ui, p: &Palette, attachment: &mut Option<PathBuf>) -
         .corner_radius(R_MD)
         .inner_margin(Margin { left: 10, right: 4, top: 4, bottom: 4 })
         .show(ui, |ui| {
+            // A picture (a pasted screenshot, say) shows what will be sent.
+            if picture && size.is_some() && let Some(uri) = widgets::picture_uri(ui.ctx(), path) {
+                ui.add_space(4.0);
+                ui.add(egui::Image::from_uri(uri).max_size(vec2(260.0, 160.0)).corner_radius(R_MD));
+                ui.add_space(2.0);
+            }
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 icons::show(ui, if picture { "image" } else { "file-text" }, 16.0, p.text_2);
