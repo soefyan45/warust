@@ -900,6 +900,25 @@ fn paint_media(
     }
 }
 
+/// An entry of the message context menu. Add a variant, a button in
+/// `message_menu` and a branch where it is handled to extend the menu.
+enum MsgAction {
+    Copy,
+}
+
+/// Right-click / long-press menu of a message bubble; returns the chosen action.
+fn message_menu(ui: &mut Ui, m: &ChatMsg) -> Option<MsgAction> {
+    let mut action = None;
+    // Media without a caption has nothing to copy.
+    if !caption(m).is_empty() && ui.button("Salin").clicked() {
+        action = Some(MsgAction::Copy);
+    }
+    if action.is_some() {
+        ui.close();
+    }
+    action
+}
+
 /// Paints the open chat; returns a message whose media the user wants downloaded.
 fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool, typing: Option<&str>) -> Option<MediaClick> {
     const GAP: f32 = 6.0;
@@ -1029,6 +1048,14 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
                         let rect = Rect::from_min_size(pos2(left, y), size);
                         if !matches!(media, Some((_, MediaBox::Sticker(_)))) {
                             painter.rect(rect, R_LG, fill, stroke, StrokeKind::Inside);
+                        }
+                        // Created before the media's own click area, so media keeps its primary click.
+                        let bubble = ui.interact(rect, ui.scope_id().with(("bubble", &m.id)), Sense::click());
+                        let mut action = None;
+                        bubble.context_menu(|ui| action = message_menu(ui, m));
+                        match action {
+                            Some(MsgAction::Copy) => ui.ctx().copy_text(caption(m)),
+                            None => {}
                         }
                         let mut at = rect.min + vec2(14.0, 10.0);
                         if let Some(quote) = quote {
