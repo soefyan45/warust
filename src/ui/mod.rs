@@ -136,6 +136,18 @@ pub struct State {
     pub status_paused: bool,
     /// A screen asked to open this chat (session id, JID) in the Inbox.
     pub open_chat_requested: Option<(String, String)>,
+    /// Unread messages of the chat that was just opened, captured before `Seen` clears them.
+    pub unread_anchor: Option<UnreadAnchor>,
+}
+
+/// Where the unread messages of an opened chat start; `pending` is the
+/// one-shot "scroll to the divider" flag.
+#[derive(Clone, Debug)]
+pub struct UnreadAnchor {
+    pub jid: String,
+    pub count: usize,
+    pub first_id: String,
+    pub pending: bool,
 }
 
 pub struct App {
@@ -777,8 +789,8 @@ impl eframe::App for App {
             None => {}
         }
         if let Some((session, jid)) = self.state.open_chat_requested.take() {
-            self.state.inbox_session = Some(session.clone());
-            self.state.chat_selected = Some(jid.clone());
+            let chat = self.sessions.iter().find(|s| s.id == session).and_then(|s| s.book.chats.iter().find(|c| c.jid == jid));
+            screens::inbox::open_chat(&mut self.state, &session, &jid, chat);
             self.state.chat_tab = screens::inbox::TAB_ALL;
             self.backend.send(Command::Seen { id: session, chat: jid });
             self.screen = Screen::Inbox;
@@ -789,8 +801,8 @@ impl eframe::App for App {
         match summary_action {
             Some(screens::ringkasan::Action::Nomor(a)) => action = Some(a),
             Some(screens::ringkasan::Action::OpenChat { session, jid }) => {
-                self.state.inbox_session = Some(session.clone());
-                self.state.chat_selected = Some(jid.clone());
+                let chat = self.sessions.iter().find(|s| s.id == session).and_then(|s| s.book.chats.iter().find(|c| c.jid == jid));
+                screens::inbox::open_chat(&mut self.state, &session, &jid, chat);
                 self.state.chat_tab = screens::inbox::TAB_ALL;
                 self.backend.send(Command::Seen { id: session, chat: jid });
                 self.screen = Screen::Inbox;

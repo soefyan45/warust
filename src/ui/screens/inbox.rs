@@ -20,7 +20,7 @@ type Downloads = HashMap<String, Option<String>>;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG, R_MD};
 use crate::ui::widgets::{self, Kind, rich, rich_mono};
-use crate::ui::{ReplyTarget, State, emoji, forward, icons, markup, pdf, stickers, time};
+use crate::ui::{ReplyTarget, State, UnreadAnchor, emoji, forward, icons, markup, pdf, stickers, time};
 
 const ROW: f32 = 60.0;
 /// Chat list tabs (Pego `v5/Inbox`): "Perlu balas", "Semua", "Selesai", "Diarsipkan".
@@ -191,7 +191,7 @@ pub fn show(
                     commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
                 }
                 pinned_bar(ui, &p, chat);
-                if let Some(event) = messages(ui, &p, &book, chat, downloads, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref()) {
+                if let Some(event) = messages(ui, &p, &book, chat, downloads, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), &mut state.unread_anchor) {
                     on_message_event(event, state, session, chat, &mut commands);
                 }
             });
@@ -438,8 +438,7 @@ fn chat_list(
                     let row = chat_row(ui, p, rect, &title, chat, picture, selected, via_number, typing_label(state, &s.id, &s.book, chat).as_deref());
                     chat_menu(&row, s, chat, &mut commands);
                     if row.clicked() {
-                        state.inbox_session = Some(s.id.clone());
-                        state.chat_selected = Some(chat.jid.clone());
+                        open_chat(state, &s.id, &chat.jid, Some(chat));
                         if chat.unread > 0 {
                             commands.push(Command::Seen { id: s.id.clone(), chat: chat.jid.clone() });
                         }
@@ -482,6 +481,23 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
         lines.extend(mine.into_iter().map(|(s, c)| Line::Chat(s, c)));
     }
     lines
+}
+
+/// Opens a chat and remembers where its unread messages start; call before
+/// `Seen` clears the count. Re-opening the chat already open keeps the anchor.
+pub fn open_chat(state: &mut State, session: &str, jid: &str, chat: Option<&Chat>) {
+    let already = state.inbox_session.as_deref() == Some(session) && state.chat_selected.as_deref() == Some(jid);
+    state.inbox_session = Some(session.to_owned());
+    state.chat_selected = Some(jid.to_owned());
+    if already {
+        return;
+    }
+    state.unread_anchor = chat.and_then(|chat| {
+        let incoming: Vec<&ChatMsg> = chat.messages.iter().filter(|m| !m.from_me).collect();
+        let count = (chat.unread as usize).min(incoming.len());
+        let first = incoming.get(incoming.len().checked_sub(count)?)?;
+        (count > 0).then(|| UnreadAnchor { jid: jid.to_owned(), count, first_id: first.id.clone(), pending: true })
+    });
 }
 
 /// Right-click menu of a chat row (wide and phone lists): read state and archive.
@@ -1089,7 +1105,8 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
 }
 
 /// Paints the open chat; returns a message whose media the user wants downloaded.
-fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool, typing: Option<&str>) -> Option<MsgEvent> {
+#[allow(clippy::too_many_arguments)]
+fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool, typing: Option<&str>, anchor: &mut Option<UnreadAnchor>) -> Option<MsgEvent> {
     const GAP: f32 = 6.0;
     const DIVIDER: f32 = 36.0;
     let wrap = (ui.available_width() * 0.7).min(420.0);
@@ -1107,6 +1124,13 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
     }
 
+    // The unread divider goes before this message; the first frame scrolls to it once.
+    let unread = anchor.as_ref().filter(|a| a.jid == chat.jid && shown.iter().any(|m| m.id == a.first_id)).map(|a| (a.first_id.clone(), a.count));
+    let mut scroll_unread = unread.is_some() && anchor.as_mut().is_some_and(|a| std::mem::take(&mut a.pending));
+    let memo_id = ui.scope_id().with(("chat_scroll_memo", &chat.jid));
+    let bottom_id = ui.scope_id().with(("chat_scroll_bottom", &chat.jid));
+    let to_bottom: bool = ui.data_mut(|d| d.remove_temp::<bool>(bottom_id)).unwrap_or(false);
+
     struct Bubble<'a> {
         m: &'a ChatMsg,
         media: Option<(&'a Media, MediaBox)>,
@@ -1120,6 +1144,8 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
     }
     enum Item<'a> {
         Day(String),
+        /// "N pesan belum dibaca" before the first unread message.
+        Unread(usize),
         Bubble(Bubble<'a>),
         /// "••• sedang mengetik" after the last message (Pego `v5/Inbox · Chat`).
         Typing(String),
@@ -1139,6 +1165,9 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
         } else {
             (p.text, p.muted, p.border)
         };
+        if let Some((_, count)) = unread.as_ref().filter(|(first, _)| *first == m.id) {
+            items.push(Item::Unread(*count));
+        }
         let media = m.media.as_ref().map(|media| (media, media_box(media, wrap)));
         let media_size = media.as_ref().map(|(_, b)| b.size());
         let sticker = matches!(media, Some((_, MediaBox::Sticker(_))));
@@ -1175,13 +1204,13 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
     let content: f32 = items
         .iter()
         .map(|i| match i {
-            Item::Day(_) => DIVIDER,
+            Item::Day(_) | Item::Unread(_) => DIVIDER,
             Item::Bubble(b) => b.size.y + GAP,
             Item::Typing(_) => TYPING_ROW + GAP,
         })
         .sum();
 
-    ScrollArea::vertical()
+    let output = ScrollArea::vertical()
         .stick_to_bottom(true)
         .auto_shrink(false)
         .show(ui, |ui| {
@@ -1210,6 +1239,18 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
                         widgets::paint_text(ui, text, &label, fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
                         ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
                         y += TYPING_ROW + GAP;
+                    }
+                    Item::Unread(count) => {
+                        let label = format!("{count} pesan belum dibaca");
+                        let galley = painter.layout_no_wrap(label, fonts::ui(12.0, Weight::Medium), p.accent_text);
+                        let (w, cy, cx) = (galley.size().x, y + DIVIDER / 2.0, area.center().x);
+                        let pill = Rect::from_center_size(pos2(cx, cy), vec2(w + 24.0, 24.0));
+                        painter.rect(pill, 12.0, p.accent_soft, Stroke::new(1.0, p.border), StrokeKind::Inside);
+                        painter.galley(pos2(cx - w / 2.0, cy - galley.size().y / 2.0), galley, p.accent_text);
+                        if std::mem::take(&mut scroll_unread) {
+                            ui.scroll_to_rect(Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), DIVIDER)), Some(Align::TOP));
+                        }
+                        y += DIVIDER;
                     }
                     Item::Day(label) => {
                         // A pill, so it reads on the wallpaper (Pego m5/Chat "Hari ini").
@@ -1289,7 +1330,40 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
                     }
                 }
             }
+            if to_bottom {
+                ui.scroll_to_rect(Rect::from_min_size(pos2(area.left(), area.bottom() - 1.0), vec2(area.width(), 1.0)), Some(Align::BOTTOM));
+            }
         });
+    // Floating "down" button while scrolled up, with the incoming messages since leaving the bottom.
+    let at_bottom = output.state.unclamped_offset().y + output.inner_rect.height() >= output.content_size.y - 8.0;
+    if at_bottom {
+        ui.data_mut(|d| d.remove_temp::<usize>(memo_id));
+    } else {
+        let seen = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(memo_id, || chat.messages.len()));
+        let fresh = chat.messages.get(seen..).map_or(0, |new| new.iter().filter(|m| !m.from_me).count());
+        let size = 40.0;
+        let at = output.inner_rect.right_bottom() - vec2(size + 16.0, size + 16.0);
+        egui::Area::new(ui.scope_id().with(("chat_to_bottom", &chat.jid)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(at)
+            .show(ui.ctx(), |ui| {
+                let (rect, resp) = ui.allocate_exact_size(egui::Vec2::splat(size), Sense::click());
+                let fill = if resp.hovered() { p.selected } else { p.raised };
+                ui.painter().circle(rect.center(), size / 2.0, fill, Stroke::new(1.0, p.border_strong));
+                icons::paint(ui, rect, "chevron-down", 20.0, p.text_2);
+                if fresh > 0 {
+                    let label = if fresh > 99 { "99+".to_owned() } else { fresh.to_string() };
+                    let galley = ui.painter().layout_no_wrap(label, fonts::ui(11.0, Weight::Medium), p.on_primary);
+                    let badge = Rect::from_center_size(rect.center_top() + vec2(0.0, 2.0), vec2((galley.size().x + 10.0).max(18.0), 18.0));
+                    ui.painter().rect_filled(badge, 9.0, p.primary);
+                    ui.painter().galley(badge.center() - galley.size() / 2.0, galley, p.on_primary);
+                }
+                if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    ui.data_mut(|d| d.insert_temp(bottom_id, true));
+                    ui.ctx().request_repaint();
+                }
+            });
+    }
     clicked
 }
 
@@ -1767,8 +1841,7 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                         let row = compact_row(ui, &p, rect, &title, chat, picture, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref());
                         chat_menu(&row, s, chat, &mut commands);
                         if row.clicked() {
-                            state.inbox_session = Some(s.id.clone());
-                            state.chat_selected = Some(chat.jid.clone());
+                            open_chat(state, &s.id, &chat.jid, Some(chat));
                             if chat.unread > 0 {
                                 commands.push(Command::Seen { id: s.id.clone(), chat: chat.jid.clone() });
                             }
@@ -1950,7 +2023,7 @@ fn compact_chat(
                 commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
             }
             pinned_bar(ui, &p, chat);
-            if let Some(event) = messages(ui, &p, book, chat, downloads, auto_stickers, typing_label(state, &session.id, book, chat).as_deref()) {
+            if let Some(event) = messages(ui, &p, book, chat, downloads, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), &mut state.unread_anchor) {
                 on_message_event(event, state, session, chat, &mut commands);
             }
         });
