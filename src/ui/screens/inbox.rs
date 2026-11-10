@@ -194,6 +194,48 @@ pub fn show(
     commands
 }
 
+/// While typing, "sedang mengetik" is said again this often (the contact's
+/// app hides it after a while).
+const TYPING_RESEND: std::time::Duration = std::time::Duration::from_secs(8);
+/// No key for this long counts as stopped.
+const TYPING_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Typing indicators for the chat on screen (`open`: session id, JID): starts
+/// when the composer text changes, repeats while typing goes on, and stops
+/// after a pause, when the text is cleared or sent, or when the chat is left.
+pub fn typing_signal(ctx: &egui::Context, state: &mut State, open: Option<(String, String)>) -> Vec<Command> {
+    let now = std::time::Instant::now();
+    let mut commands = Vec::new();
+    let changed = state.composer != state.typing_seen_text;
+    if changed {
+        state.typing_seen_text = state.composer.clone();
+        state.typing_changed = Some(now);
+    }
+    let empty = state.composer.trim().is_empty();
+    if let Some((session, chat, _)) = state.typing.clone() {
+        let here = open.as_ref().is_some_and(|(s, c)| *s == session && *c == chat);
+        let idle = state.typing_changed.is_none_or(|t| now - t >= TYPING_IDLE);
+        if !here || empty || idle {
+            commands.push(Command::Typing { id: session, chat, typing: false });
+            state.typing = None;
+        }
+    }
+    if let Some((session, chat)) = open {
+        if changed && !empty {
+            let due = state.typing.as_ref().is_none_or(|(_, _, at)| now - *at >= TYPING_RESEND);
+            if due {
+                commands.push(Command::Typing { id: session.clone(), chat: chat.clone(), typing: true });
+                state.typing = Some((session, chat, now));
+            }
+        }
+    }
+    if state.typing.is_some() {
+        // Wakes up to notice the pause even when nothing else repaints.
+        ctx.request_repaint_after(std::time::Duration::from_secs(1));
+    }
+    commands
+}
+
 /// "Tandai selesai", or "Selesai" on a done chat (a click opens it again).
 /// Returns the new state when clicked.
 fn done_button(ui: &mut Ui, chat: &Chat) -> Option<bool> {
@@ -1613,4 +1655,43 @@ fn compact_chat(
         });
     });
     commands
+}
+
+#[cfg(test)]
+mod typing_tests {
+    use super::*;
+
+    fn kinds(commands: &[Command]) -> Vec<(String, bool)> {
+        commands
+            .iter()
+            .filter_map(|c| match c {
+                Command::Typing { chat, typing, .. } => Some((chat.clone(), *typing)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn typing_starts_repeats_and_stops() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        let open = || Some(("s1".to_owned(), "a@s.whatsapp.net".to_owned()));
+        state.composer = "hal".to_owned();
+        assert_eq!(kinds(&typing_signal(&ctx, &mut state, open())), [("a@s.whatsapp.net".to_owned(), true)]);
+        // More keys right away: no second "typing" yet.
+        state.composer = "halo".to_owned();
+        assert!(kinds(&typing_signal(&ctx, &mut state, open())).is_empty());
+        // A pause stops it.
+        state.typing_changed = Some(std::time::Instant::now() - TYPING_IDLE);
+        assert_eq!(kinds(&typing_signal(&ctx, &mut state, open())), [("a@s.whatsapp.net".to_owned(), false)]);
+        // Typing again, then the text is sent (cleared): stops at once.
+        state.composer = "halo kak".to_owned();
+        assert_eq!(kinds(&typing_signal(&ctx, &mut state, open())), [("a@s.whatsapp.net".to_owned(), true)]);
+        state.composer.clear();
+        assert_eq!(kinds(&typing_signal(&ctx, &mut state, open())), [("a@s.whatsapp.net".to_owned(), false)]);
+        // Leaving the chat while typing stops it too.
+        state.composer = "x".to_owned();
+        typing_signal(&ctx, &mut state, open());
+        assert_eq!(kinds(&typing_signal(&ctx, &mut state, None)), [("a@s.whatsapp.net".to_owned(), false)]);
+    }
 }

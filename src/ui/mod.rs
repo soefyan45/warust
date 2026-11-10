@@ -49,6 +49,11 @@ pub struct State {
     /// JID of the open chat.
     pub chat_selected: Option<String>,
     pub composer: String,
+    /// The chat told "sedang mengetik" (session id, JID) and when it was last
+    /// told; the composer text as last seen, and when it last changed.
+    pub typing: Option<(String, String, std::time::Instant)>,
+    pub typing_seen_text: String,
+    pub typing_changed: Option<std::time::Instant>,
     /// File waiting in the composer, sent with the text as its caption.
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
@@ -787,6 +792,15 @@ impl eframe::App for App {
         }
         self.confirm_remove(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
+        // "Sedang mengetik" for the chat on screen while its reply is typed.
+        let open_chat = if self.screen == Screen::Inbox {
+            self.state.inbox_session.clone().zip(self.state.chat_selected.clone())
+        } else {
+            None
+        };
+        for command in screens::inbox::typing_signal(ui.ctx(), &mut self.state, open_chat) {
+            self.backend.send(command);
+        }
         // The open chat in a focused window gets no notification.
         let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);
         let viewing = if focused && self.screen == Screen::Inbox {

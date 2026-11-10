@@ -132,6 +132,8 @@ pub struct Settings {
     /// Numbers (session ids) that view statuses without sending "seen".
     pub status_seen_off: Vec<String>,
     pub notify: Notify,
+    /// Let contacts see "sedang mengetik" while a reply is being typed.
+    pub typing: bool,
 }
 
 impl Default for Settings {
@@ -146,6 +148,7 @@ impl Default for Settings {
             rules: Vec::new(),
             status_seen_off: Vec::new(),
             notify: Notify::default(),
+            typing: true,
         }
     }
 }

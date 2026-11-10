@@ -107,6 +107,21 @@ impl Running {
         });
     }
 
+    /// Tells the chat we are typing, or (with `false`) that we stopped. Best
+    /// effort: a lost indicator only means the dots do not show.
+    pub fn chat_state(&self, id: &str, chat: &str, typing: bool) {
+        let Ok(jid) = chat.parse::<Jid>() else {
+            return;
+        };
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            let sent = if typing { client.chatstate().send_composing(&jid).await } else { client.chatstate().send_paused(&jid).await };
+            if let Err(e) = sent {
+                log::debug!("session {id}: typing indicator not sent: {e}");
+            }
+        });
+    }
+
     /// Sends the "seen" receipt for a contact's status update, as opening it
     /// on the phone does; the poster sees this number among the viewers.
     pub fn mark_status_seen(&self, id: &str, sender: &str, msg_id: String, state: &Updater, store: Arc<Mutex<Store>>) {

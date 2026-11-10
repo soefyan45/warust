@@ -263,6 +263,17 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                     ));
                 });
 
+                super::card(ui, "Privasi", "", |ui| {
+                    let draft = form.draft.as_mut().expect("synced");
+                    widgets::toggle(ui, &mut draft.typing, "Tampilkan \"sedang mengetik\" ke lawan chat saat membalas");
+                    ui.label(rich(
+                        "Tanda dilihat status diatur per nomor di halaman Status.",
+                        12.0,
+                        Weight::Regular,
+                        p.muted,
+                    ));
+                });
+
                 super::card(ui, "Data", "Sesi, chat, media, dan pengaturan disimpan di komputer ini.", |ui| {
                     line(ui, "Folder data", |ui| {
                         ui.add(egui::Label::new(rich_mono(&data_dir.display().to_string(), 12.0, p.text)).truncate());

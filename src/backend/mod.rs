@@ -163,6 +163,8 @@ pub enum Command {
     SendFile { id: String, chat: String, path: PathBuf, caption: String },
     /// The user opened a chat: clear its unread count.
     Seen { id: String, chat: String },
+    /// Show (or stop showing) "sedang mengetik" in the chat on the contact's side.
+    Typing { id: String, chat: String, typing: bool },
     /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
     MarkDone { id: String, chat: String, done: bool },
     /// Ask the phone for messages older than the oldest one we have in `chat`.
@@ -594,6 +596,13 @@ async fn run(
             Command::Avatar { id, jid } => {
                 if let Some(r) = running.get(&id) {
                     r.request_avatar(jid);
+                }
+            }
+            Command::Typing { id, chat, typing } => {
+                if state.settings().typing {
+                    if let Some(r) = running.get(&id) {
+                        r.chat_state(&id, &chat, typing);
+                    }
                 }
             }
             Command::Seen { id, chat } => {
