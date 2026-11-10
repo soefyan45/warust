@@ -370,6 +370,8 @@ pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView) -> 
         if ui.button("Ganti nama…").clicked() {
             action = Some(Action::Rename(session.id.clone()));
         }
+        // Kept apart from the steps that unlink, so a slip does not relink.
+        ui.separator();
         if !connected && ui.button("Tautkan / tampilkan pairing").clicked() {
             action = Some(fix(session));
         }
