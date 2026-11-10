@@ -8,6 +8,7 @@ use super::fonts::{self, Weight};
 use super::screens::short_jid;
 use super::theme::{Palette, R_MD};
 use super::widgets;
+use crate::i18n::tr;
 use crate::backend::{Book, Member};
 
 /// Most rows the picker shows.
@@ -166,7 +167,7 @@ pub fn popup(ui: &Ui, p: &Palette, anchor: egui::Pos2, width: f32, rows: Rows, s
                     match rows {
                         Rows::Loading => {
                             let (rect, _) = ui.allocate_exact_size(vec2(width, 30.0), Sense::hover());
-                            widgets::paint_text(ui, rect.shrink2(vec2(10.0, 0.0)), "Memuat anggota…", fonts::ui(13.0, Weight::Regular), p.muted, Align::Min);
+                            widgets::paint_text(ui, rect.shrink2(vec2(10.0, 0.0)), tr("Loading members…", "Memuat anggota…"), fonts::ui(13.0, Weight::Regular), p.muted, Align::Min);
                         }
                         Rows::List(list) => {
                             for (i, c) in list.iter().enumerate() {

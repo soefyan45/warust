@@ -7,6 +7,7 @@ use egui::{Align, Color32, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2
 
 use crate::backend::webhook::{Delivery as HookDelivery, Outcome};
 use crate::backend::{Chat, Delivery, SessionView, Status};
+use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, Template};
 use crate::ui::widgets::{self, Kind};
@@ -75,13 +76,14 @@ fn waiting(chat: &Chat, now: i64) -> bool {
     chat.needs_reply() && chat.messages.last().is_some_and(|m| now - m.ts < 24 * 3600)
 }
 
-/// Thousands with a dot, as Indonesian text writes them: `1.332`.
+/// Thousands with a comma in English (`1,332`) and a dot in Indonesian (`1.332`).
 fn number(n: usize) -> String {
+    let sep = tr(",", ".");
     let digits = n.to_string();
     let mut out = String::new();
     for (i, c) in digits.chars().enumerate() {
         if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push('.');
+            out.push_str(sep);
         }
         out.push(c);
     }
@@ -92,7 +94,8 @@ fn percent(part: usize, total: usize) -> String {
     if total == 0 {
         return "-".to_owned();
     }
-    format!("{:.1}%", part as f64 * 100.0 / total as f64).replace('.', ",")
+    let text = format!("{:.1}%", part as f64 * 100.0 / total as f64);
+    if crate::i18n::indonesian() { text.replace('.', ",") } else { text }
 }
 
 fn forest() -> bool {
@@ -120,10 +123,10 @@ fn tag(ui: &Ui, at: egui::Pos2, label: &str, fill: Color32, color: Color32) -> R
 
 fn status_tag(p: &Palette, status: &Status) -> (&'static str, Color32, Color32) {
     match status {
-        Status::Connected => ("Terhubung", p.accent_soft, p.accent_text),
-        Status::Pairing | Status::Starting => ("Menunggu pairing", p.blue_soft, p.blue),
-        Status::Reconnecting | Status::Replaced | Status::Locked => ("Tersendat", p.orange_soft, p.amber),
-        Status::LoggedOut | Status::Banned(_) | Status::Failed(_) => ("Terputus", p.red_soft, p.red),
+        Status::Connected => (tr("Connected", "Terhubung"), p.accent_soft, p.accent_text),
+        Status::Pairing | Status::Starting => (tr("Waiting for pairing", "Menunggu pairing"), p.blue_soft, p.blue),
+        Status::Reconnecting | Status::Replaced | Status::Locked => (tr("Interrupted", "Tersendat"), p.orange_soft, p.amber),
+        Status::LoggedOut | Status::Banned(_) | Status::Failed(_) => (tr("Disconnected", "Terputus"), p.red_soft, p.red),
     }
 }
 
@@ -135,7 +138,7 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView], deliveries
         theme::page(ui.ctx()).show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 20.0;
             let now = time::now();
-            super::page_head(ui, "Ringkasan", &format!("{} · diperbarui {}", time::long_date(now), time::clock(now)));
+            super::page_head(ui, tr("Overview", "Ringkasan"), &crate::trf!("{} · updated {}", "{} · diperbarui {}", time::long_date(now), time::clock(now)));
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(30));
             let width = ui.available_width();
 
@@ -150,17 +153,17 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView], deliveries
             };
             devices_tile(ui, &p, next(unit * 1.8), sessions);
             let total_out = t.sent + t.failed + t.queued;
-            stat_tile(ui, &p, next(unit), "arrow-up-right", "Terkirim hari ini", &number(t.sent), "pesan", &format!("{} dari {} antrean", percent(t.sent, total_out), number(total_out)));
-            stat_tile(ui, &p, next(unit), "loader-circle", "Menunggu kirim", &number(t.queued), "pesan", &format!("{} gagal sejak 00.00", number(t.failed)));
-            stat_tile(ui, &p, next(unit), "inbox", "Belum dibalas", &number(t.waiting), "chat", &format!("dari {} percakapan hari ini", number(t.chats_today)));
+            stat_tile(ui, &p, next(unit), "arrow-up-right", tr("Sent today", "Terkirim hari ini"), &number(t.sent), tr("messages", "pesan"), &crate::trf!("{} of {} queued", "{} dari {} antrean", percent(t.sent, total_out), number(total_out)));
+            stat_tile(ui, &p, next(unit), "loader-circle", tr("Waiting to send", "Menunggu kirim"), &number(t.queued), tr("messages", "pesan"), &crate::trf!("{} failed since 00:00", "{} gagal sejak 00.00", number(t.failed)));
+            stat_tile(ui, &p, next(unit), "inbox", tr("Not replied", "Belum dibalas"), &number(t.waiting), tr("chats", "chat"), &crate::trf!("of {} conversations today", "dari {} percakapan hari ini", number(t.chats_today)));
             let finished: Vec<&HookDelivery> = deliveries.iter().filter(|d| !matches!(d.outcome, Outcome::Pending)).collect();
             let ok = finished.iter().filter(|d| matches!(d.outcome, Outcome::Done(c) if (200..300).contains(&c))).count();
             let host = if state.settings.webhook.url.trim().is_empty() {
-                "webhook global belum diatur".to_owned()
+                tr("global webhook not set", "webhook global belum diatur").to_owned()
             } else {
                 super::webhook_label(state, "")
             };
-            stat_tile(ui, &p, next(unit), "webhook", "Webhook berhasil", &percent(ok, finished.len()), "", &format!("{} pengiriman · {host}", finished.len()));
+            stat_tile(ui, &p, next(unit), "webhook", tr("Webhook success", "Webhook berhasil"), &percent(ok, finished.len()), "", &crate::trf!("{} deliveries · {host}", "{} pengiriman · {host}", finished.len()));
 
             // Row 2: two columns.
             let left_w = ((width - GAP) * 0.66).floor();
@@ -229,9 +232,9 @@ fn devices_tile(ui: &Ui, p: &Palette, rect: Rect, sessions: &[SessionView]) {
     let (fill, text, muted) = if forest() { (Some(p.accent), p.primary, p.text_2) } else { (None, p.text, p.muted) };
     card(ui, p, rect, fill);
     let circle = if forest() { p.panel } else { p.raised };
-    tile_head(ui, rect, "smartphone", "Perangkat terhubung", text, circle);
+    tile_head(ui, rect, "smartphone", tr("Connected devices", "Perangkat terhubung"), text, circle);
     let connected = sessions.iter().filter(|s| s.status == Status::Connected).count();
-    big_number(ui, rect.min + vec2(20.0, 62.0), &connected.to_string(), &format!("dari {} perangkat tertaut", sessions.len()), text, muted);
+    big_number(ui, rect.min + vec2(20.0, 62.0), &connected.to_string(), &crate::trf!("of {} linked devices", "dari {} perangkat tertaut", sessions.len()), text, muted);
     // One segment per number, coloured by its state.
     let bar = Rect::from_min_max(rect.min + vec2(20.0, 106.0), pos2(rect.right() - 20.0, rect.min.y + 112.0));
     let n = sessions.len().max(1) as f32;
@@ -247,9 +250,9 @@ fn devices_tile(ui: &Ui, p: &Palette, rect: Rect, sessions: &[SessionView]) {
     let down = sessions.len() - connected - waiting;
     let mut x = rect.left() + 20.0;
     for (color, label) in [
-        (p.green, format!("{connected} terhubung")),
-        (p.blue, format!("{waiting} menunggu pairing")),
-        (p.red, format!("{down} terputus")),
+        (p.green, crate::trf!("{connected} connected", "{connected} terhubung")),
+        (p.blue, crate::trf!("{waiting} waiting for pairing", "{waiting} menunggu pairing")),
+        (p.red, crate::trf!("{down} disconnected", "{down} terputus")),
     ] {
         let y = rect.top() + 128.0;
         ui.painter().circle_filled(pos2(x + 3.5, y), 3.5, color);
@@ -272,18 +275,25 @@ fn flow_card(ui: &mut Ui, p: &Palette, t: &Today) {
     card(ui, p, rect, fill);
     let inner = rect.shrink2(vec2(28.0, 26.0));
     let title = Rect::from_min_size(inner.min, vec2(inner.width(), 24.0));
-    widgets::paint_text(ui, title, "Alur pengiriman hari ini", fonts::ui(18.0, Weight::SemiBold), text, Align::Min);
+    widgets::paint_text(ui, title, tr("Today's sending flow", "Alur pengiriman hari ini"), fonts::ui(18.0, Weight::SemiBold), text, Align::Min);
     let total = t.sent + t.failed + t.queued;
     let sub = Rect::from_min_size(inner.min + vec2(0.0, 30.0), vec2(inner.width(), 18.0));
     let summary = if total == 0 {
-        "Belum ada pesan keluar hari ini.".to_owned()
+        tr("No outgoing messages today yet.", "Belum ada pesan keluar hari ini.").to_owned()
     } else {
-        format!("{} pesan keluar sejak 00.00: {} terkirim, {} menunggu jeda, {} gagal.", number(total), number(t.sent), number(t.queued), number(t.failed))
+        crate::trf!(
+            "{} outgoing messages since 00:00: {} sent, {} waiting for the delay, {} failed.",
+            "{} pesan keluar sejak 00.00: {} terkirim, {} menunggu jeda, {} gagal.",
+            number(total),
+            number(t.sent),
+            number(t.queued),
+            number(t.failed)
+        )
     };
     widgets::paint_text(ui, sub, &summary, fonts::ui(13.0, Weight::Regular), muted, Align::Min);
 
     // Four figures across.
-    let figures = [("DIANTREKAN", total, text), ("TERKIRIM", t.sent, hi), ("MENUNGGU", t.queued, text), ("GAGAL", t.failed, text)];
+    let figures = [(tr("QUEUED", "DIANTREKAN"), total, text), (tr("SENT", "TERKIRIM"), t.sent, hi), (tr("WAITING", "MENUNGGU"), t.queued, text), (tr("FAILED", "GAGAL"), t.failed, text)];
     let col = inner.width() / 4.0;
     for (i, (label, value, color)) in figures.iter().enumerate() {
         let x = inner.left() + i as f32 * col;
@@ -311,15 +321,19 @@ fn flow_card(ui: &mut Ui, p: &Palette, t: &Today) {
         }
         let label_color = if forest() { p.primary } else { p.on_primary };
         let label = Rect::from_min_size(inside.min + vec2(14.0, 0.0), vec2(inside.width(), inside.height()));
-        widgets::paint_text(ui, label, &format!("{} terkirim", percent(t.sent, total)), fonts::ui(13.0, Weight::SemiBold), label_color, Align::Min);
+        widgets::paint_text(ui, label, &crate::trf!("{} sent", "{} terkirim", percent(t.sent, total)), fonts::ui(13.0, Weight::SemiBold), label_color, Align::Min);
     }
 
     // Outgoing per hour.
     let chart_top = inner.top() + 192.0;
     let head = Rect::from_min_size(pos2(inner.left(), chart_top), vec2(inner.width(), 16.0));
-    widgets::paint_text(ui, head, "Pesan keluar per jam", fonts::ui(12.0, Weight::SemiBold), text, Align::Min);
+    widgets::paint_text(ui, head, tr("Outgoing messages per hour", "Pesan keluar per jam"), fonts::ui(12.0, Weight::SemiBold), text, Align::Min);
     let (peak_hour, peak) = t.per_hour.iter().enumerate().max_by_key(|(_, n)| **n).map(|(h, n)| (h, *n)).unwrap_or((0, 0));
-    let peak_text = if peak == 0 { "Belum ada".to_owned() } else { format!("Puncak {peak_hour:02}.00, {} pesan", number(peak)) };
+    let peak_text = if peak == 0 {
+        tr("None yet", "Belum ada").to_owned()
+    } else {
+        crate::trf!("Peak {peak_hour:02}:00, {} messages", "Puncak {peak_hour:02}.00, {} pesan", number(peak))
+    };
     widgets::paint_text(ui, head, &peak_text, fonts::ui(12.0, Weight::Regular), muted, Align::Max);
     let chart = Rect::from_min_max(pos2(inner.left(), chart_top + 28.0), pos2(inner.right(), inner.bottom() - 24.0));
     let max = peak.max(1) as f32;
@@ -348,27 +362,31 @@ fn numbers_card(ui: &mut Ui, p: &Palette, sessions: &[SessionView]) -> Option<Ac
     let inner = rect.shrink2(vec2(24.0, 22.0));
     let connected = sessions.iter().filter(|s| s.status == Status::Connected).count();
     let title = Rect::from_min_size(inner.min, vec2(inner.width(), 24.0));
-    widgets::paint_text(ui, title, "Nomor tertaut", fonts::ui(18.0, Weight::SemiBold), p.text, Align::Min);
+    widgets::paint_text(ui, title, tr("Linked numbers", "Nomor tertaut"), fonts::ui(18.0, Weight::SemiBold), p.text, Align::Min);
     let sub = Rect::from_min_size(inner.min + vec2(0.0, 28.0), vec2(inner.width() - 180.0, 18.0));
-    let desc = format!("{} nomor tertaut sebagai perangkat pendamping, {connected} sedang terhubung.", sessions.len());
+    let desc = crate::trf!(
+        "{} numbers linked as companion devices, {connected} connected now.",
+        "{} nomor tertaut sebagai perangkat pendamping, {connected} sedang terhubung.",
+        sessions.len()
+    );
     widgets::paint_text(ui, sub, &desc, fonts::ui(13.0, Weight::Regular), p.muted, Align::Min);
     let mut out = None;
     let button_rect = Rect::from_min_size(pos2(inner.right() - 160.0, inner.top()), vec2(160.0, 36.0));
     let mut b = widgets::child(ui, button_rect, egui::Layout::right_to_left(Align::Center));
-    if widgets::button(&mut b, Some("plus"), "Tautkan nomor", Kind::Primary).clicked() {
+    if widgets::button(&mut b, Some("plus"), tr("Link number", "Tautkan nomor"), Kind::Primary).clicked() {
         out = Some(Action::Nomor(nomor::Action::Add));
     }
 
     let head = Rect::from_min_size(pos2(inner.left(), inner.top() + 66.0), vec2(inner.width(), 22.0));
     let cols = widgets::columns(head, &[None, Some(160.0), Some(80.0), Some(70.0)], 12.0);
-    for (i, label) in ["Nomor", "Status", "Terkirim", "Antrean"].iter().enumerate() {
+    for (i, label) in [tr("Number", "Nomor"), "Status", tr("Sent", "Terkirim"), tr("Queued", "Antrean")].iter().enumerate() {
         let align = if i >= 2 { Align::Max } else { Align::Min };
         widgets::paint_text(ui, cols[i], label, fonts::ui(12.0, Weight::Medium), p.muted, align);
     }
     widgets::hline(ui, head, head.bottom() + 4.0, p.border);
     if sessions.is_empty() {
         let empty = Rect::from_min_size(pos2(inner.left(), head.bottom() + 20.0), vec2(inner.width(), 20.0));
-        widgets::paint_text(ui, empty, "Belum ada nomor. Tautkan nomor pertama.", fonts::ui(13.0, Weight::Regular), p.muted, Align::Min);
+        widgets::paint_text(ui, empty, tr("No numbers yet. Link your first number.", "Belum ada nomor. Tautkan nomor pertama."), fonts::ui(13.0, Weight::Regular), p.muted, Align::Min);
     }
     for (i, s) in sessions.iter().enumerate() {
         let row = Rect::from_min_size(pos2(inner.left(), head.bottom() + 6.0 + i as f32 * 62.0), vec2(inner.width(), 62.0));
@@ -392,7 +410,7 @@ fn numbers_card(ui: &mut Ui, p: &Palette, sessions: &[SessionView]) -> Option<Ac
         let name = Rect::from_min_max(pos2(icon.right() + 12.0, row.top() + 12.0), pos2(cols[0].right(), row.top() + 31.0));
         widgets::paint_text(ui, name, &s.name, fonts::ui(14.0, Weight::Medium), p.text, Align::Min);
         let phone = Rect::from_min_max(pos2(icon.right() + 12.0, row.top() + 32.0), pos2(cols[0].right(), row.top() + 50.0));
-        let phone_text = s.phone.clone().unwrap_or_else(|| "belum ditautkan".to_owned());
+        let phone_text = s.phone.clone().unwrap_or_else(|| tr("not linked yet", "belum ditautkan").to_owned());
         widgets::paint_text(ui, phone, &phone_text, fonts::mono(12.0), p.muted, Align::Min);
         let (label, fill, color) = status_tag(p, &s.status);
         tag(ui, pos2(cols[1].left(), row.center().y - 11.0), label, fill, color);
@@ -415,11 +433,11 @@ fn attention_card(ui: &mut Ui, p: &Palette, sessions: &[SessionView], t: &Today,
         .filter(|s| s.status != Status::Connected)
         .map(|s| {
             let (icon, _, label, _) = nomor::describe(p, &s.status);
-            let queued = if s.queue > 0 { format!(", {} pesan tertahan", s.queue) } else { String::new() };
+            let queued = if s.queue > 0 { crate::trf!(", {} messages held", ", {} pesan tertahan", s.queue) } else { String::new() };
             Item {
                 icon,
                 title: format!("{}: {}{queued}", s.name, label.to_lowercase()),
-                when: s.last_activity.map(|_| "Aktivitas terakhir tercatat".to_owned()).unwrap_or_else(|| "Sejak aplikasi dibuka".to_owned()),
+                when: s.last_activity.map(|_| tr("Last activity recorded", "Aktivitas terakhir tercatat").to_owned()).unwrap_or_else(|| tr("Since the app was opened", "Sejak aplikasi dibuka").to_owned()),
                 tag: status_tag(p, &s.status),
                 action: Some(Action::Nomor(nomor::fix(s))),
             }
@@ -428,9 +446,9 @@ fn attention_card(ui: &mut Ui, p: &Palette, sessions: &[SessionView], t: &Today,
     if t.failed > 0 {
         items.push(Item {
             icon: "triangle-alert",
-            title: format!("{} pesan gagal terkirim hari ini", number(t.failed)),
-            when: "Lihat tab Gagal di Log pesan".to_owned(),
-            tag: ("Gagal", p.red_soft, p.red),
+            title: crate::trf!("{} messages failed to send today", "{} pesan gagal terkirim hari ini", number(t.failed)),
+            when: tr("See the Failed tab in Message log", "Lihat tab Gagal di Log pesan").to_owned(),
+            tag: (tr("Failed", "Gagal"), p.red_soft, p.red),
             action: None,
         });
     }
@@ -450,9 +468,9 @@ fn attention_card(ui: &mut Ui, p: &Palette, sessions: &[SessionView], t: &Today,
         };
         items.push(Item {
             icon: "webhook",
-            title: format!("Webhook gagal {} kali, {reason}", failed_hooks.len()),
+            title: crate::trf!("Webhook failed {} times, {reason}", "Webhook gagal {} kali, {reason}", failed_hooks.len()),
             when: time::clock(last.at),
-            tag: if last.attempts < 5 { ("Dicoba ulang", p.blue_soft, p.blue) } else { ("Menyerah", p.red_soft, p.red) },
+            tag: if last.attempts < 5 { (tr("Retrying", "Dicoba ulang"), p.blue_soft, p.blue) } else { (tr("Gave up", "Menyerah"), p.red_soft, p.red) },
             action: None,
         });
     }
@@ -462,13 +480,13 @@ fn attention_card(ui: &mut Ui, p: &Palette, sessions: &[SessionView], t: &Today,
     card(ui, p, rect, None);
     let inner = rect.shrink2(vec2(24.0, 22.0));
     let head = Rect::from_min_size(inner.min, vec2(inner.width(), 22.0));
-    widgets::paint_text(ui, head, "Perlu perhatian", fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
-    widgets::paint_text(ui, head, &format!("{} hal", items.len()), fonts::ui(12.0, Weight::Regular), p.muted, Align::Max);
+    widgets::paint_text(ui, head, tr("Needs attention", "Perlu perhatian"), fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
+    widgets::paint_text(ui, head, &crate::trf!("{} items", "{} hal", items.len()), fonts::ui(12.0, Weight::Regular), p.muted, Align::Max);
     if items.is_empty() {
         let line = Rect::from_min_size(pos2(inner.left(), head.bottom() + 18.0), vec2(inner.width(), 20.0));
         icons::paint(ui, Rect::from_min_size(line.min, vec2(16.0, 16.0)), "check", 16.0, p.green);
         let text = Rect::from_min_max(pos2(line.left() + 26.0, line.top()), line.max);
-        widgets::paint_text(ui, text, "Semua lancar: nomor terhubung, tidak ada yang gagal.", fonts::ui(13.0, Weight::Regular), p.text_2, Align::Min);
+        widgets::paint_text(ui, text, tr("All good: numbers connected, nothing failed.", "Semua lancar: nomor terhubung, tidak ada yang gagal."), fonts::ui(13.0, Weight::Regular), p.text_2, Align::Min);
         return None;
     }
     let mut out = None;
@@ -506,23 +524,23 @@ fn recent_card(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
     card(ui, p, rect, None);
     let inner = rect.shrink2(vec2(24.0, 22.0));
     let head = Rect::from_min_size(inner.min, vec2(inner.width(), 22.0));
-    widgets::paint_text(ui, head, "Pesan terbaru", fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
+    widgets::paint_text(ui, head, tr("Latest messages", "Pesan terbaru"), fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
     let mut out = None;
     let link = Rect::from_min_max(pos2(head.right() - 90.0, head.top()), head.max);
     let link_response = ui.interact(link, ui.scope_id().with("open_inbox"), Sense::click());
-    widgets::paint_text(ui, link, "Buka inbox", fonts::ui(13.0, Weight::SemiBold), p.primary, Align::Max);
+    widgets::paint_text(ui, link, tr("Open inbox", "Buka inbox"), fonts::ui(13.0, Weight::SemiBold), p.primary, Align::Max);
     if link_response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         out = Some(Action::OpenInbox);
     }
     let tabs_rect = Rect::from_min_size(pos2(inner.left(), head.bottom() + 14.0), vec2(inner.width(), 40.0));
     let mut tabs_ui = widgets::child(ui, tabs_rect, egui::Layout::left_to_right(Align::Center));
-    let labels = [format!("Belum dibalas · {}", waiting.len()), format!("Semua · {}", chats.len())];
+    let labels = [crate::trf!("Not replied · {}", "Belum dibalas · {}", waiting.len()), crate::trf!("All · {}", "Semua · {}", chats.len())];
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
     widgets::tabs(&mut tabs_ui, &labels, &mut state.summary_tab);
     let list_top = tabs_rect.bottom() + 10.0;
     if shown.is_empty() {
         let empty = Rect::from_min_size(pos2(inner.left(), list_top + 12.0), vec2(inner.width(), 20.0));
-        let text = if state.summary_tab == 0 { "Tidak ada chat yang menunggu balasan." } else { "Belum ada chat." };
+        let text = if state.summary_tab == 0 { tr("No chats waiting for a reply.", "Tidak ada chat yang menunggu balasan.") } else { tr("No chats yet.", "Belum ada chat.") };
         widgets::paint_text(ui, empty, text, fonts::ui(13.0, Weight::Regular), p.muted, Align::Min);
     }
     for (i, (session, chat)) in shown.iter().enumerate() {
@@ -549,7 +567,7 @@ fn recent_card(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
         let preview = chat
             .messages
             .last()
-            .map(|m| if m.from_me { format!("Anda: {}", m.text.replace('\n', " ")) } else { m.text.replace('\n', " ") })
+            .map(|m| if m.from_me { format!("{}: {}", tr("You", "Anda"), m.text.replace('\n', " ")) } else { m.text.replace('\n', " ") })
             .unwrap_or_default();
         let line = Rect::from_min_max(pos2(left, row.top() + 31.0), pos2(row.right() - 34.0, row.top() + 50.0));
         widgets::paint_text(ui, line, &preview, fonts::ui(13.0, Weight::Regular), p.text_2, Align::Min);
@@ -567,11 +585,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn indonesian_numbers() {
+    fn english_numbers() {
         assert_eq!(number(0), "0");
-        assert_eq!(number(1332), "1.332");
-        assert_eq!(number(1_204_000), "1.204.000");
-        assert_eq!(percent(1332, 1402), "95,0%");
+        assert_eq!(number(1332), "1,332");
+        assert_eq!(number(1_204_000), "1,204,000");
+        assert_eq!(percent(1332, 1402), "95.0%");
         assert_eq!(percent(1, 0), "-");
     }
 }
@@ -579,9 +597,17 @@ mod tests {
 /// "14 menit", "3 jam": how long a chat has waited.
 fn waited(secs: i64) -> String {
     match secs.max(0) {
-        s if s < 60 => "kurang dari 1 menit".to_owned(),
-        s if s < 3600 => format!("{} menit", s / 60),
-        s => format!("{} jam", s / 3600),
+        s if s < 60 => tr("less than 1 minute", "kurang dari 1 menit").to_owned(),
+        s if s < 3600 => {
+            let n = s / 60;
+            let en = if n == 1 { "minute" } else { "minutes" };
+            crate::trf!("{n} {en}", "{n} menit")
+        }
+        s => {
+            let n = s / 3600;
+            let en = if n == 1 { "hour" } else { "hours" };
+            crate::trf!("{n} {en}", "{n} jam")
+        }
     }
 }
 
@@ -608,10 +634,10 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView], deliveries: &[HookDelivery
                 ui.label(widgets::rich("warust", 18.0, Weight::SemiBold, p.text));
             }, |_| {});
             ui.add_space(16.0);
-            ui.label(widgets::rich("Ringkasan", 28.0, Weight::SemiBold, p.text));
+            ui.label(widgets::rich(tr("Overview", "Ringkasan"), 28.0, Weight::SemiBold, p.text));
             ui.add_space(4.0);
             let connected = sessions.iter().filter(|s| s.status == Status::Connected).count();
-            ui.label(widgets::rich(&format!("{} · {connected} nomor bisa membalas", time::long_date(now)), 14.0, Weight::Regular, p.muted));
+            ui.label(widgets::rich(&crate::trf!("{} · {connected} numbers can reply", "{} · {connected} nomor bisa membalas", time::long_date(now)), 14.0, Weight::Regular, p.muted));
             ui.add_space(20.0);
 
             // Today's messages: the dark (Forest green / black) card.
@@ -619,13 +645,13 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView], deliveries: &[HookDelivery
             ui.painter().rect_filled(hero, 20.0, p.primary);
             let (on, muted) = (p.on_primary, p.on_primary_muted);
             let figure = if forest() { p.accent } else { p.on_primary };
-            widgets::paint_text(ui, Rect::from_min_size(hero.min + vec2(20.0, 18.0), vec2(width - 40.0, 20.0)), "Pesan hari ini", fonts::ui(14.0, Weight::Regular), muted, Align::Min);
-            big_number_sized(ui, hero.min + vec2(20.0, 46.0), &number(t.received + t.sent), "pesan", 40.0, on, muted);
+            widgets::paint_text(ui, Rect::from_min_size(hero.min + vec2(20.0, 18.0), vec2(width - 40.0, 20.0)), tr("Messages today", "Pesan hari ini"), fonts::ui(14.0, Weight::Regular), muted, Align::Min);
+            big_number_sized(ui, hero.min + vec2(20.0, 46.0), &number(t.received + t.sent), tr("messages", "pesan"), 40.0, on, muted);
             ui.painter().hline((hero.left() + 20.0)..=(hero.right() - 20.0), hero.top() + 112.0, Stroke::new(1.0, muted.gamma_multiply(0.4)));
             let finished: Vec<&HookDelivery> = deliveries.iter().filter(|d| !matches!(d.outcome, Outcome::Pending)).collect();
             let ok = finished.iter().filter(|d| matches!(d.outcome, Outcome::Done(c) if (200..300).contains(&c))).count();
             let third = (width - 40.0) / 3.0;
-            for (i, (label, value)) in [("Masuk", number(t.received)), ("Keluar", number(t.sent)), ("Webhook", percent(ok, finished.len()))].into_iter().enumerate() {
+            for (i, (label, value)) in [(tr("In", "Masuk"), number(t.received)), (tr("Out", "Keluar"), number(t.sent)), ("Webhook", percent(ok, finished.len()))].into_iter().enumerate() {
                 let x = hero.left() + 20.0 + i as f32 * third;
                 widgets::paint_text(ui, Rect::from_min_size(pos2(x, hero.top() + 126.0), vec2(third, 18.0)), label, fonts::ui(13.0, Weight::Regular), muted, Align::Min);
                 widgets::paint_text(ui, Rect::from_min_size(pos2(x, hero.top() + 146.0), vec2(third, 26.0)), &value, fonts::ui(20.0, Weight::SemiBold), figure, Align::Min);
@@ -641,10 +667,13 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView], deliveries: &[HookDelivery
             compact::paint_card(ui, card_rect);
             let (title, detail) = match oldest {
                 Some((s, c)) => (
-                    format!("{} chat perlu dibalas", t.waiting),
-                    format!("Paling lama {}, dari {}", waited(now - c.last_ts()), s.name),
+                    crate::trf!("{} chats need a reply", "{} chat perlu dibalas", t.waiting),
+                    crate::trf!("Longest wait {}, from {}", "Paling lama {}, dari {}", waited(now - c.last_ts()), s.name),
                 ),
-                None => ("Semua chat sudah dibalas".to_owned(), "Tidak ada chat pribadi yang menunggu dalam 24 jam".to_owned()),
+                None => (
+                    tr("All chats replied to", "Semua chat sudah dibalas").to_owned(),
+                    tr("No private chats waiting within 24 hours", "Tidak ada chat pribadi yang menunggu dalam 24 jam").to_owned(),
+                ),
             };
             let text_right = card_rect.right() - 64.0;
             widgets::paint_text(ui, Rect::from_min_max(card_rect.min + vec2(20.0, 14.0), pos2(text_right, card_rect.top() + 36.0)), &title, fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
@@ -661,11 +690,11 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView], deliveries: &[HookDelivery
             // Numbers.
             let mut more = false;
             widgets::row(ui, 28.0, |ui| {
-                ui.label(widgets::rich("Perangkat", 18.0, Weight::SemiBold, p.text));
+                ui.label(widgets::rich(tr("Devices", "Perangkat"), 18.0, Weight::SemiBold, p.text));
             }, |ui| {
                 let link = if forest() { p.primary } else { p.text };
                 more = ui
-                    .add(egui::Label::new(widgets::rich("Lihat semua", 15.0, Weight::SemiBold, link)).sense(Sense::click()))
+                    .add(egui::Label::new(widgets::rich(tr("See all", "Lihat semua"), 15.0, Weight::SemiBold, link)).sense(Sense::click()))
                     .on_hover_cursor(egui::CursorIcon::PointingHand)
                     .clicked();
             });
@@ -678,9 +707,9 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView], deliveries: &[HookDelivery
                 ui.spacing_mut().item_spacing.y = 0.0;
                 if sessions.is_empty() {
                     ui.add_space(16.0);
-                    ui.label(widgets::rich("Belum ada nomor tertaut.", 14.0, Weight::Regular, p.muted));
+                    ui.label(widgets::rich(tr("No linked numbers yet.", "Belum ada nomor tertaut."), 14.0, Weight::Regular, p.muted));
                     ui.add_space(10.0);
-                    if widgets::button(ui, Some("plus"), "Tambah nomor", Kind::Primary).clicked() {
+                    if widgets::button(ui, Some("plus"), tr("Add number", "Tambah nomor"), Kind::Primary).clicked() {
                         action = Some(Action::Nomor(nomor::Action::Add));
                     }
                     ui.add_space(16.0);

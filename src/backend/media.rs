@@ -3,6 +3,7 @@
 //! media: the inline thumbnail is kept in `data/media/<session>/` and the CDN
 //! fields are stored with the message so the file can be downloaded on demand.
 
+use crate::i18n::tr;
 use std::path::{Path, PathBuf};
 
 use whatsapp_rust::download::{DownloadParams, MediaType};
@@ -214,7 +215,7 @@ enum Prepared {
 }
 
 fn prepare(path: &Path) -> Result<Prepared, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("File tidak terbaca: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| crate::trf!("Could not read the file: {e}", "File tidak terbaca: {e}"))?;
     if is_video(path) {
         let info = video_info(&bytes);
         // Only a real MP4/MOV goes to ffmpeg: a playlist named .mp4 (HLS,
@@ -225,7 +226,7 @@ fn prepare(path: &Path) -> Result<Prepared, String> {
     if !is_picture(path) {
         return Ok(Prepared::Document(bytes));
     }
-    let decoded = image::load_from_memory(&bytes).map_err(|e| format!("Gambar rusak: {e}"))?;
+    let decoded = image::load_from_memory(&bytes).map_err(|e| crate::trf!("Broken image: {e}", "Gambar rusak: {e}"))?;
     let jpeg = if matches!(extension(path).as_str(), "jpg" | "jpeg") {
         bytes
     } else {
@@ -237,9 +238,9 @@ fn prepare(path: &Path) -> Result<Prepared, String> {
 
 /// Reads, uploads and wraps the file as a message ready for `send_message`.
 pub async fn message(client: &Client, path: &Path, caption: &str) -> Result<wa::Message, String> {
-    let size = std::fs::metadata(path).map_err(|e| format!("File tidak terbaca: {e}"))?.len();
+    let size = std::fs::metadata(path).map_err(|e| crate::trf!("Could not read the file: {e}", "File tidak terbaca: {e}"))?.len();
     if size > MAX_BYTES {
-        return Err(format!("File lebih dari {} MB", MAX_BYTES / 1024 / 1024));
+        return Err(crate::trf!("File is larger than {} MB", "File lebih dari {} MB", MAX_BYTES / 1024 / 1024));
     }
     let owned = path.to_owned();
     // Reading, re-encoding and taking a still can take a moment: keep it off the runtime.
@@ -247,7 +248,7 @@ pub async fn message(client: &Client, path: &Path, caption: &str) -> Result<wa::
 
     let caption = (!caption.is_empty()).then(|| caption.to_owned());
     let upload = |bytes, kind| async move {
-        client.upload(bytes, kind, UploadOptions::default()).await.map_err(|e| format!("Upload gagal: {e}"))
+        client.upload(bytes, kind, UploadOptions::default()).await.map_err(|e| crate::trf!("Upload failed: {e}", "Upload gagal: {e}"))
     };
     match prepared {
         Prepared::Picture { jpeg, thumbnail, width, height } => {
@@ -314,7 +315,7 @@ fn is_animated_webp(bytes: &[u8]) -> bool {
 /// Turns any picture into a sticker file in `dir`: fitted into 512×512 on a
 /// transparent canvas, saved as lossless WebP. Animated WebP is copied as is.
 pub fn make_sticker(source: &Path, dir: &Path) -> Result<PathBuf, String> {
-    let bytes = std::fs::read(source).map_err(|e| format!("File tidak terbaca: {e}"))?;
+    let bytes = std::fs::read(source).map_err(|e| crate::trf!("Could not read the file: {e}", "File tidak terbaca: {e}"))?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let stem: String = source
         .file_stem()
@@ -329,7 +330,7 @@ pub fn make_sticker(source: &Path, dir: &Path) -> Result<PathBuf, String> {
         std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
         return Ok(target);
     }
-    let decoded = image::load_from_memory(&bytes).map_err(|e| format!("Gambar tidak didukung: {e}"))?;
+    let decoded = image::load_from_memory(&bytes).map_err(|e| crate::trf!("Unsupported image: {e}", "Gambar tidak didukung: {e}"))?;
     let fitted = decoded.resize(STICKER_SIDE, STICKER_SIDE, image::imageops::FilterType::Lanczos3).to_rgba8();
     let mut canvas = image::RgbaImage::new(STICKER_SIDE, STICKER_SIDE);
     let x = (STICKER_SIDE - fitted.width()) / 2;
@@ -348,12 +349,12 @@ pub fn make_sticker(source: &Path, dir: &Path) -> Result<PathBuf, String> {
 pub async fn sticker_message(client: &Client, path: &Path) -> Result<wa::Message, String> {
     let owned = path.to_owned();
     let (bytes, animated, width, height) = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let mut bytes = std::fs::read(&owned).map_err(|e| format!("File tidak terbaca: {e}"))?;
+        let mut bytes = std::fs::read(&owned).map_err(|e| crate::trf!("Could not read the file: {e}", "File tidak terbaca: {e}"))?;
         let animated = is_animated_webp(&bytes);
         let (mut width, mut height) =
             image::ImageReader::new(std::io::Cursor::new(&bytes)).with_guessed_format().ok()
                 .and_then(|r| r.into_dimensions().ok())
-                .ok_or("Gambar tidak didukung")?;
+                .ok_or(tr("Unsupported image", "Gambar tidak didukung"))?;
         let webp = matches!(extension(&owned).as_str(), "webp");
         if !animated && !(webp && width == STICKER_SIDE && height == STICKER_SIDE) {
             let tmp = std::env::temp_dir().join(format!("warust-sticker-{}", std::process::id()));
@@ -369,7 +370,7 @@ pub async fn sticker_message(client: &Client, path: &Path) -> Result<wa::Message
     let upload = client
         .upload(bytes, MediaType::Sticker, UploadOptions::default())
         .await
-        .map_err(|e| format!("Upload gagal: {e}"))?;
+        .map_err(|e| crate::trf!("Upload failed: {e}", "Upload gagal: {e}"))?;
     let mut sticker = wa::message::StickerMessage::default();
     sticker.url = Some(upload.url);
     sticker.direct_path = Some(upload.direct_path);
@@ -466,12 +467,12 @@ pub fn describe(message: &wa::Message, dir: &Path, msg_id: &str) -> Option<Value
 /// Uploads a recorded voice note and wraps it as a push-to-talk message, with
 /// its length and waveform read from the file.
 pub async fn voice_message(client: &Client, path: &Path) -> Result<wa::Message, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Pesan suara tidak terbaca: {e}"))?;
+    let bytes = std::fs::read(path).map_err(|e| crate::trf!("Could not read the voice message: {e}", "Pesan suara tidak terbaca: {e}"))?;
     let (seconds, waveform) = super::voice::inspect(&bytes)?;
     let upload = client
         .upload(bytes, MediaType::Audio, UploadOptions::default())
         .await
-        .map_err(|e| format!("Upload gagal: {e}"))?;
+        .map_err(|e| crate::trf!("Upload failed: {e}", "Upload gagal: {e}"))?;
     let mut options = AudioOptions::default();
     options.mimetype = Some("audio/ogg; codecs=opus".to_owned());
     options.ptt = Some(true);
@@ -543,11 +544,11 @@ pub async fn download(client: &Client, media: &Value, dir: &Path, msg_id: &str) 
     let kind = text("k").unwrap_or("document");
     let size = media.get("size").and_then(Value::as_u64).unwrap_or(0);
     if size > MAX_DOWNLOAD {
-        return Err(format!("File lebih dari {} MB", MAX_DOWNLOAD / 1024 / 1024));
+        return Err(crate::trf!("File is larger than {} MB", "File lebih dari {} MB", MAX_DOWNLOAD / 1024 / 1024));
     }
-    let dl = media.get("dl").filter(|d| !d.is_null()).ok_or("Data unduhan tidak ada")?;
-    let field = |key: &str| dl.get(key).and_then(Value::as_str).and_then(unhex).ok_or("Data unduhan rusak");
-    let direct_path = dl.get("p").and_then(Value::as_str).ok_or("Data unduhan rusak")?;
+    let dl = media.get("dl").filter(|d| !d.is_null()).ok_or(tr("No download data", "Data unduhan tidak ada"))?;
+    let field = |key: &str| dl.get(key).and_then(Value::as_str).and_then(unhex).ok_or(tr("Broken download data", "Data unduhan rusak"));
+    let direct_path = dl.get("p").and_then(Value::as_str).ok_or(tr("Broken download data", "Data unduhan rusak"))?;
     let params = DownloadParams::encrypted(
         direct_path,
         &field("key")?,
@@ -556,14 +557,14 @@ pub async fn download(client: &Client, media: &Value, dir: &Path, msg_id: &str) 
         size,
         media_type(kind),
     )
-    .map_err(|e| format!("Data unduhan rusak: {e:?}"))?;
+    .map_err(|e| crate::trf!("Broken download data: {e:?}", "Data unduhan rusak: {e:?}"))?;
     let bytes = client
         .download(&params, Default::default())
         .await
-        .map_err(|e| format!("Unduh gagal: {e:?}"))?;
+        .map_err(|e| crate::trf!("Download failed: {e:?}", "Unduh gagal: {e:?}"))?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let path = target(dir, msg_id, kind, text("name"));
-    std::fs::write(&path, bytes).map_err(|e| format!("Gagal menyimpan: {e}"))?;
+    std::fs::write(&path, bytes).map_err(|e| crate::trf!("Could not save: {e}", "Gagal menyimpan: {e}"))?;
     Ok(path)
 }
 

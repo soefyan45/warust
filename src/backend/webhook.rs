@@ -264,7 +264,7 @@ mod tests {
         match tokio::time::timeout(Duration::from_secs(5), queued.recv()).await.unwrap() {
             Some(Command::Enqueue { chat, body: Body::Text(text), .. }) => {
                 assert_eq!(chat, "628123456789@s.whatsapp.net");
-                assert_eq!(text, "Terima kasih Budi Santoso, pesanmu sedang kami proses.");
+                assert_eq!(text, "Thank you Budi Santoso, we are processing your message.");
             }
             _ => panic!("expected the reply to be queued"),
         }

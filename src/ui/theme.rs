@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 
 use egui::{Color32, Context, CornerRadius, Frame, Margin, Stroke, Theme, ThemePreference, Visuals};
 
+use crate::i18n::tr;
+
 /// A page template: palette, navigation and surfaces. Data and screens are
 /// the same in every template.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,15 +34,15 @@ impl Template {
 
     pub fn name(self) -> &'static str {
         match self {
-            Template::Classic => "Klasik (v4)",
+            Template::Classic => tr("Classic (v4)", "Klasik (v4)"),
             Template::Forest => "Forest (v5)",
         }
     }
 
     pub fn description(self) -> &'static str {
         match self {
-            Template::Classic => "Sidebar kiri, monokrom, mode gelap dan terang.",
-            Template::Forest => "Navigasi atas, kartu putih, aksen hijau-lime. Terang saja.",
+            Template::Classic => tr("Left sidebar, monochrome, dark and light mode.", "Sidebar kiri, monokrom, mode gelap dan terang."),
+            Template::Forest => tr("Top navigation, white cards, green-lime accent. Light only.", "Navigasi atas, kartu putih, aksen hijau-lime. Terang saja."),
         }
     }
 

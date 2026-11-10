@@ -10,6 +10,7 @@ use egui::{PopupCloseBehavior, Response, ScrollArea, Sense, Stroke, StrokeKind, 
 use crate::backend::{Book, make_sticker};
 
 use super::fonts::Weight;
+use crate::i18n::tr;
 use super::theme::{self, R_MD};
 use super::widgets::{self, Kind, rich};
 
@@ -67,7 +68,7 @@ fn add_from_file(ctx: &egui::Context) {
     }
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let picked = crate::platform::pick_file("Pilih gambar untuk dijadikan stiker", true);
+        let picked = crate::platform::pick_file(tr("Pick an image to make a sticker", "Pilih gambar untuk dijadikan stiker"), true);
         if let Some(source) = picked {
             if let Err(e) = make_sticker(&source, &dir()) {
                 log::warn!("cannot add a sticker: {e}");
@@ -118,31 +119,31 @@ pub fn picker(ui: &Ui, button: &Response, book: &Book, connected: bool) -> Optio
             let recent = received(book);
             let own = collection();
             ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
-                widgets::section_label(ui, "Koleksi saya");
+                widgets::section_label(ui, tr("My collection", "Koleksi saya"));
                 if own.is_empty() {
-                    ui.label(rich("Belum ada. Tambahkan gambar PNG/JPG/WebP.", 12.0, Weight::Regular, p.muted));
+                    ui.label(rich(tr("None yet. Add a PNG/JPG/WebP image.", "Belum ada. Tambahkan gambar PNG/JPG/WebP."), 12.0, Weight::Regular, p.muted));
                 }
                 picked = picked.take().or(grid(ui, &own, connected));
-                widgets::section_label(ui, "Diterima di chat");
+                widgets::section_label(ui, tr("Received in chats", "Diterima di chat"));
                 if recent.is_empty() {
-                    ui.label(rich("Stiker yang masuk akan muncul di sini.", 12.0, Weight::Regular, p.muted));
+                    ui.label(rich(tr("Stickers you receive will show up here.", "Stiker yang masuk akan muncul di sini."), 12.0, Weight::Regular, p.muted));
                 }
                 picked = picked.take().or(grid(ui, &recent, connected));
             });
             ui.separator();
             ui.horizontal(|ui| {
                 let adding = ADDING.load(Ordering::SeqCst);
-                let label = if adding { "Memproses…" } else { "Tambah dari file" };
+                let label = if adding { tr("Processing…", "Memproses…") } else { tr("Add from file", "Tambah dari file") };
                 if widgets::button(ui, Some("plus"), label, Kind::Secondary).clicked() && !adding {
                     add_from_file(ui.ctx());
                 }
-                if widgets::button(ui, None, "Buka folder", Kind::Secondary).clicked() {
+                if widgets::button(ui, None, tr("Open folder", "Buka folder"), Kind::Secondary).clicked() {
                     let _ = std::fs::create_dir_all(dir());
                     crate::platform::open(dir());
                 }
             });
             if !connected {
-                ui.label(rich("Nomor tidak terhubung, stiker belum bisa dikirim", 12.0, Weight::Regular, p.red_text));
+                ui.label(rich(tr("The number is not connected, stickers cannot be sent yet", "Nomor tidak terhubung, stiker belum bisa dikirim"), 12.0, Weight::Regular, p.red_text));
             }
             if picked.is_some() {
                 ui.close();

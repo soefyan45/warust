@@ -14,6 +14,7 @@ use egui::{Margin, Ui};
 use super::fonts::Weight;
 use super::icons;
 use super::theme::{self, Palette};
+use crate::i18n::tr;
 use super::widgets::rich;
 use crate::backend::{Book, Chat, mask_phone};
 
@@ -38,7 +39,7 @@ pub fn webhook_label(state: &super::State, session: &str) -> String {
             let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
             rest.split('/').next().unwrap_or(rest).to_owned()
         }
-        None => "Tidak diatur".to_owned(),
+        None => tr("Not set", "Tidak diatur").to_owned(),
     }
 }
 
@@ -81,11 +82,11 @@ pub fn chat_title(book: &Book, chat: &Chat) -> String {
         return name.to_owned();
     }
     if chat.is_group() {
-        "Grup tanpa nama".to_owned()
+        tr("Unnamed group", "Grup tanpa nama").to_owned()
     } else if chat.jid.ends_with("@s.whatsapp.net") {
         mask_phone(&chat.jid)
     } else {
-        format!("Kontak {}", short_jid(&chat.jid))
+        crate::trf!("Contact {}", "Kontak {}", short_jid(&chat.jid))
     }
 }
 
@@ -95,7 +96,7 @@ pub fn sender_label(book: &Book, jid: &str) -> String {
 }
 
 pub fn chat_subtitle(chat: &Chat) -> String {
-    if chat.is_group() { "Grup".to_owned() } else { short_jid(&chat.jid) }
+    if chat.is_group() { tr("Group", "Grup").to_owned() } else { short_jid(&chat.jid) }
 }
 
 /// Two letters for an avatar tile.

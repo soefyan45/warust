@@ -4,6 +4,7 @@
 use egui::{Frame, Margin, ScrollArea, Stroke};
 
 use crate::backend::{Command, SessionView};
+use crate::i18n::tr;
 use crate::ui::fonts::Weight;
 use crate::ui::theme::{self, R_LG};
 use crate::ui::widgets::{self, Kind, rich};
@@ -49,8 +50,8 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Dialog>, sessions: &[SessionV
         .show(ctx, |ui| {
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = 10.0;
-            ui.label(rich("Teruskan ke…", 16.0, Weight::SemiBold, p.text));
-            widgets::search(ui, &mut dialog.search, "Cari chat", width, false);
+            ui.label(rich(tr("Forward to…", "Teruskan ke…"), 16.0, Weight::SemiBold, p.text));
+            widgets::search(ui, &mut dialog.search, tr("Search chats", "Cari chat"), width, false);
             let query = dialog.search.trim().to_lowercase();
             let rows: Vec<(&str, String)> = session
                 .book
@@ -61,7 +62,7 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Dialog>, sessions: &[SessionV
                 .collect();
             ScrollArea::vertical().max_height(280.0).auto_shrink([false, true]).show(ui, |ui| {
                 if rows.is_empty() {
-                    ui.label(rich("Tidak ada chat yang cocok.", 13.0, Weight::Regular, p.muted));
+                    ui.label(rich(tr("No matching chats.", "Tidak ada chat yang cocok."), 13.0, Weight::Regular, p.muted));
                 }
                 for (jid, title) in &rows {
                     let at = dialog.picked.iter().position(|j| j == jid);
@@ -78,18 +79,18 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Dialog>, sessions: &[SessionV
                     }
                 }
             });
-            ui.label(rich(&format!("{} dari {MAX_TARGETS} dipilih", dialog.picked.len()), 12.0, Weight::Regular, p.muted));
+            ui.label(rich(&crate::trf!("{} of {MAX_TARGETS} selected", "{} dari {MAX_TARGETS} dipilih", dialog.picked.len()), 12.0, Weight::Regular, p.muted));
             widgets::row(
                 ui,
                 32.0,
                 |_| {},
                 |ui| {
                     ui.add_enabled_ui(!dialog.picked.is_empty(), |ui| {
-                        if widgets::button(ui, Some("send"), "Kirim", Kind::Primary).clicked() {
+                        if widgets::button(ui, Some("send"), tr("Send", "Kirim"), Kind::Primary).clicked() {
                             send = true;
                         }
                     });
-                    if widgets::button(ui, None, "Batal", Kind::Secondary).clicked() {
+                    if widgets::button(ui, None, tr("Cancel", "Batal"), Kind::Secondary).clicked() {
                         close = true;
                     }
                 },
