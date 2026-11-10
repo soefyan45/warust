@@ -12,6 +12,7 @@ use egui::{
 };
 
 use super::theme;
+use crate::i18n::tr;
 
 const EDGE: f32 = 5.0;
 
@@ -178,10 +179,10 @@ fn button(ui: &mut Ui, control: Control) -> egui::Response {
         }
     }
     let tip = match control {
-        Control::Minimize => "Kecilkan",
-        Control::Maximize if is_maximized(ui.ctx()) => "Pulihkan",
-        Control::Maximize => "Perbesar",
-        Control::Close => "Tutup",
+        Control::Minimize => tr("Minimize", "Kecilkan"),
+        Control::Maximize if is_maximized(ui.ctx()) => tr("Restore", "Pulihkan"),
+        Control::Maximize => tr("Maximize", "Perbesar"),
+        Control::Close => tr("Close", "Tutup"),
     };
     response.on_hover_text(tip)
 }

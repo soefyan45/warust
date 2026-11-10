@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use egui::{Align, CentralPanel, Color32, Key, Margin, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::backend::{Book, ChatMsg, Command, SessionView, Status, StatusPost};
+use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG};
 use crate::ui::widgets::{self, rich};
@@ -20,7 +21,7 @@ type Downloads = HashMap<String, Option<String>>;
 /// The poster's name, else their masked number; `None` is this number.
 fn poster_title(book: &Book, poster: &Option<String>) -> String {
     match poster {
-        None => "Status saya".to_owned(),
+        None => tr("My status", "Status saya").to_owned(),
         Some(jid) => book.name_of(jid).map(str::to_owned).unwrap_or_else(|| super::short_jid(jid)),
     }
 }
@@ -71,10 +72,12 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
                 None
             } else {
                 match downloads.get(&post.id) {
-                    Some(None) => Some("Mengunduh…"),
-                    Some(Some(_)) => Some("Gagal, klik untuk ulangi"),
-                    None if media.downloadable() => Some(if media.kind == "image" { "Memuat…" } else { "Klik untuk unduh" }),
-                    None => Some("Tidak tersedia"),
+                    Some(None) => Some(tr("Downloading…", "Mengunduh…")),
+                    Some(Some(_)) => Some(tr("Failed, click to retry", "Gagal, klik untuk ulangi")),
+                    None if media.downloadable() => {
+                        Some(if media.kind == "image" { tr("Loading…", "Memuat…") } else { tr("Click to download", "Klik untuk unduh") })
+                    }
+                    None => Some(tr("Not available", "Tidak tersedia")),
                 }
             };
             if media.kind == "video" {
@@ -188,9 +191,9 @@ fn entries<'a>(sessions: &'a [SessionView], scope: Option<&str>, search: &str) -
 
 fn ago(ts: i64) -> String {
     match (time::now() - ts).max(0) {
-        s if s < 60 => "baru saja".to_owned(),
-        s if s < 3600 => format!("{} mnt lalu", s / 60),
-        s => format!("{} jam lalu", s / 3600),
+        s if s < 60 => tr("just now", "baru saja").to_owned(),
+        s if s < 3600 => crate::trf!("{} min ago", "{} mnt lalu", s / 60),
+        s => crate::trf!("{} h ago", "{} jam lalu", s / 3600),
     }
 }
 
@@ -275,9 +278,9 @@ pub fn page(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatars: &
             let rect = ui.max_rect();
             icons::paint(ui, Rect::from_center_size(rect.center() - vec2(0.0, 30.0), vec2(28.0, 28.0)), "circle-dashed", 28.0, Color32::from_white_alpha(160));
             let title = Rect::from_center_size(rect.center() + vec2(0.0, 8.0), vec2(rect.width(), 22.0));
-            widgets::paint_text(ui, title, "Pilih status", fonts::ui(16.0, Weight::SemiBold), Color32::WHITE, Align::Center);
+            widgets::paint_text(ui, title, tr("Select a status", "Pilih status"), fonts::ui(16.0, Weight::SemiBold), Color32::WHITE, Align::Center);
             let desc = Rect::from_center_size(rect.center() + vec2(0.0, 32.0), vec2(rect.width(), 18.0));
-            widgets::paint_text(ui, desc, "Pilih kontak di sebelah kiri. Membuka status mengirim tanda dilihat bila diizinkan.", fonts::ui(13.0, Weight::Regular), Color32::from_white_alpha(170), Align::Center);
+            widgets::paint_text(ui, desc, tr("Choose a contact on the left. Opening a status sends a seen receipt when allowed.", "Pilih kontak di sebelah kiri. Membuka status mengirim tanda dilihat bila diizinkan."), fonts::ui(13.0, Weight::Regular), Color32::from_white_alpha(170), Align::Center);
         }
     });
     commands
@@ -314,11 +317,11 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
     } else {
         ui.label(rich("Status", 20.0, Weight::SemiBold, p.text));
         ui.add_space(2.0);
-        ui.label(rich("Status kontak dari nomor terhubung", 13.0, Weight::Regular, p.muted));
+        ui.label(rich(tr("Contacts' statuses from connected numbers", "Status kontak dari nomor terhubung"), 13.0, Weight::Regular, p.muted));
     }
     ui.add_space(14.0);
     if sessions.len() > 1 {
-        let mut labels = vec!["Semua nomor".to_owned()];
+        let mut labels = vec![tr("All numbers", "Semua nomor").to_owned()];
         labels.extend(sessions.iter().map(|s| s.name.clone()));
         let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
         let mut selected = state.status_scope.as_ref().and_then(|id| sessions.iter().position(|s| &s.id == id)).map_or(0, |i| i + 1);
@@ -326,7 +329,7 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
         state.status_scope = selected.checked_sub(1).map(|i| sessions[i].id.clone());
         ui.add_space(10.0);
     }
-    widgets::search(ui, &mut state.status_search, "Cari nama atau nomor", ui.available_width(), false);
+    widgets::search(ui, &mut state.status_search, tr("Search name or number", "Cari nama atau nomor"), ui.available_width(), false);
     ui.add_space(8.0);
     let list = entries(sessions, state.status_scope.as_deref(), &state.status_search);
     let footer = if phone { 0.0 } else { 28.0 };
@@ -336,12 +339,12 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
         if list.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.label(rich("Belum ada status dalam 24 jam terakhir.", 13.0, Weight::Regular, p.muted));
-                ui.label(rich("Status baru dari kontak muncul di sini.", 12.0, Weight::Regular, p.muted));
+                ui.label(rich(tr("No statuses in the last 24 hours.", "Belum ada status dalam 24 jam terakhir."), 13.0, Weight::Regular, p.muted));
+                ui.label(rich(tr("New statuses from contacts show up here.", "Status baru dari kontak muncul di sini."), 12.0, Weight::Regular, p.muted));
             });
         }
         let unseen = list.iter().filter(|e| e.unseen()).count();
-        for (label, group) in [("BELUM DILIHAT", &list[..unseen]), ("SUDAH DILIHAT", &list[unseen..])] {
+        for (label, group) in [(tr("NOT SEEN", "BELUM DILIHAT"), &list[..unseen]), (tr("SEEN", "SUDAH DILIHAT"), &list[unseen..])] {
             if group.is_empty() {
                 continue;
             }
@@ -367,7 +370,7 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             icons::show(ui, "clock", 14.0, p.muted);
-            ui.label(rich("Status hilang otomatis setelah 24 jam", 12.0, Weight::Regular, p.muted));
+            ui.label(rich(tr("Statuses disappear automatically after 24 hours", "Status hilang otomatis setelah 24 jam"), 12.0, Weight::Regular, p.muted));
         });
     }
     commands
@@ -387,7 +390,11 @@ fn poster_row(ui: &mut Ui, p: &Palette, e: &Entry, picture: Option<&Path>, selec
     let (ring, width) = if e.unseen() { (if forest() { p.primary } else { p.green }, 2.0) } else { (p.border_strong, 1.5) };
     ui.painter().circle_stroke(tile.center(), 24.5, Stroke::new(width, ring));
     let left = tile.right() + 16.0;
-    let count = format!("{} status", e.posts.len());
+    let count = {
+        let n = e.posts.len();
+        let en = if n == 1 { "status" } else { "statuses" };
+        crate::trf!("{n} {en}", "{n} status")
+    };
     let count_w = ui.painter().layout_no_wrap(count.clone(), fonts::ui(12.0, Weight::Regular), p.muted).size().x;
     let name = Rect::from_min_max(pos2(left, rect.top() + 13.0), pos2(rect.right() - count_w - 20.0, rect.top() + 33.0));
     widgets::paint_text(ui, name, &title, fonts::ui(15.0, Weight::SemiBold), p.text, Align::Min);
@@ -498,12 +505,12 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     let text_left = tile.right() + 12.0;
     let text_right = head.right() - 96.0;
     widgets::paint_text(ui, Rect::from_min_max(pos2(text_left, head.top() + 2.0), pos2(text_right, head.top() + 22.0)), &title, fonts::ui(15.0, Weight::SemiBold), white, Align::Min);
-    let via = if phone { String::new() } else { format!(" · dilihat lewat {}", super::devices::chip_label(e.session)) };
-    let sub = format!("Status {} dari {count} · {}{via}", state.status_index + 1, ago(post.ts));
+    let via = if phone { String::new() } else { crate::trf!(" · seen via {}", " · dilihat lewat {}", super::devices::chip_label(e.session)) };
+    let sub = crate::trf!("Status {} of {count} · {}{via}", "Status {} dari {count} · {}{via}", state.status_index + 1, ago(post.ts));
     widgets::paint_text(ui, Rect::from_min_max(pos2(text_left, head.top() + 23.0), pos2(text_right, head.top() + 41.0)), &sub, fonts::ui(12.0, Weight::Regular), soft, Align::Min);
     let menu_rect = Rect::from_center_size(pos2(head.right() - 20.0, head.center().y), vec2(40.0, 40.0));
     let pause_rect = menu_rect.translate(vec2(-48.0, 0.0));
-    if stage_button(ui, pause_rect, "status_pause", true, false).on_hover_text(if state.status_paused { "Lanjut" } else { "Jeda" }).clicked() {
+    if stage_button(ui, pause_rect, "status_pause", true, false).on_hover_text(if state.status_paused { tr("Resume", "Lanjut") } else { tr("Pause", "Jeda") }).clicked() {
         state.status_paused = !state.status_paused;
     }
     icons::paint(ui, Rect::from_center_size(pause_rect.center(), vec2(18.0, 18.0)), if state.status_paused { "play" } else { "pause" }, 18.0, white);
@@ -511,10 +518,10 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     icons::paint(ui, Rect::from_center_size(menu_rect.center(), vec2(18.0, 18.0)), "ellipsis", 18.0, white);
     egui::Popup::menu(&menu).show(|ui| {
         ui.set_min_width(190.0);
-        if !post.text.is_empty() && ui.button("Salin teks").clicked() {
+        if !post.text.is_empty() && ui.button(tr("Copy text", "Salin teks")).clicked() {
             ui.ctx().copy_text(post.caption());
         }
-        if ui.button(format!("Buka chat {title}")).clicked() {
+        if ui.button(crate::trf!("Open chat with {title}", "Buka chat {title}")).clicked() {
             state.open_chat_requested = Some((e.session.id.clone(), e.poster.clone()));
         }
     });
@@ -589,9 +596,9 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
             icons::paint(ui, Rect::from_center_size(like.center(), vec2(18.0, 18.0)), "heart", 18.0, color);
         } else {
             icons::paint(ui, Rect::from_center_size(pos2(like.left() + 26.0, like.center().y), vec2(18.0, 18.0)), "heart", 18.0, color);
-            widgets::paint_text(ui, Rect::from_min_max(pos2(like.left() + 40.0, like.top()), like.max), "Suka", fonts::ui(15.0, Weight::SemiBold), color, Align::Min);
+            widgets::paint_text(ui, Rect::from_min_max(pos2(like.left() + 40.0, like.top()), like.max), tr("Like", "Suka"), fonts::ui(15.0, Weight::SemiBold), color, Align::Min);
         }
-        r.on_hover_text("Kirim ❤️ sebagai balasan status")
+        r.on_hover_text(tr("Send ❤️ as a status reply", "Kirim ❤️ sebagai balasan status"))
     };
     if like_resp.clicked() && !liked {
         commands.push(Command::StatusReply { id: e.session.id.clone(), msg_id: post.id.clone(), text: LIKE.to_owned() });
@@ -600,14 +607,14 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     for emoji in QUICK {
         let r = Rect::from_min_size(pos2(cx, reactions_y - size / 2.0), vec2(size, size));
         let active = sent.iter().any(|s| s == emoji);
-        if stage_button(ui, r, emoji, can_reply, active).on_hover_text(format!("Kirim {emoji}")).clicked() && !active {
+        if stage_button(ui, r, emoji, can_reply, active).on_hover_text(crate::trf!("Send {emoji}", "Kirim {emoji}")).clicked() && !active {
             commands.push(Command::StatusReply { id: e.session.id.clone(), msg_id: post.id.clone(), text: emoji.to_owned() });
         }
         widgets::paint_text(ui, r, emoji, fonts::ui(size * 0.45, Weight::Regular), white, Align::Center);
         cx += size + spacing;
     }
     let plus = Rect::from_min_size(pos2(cx, reactions_y - size / 2.0), vec2(size, size));
-    let plus_resp = stage_button(ui, plus, "status_more_emoji", can_reply, false).on_hover_text("Emoji lain untuk komentar");
+    let plus_resp = stage_button(ui, plus, "status_more_emoji", can_reply, false).on_hover_text(tr("More emoji for the comment", "Emoji lain untuk komentar"));
     icons::paint(ui, Rect::from_center_size(plus.center(), vec2(18.0, 18.0)), "plus", 18.0, white);
     if can_reply {
         crate::ui::emoji::picker(ui, &plus_resp, comment_id, &mut state.status_comment);
@@ -617,7 +624,7 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     ui.painter().rect_filled(comment, 26.0, if can_reply { p.panel } else { Color32::from_white_alpha(30) });
     icons::paint(ui, Rect::from_center_size(pos2(comment.left() + 24.0, comment.center().y), vec2(18.0, 18.0)), "message-circle", 18.0, p.muted);
     let send = Rect::from_center_size(pos2(comment.right() - 26.0, comment.center().y), vec2(40.0, 40.0));
-    let chip = format!("dari {}", super::devices::chip_label(e.session));
+    let chip = crate::trf!("from {}", "dari {}", super::devices::chip_label(e.session));
     let chip_galley = ui.painter().layout_no_wrap(chip, fonts::ui(12.0, Weight::Medium), p.text_2);
     let chip_w = chip_galley.size().x + 32.0;
     let show_chip = !phone && comment.width() > 420.0;
@@ -630,11 +637,11 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     }
     let edit_rect = Rect::from_min_max(pos2(comment.left() + 44.0, comment.center().y - 11.0), pos2(edit_right, comment.center().y + 11.0));
     let hint = if !connected {
-        format!("{} tidak terhubung", e.session.name)
+        crate::trf!("{} is not connected", "{} tidak terhubung", e.session.name)
     } else if post.from_me {
-        "Status Anda".to_owned()
+        tr("Your status", "Status Anda").to_owned()
     } else {
-        format!("Komentari status {title}")
+        crate::trf!("Comment on {title}'s status", "Komentari status {title}")
     };
     let edit = ui.add_enabled_ui(can_reply, |ui| {
         ui.put(
@@ -658,7 +665,10 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     }
     if !phone {
         let note = Rect::from_center_size(pos2(area.center().x, area.bottom() - 30.0), vec2((area.width() - pad * 2.0).min(560.0), 36.0));
-        let text = format!("Komentar dan reaksi dikirim dari nomor yang melihat status ini. Komentar masuk ke Inbox sebagai chat {title} dengan kutipan statusnya.");
+        let text = crate::trf!(
+            "Comments and reactions are sent from the number that views this status. Comments land in the Inbox as a chat with {title}, quoting the status.",
+            "Komentar dan reaksi dikirim dari nomor yang melihat status ini. Komentar masuk ke Inbox sebagai chat {title} dengan kutipan statusnya."
+        );
         let mut job = egui::text::LayoutJob::simple(text, fonts::ui(12.0, Weight::Regular), soft, note.width());
         job.halign = Align::Center;
         let galley = ui.painter().layout_job(job);
@@ -679,9 +689,9 @@ fn side(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry) -> Vec<Command> 
     let mut commands = Vec::new();
     ui.spacing_mut().item_spacing.y = 0.0;
     let title = e.title();
-    ui.label(rich("Reaksi & komentar", 18.0, Weight::SemiBold, p.text));
+    ui.label(rich(tr("Reactions & comments", "Reaksi & komentar"), 18.0, Weight::SemiBold, p.text));
     ui.add_space(4.0);
-    ui.add(egui::Label::new(rich(&format!("Yang sudah kamu kirim ke status {title}"), 13.0, Weight::Regular, p.muted)).truncate());
+    ui.add(egui::Label::new(rich(&crate::trf!("What you sent to {title}'s status", "Yang sudah kamu kirim ke status {title}"), 13.0, Weight::Regular, p.muted)).truncate());
     ui.add_space(16.0);
     let replies = e.replies();
     let liked = |id: &str| replies.iter().any(|m| m.text.trim() == LIKE && m.quote.as_ref().is_some_and(|q| q.id == id));
@@ -699,21 +709,21 @@ fn side(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry) -> Vec<Command> 
             let response = ui.interact(r, ui.scope_id().with(("status_tile", &post.id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
             let current = i == state.status_index;
             let (fill, text, sub_color, sub) = if current {
-                (p.primary, p.on_primary, if forest() { p.accent } else { p.on_primary_muted }, "Sedang dilihat")
+                (p.primary, p.on_primary, if forest() { p.accent } else { p.on_primary_muted }, tr("Viewing now", "Sedang dilihat"))
             } else if liked(&post.id) {
-                (p.orange_soft, theme::FOREST_ORANGE, theme::FOREST_ORANGE, "Disukai")
+                (p.orange_soft, theme::FOREST_ORANGE, theme::FOREST_ORANGE, tr("Liked", "Disukai"))
             } else if post.seen {
-                (p.raised, p.text_2, p.muted, "Dilihat")
+                (p.raised, p.text_2, p.muted, tr("Seen", "Dilihat"))
             } else {
-                (p.raised, p.text_2, p.muted, "Belum dilihat")
+                (p.raised, p.text_2, p.muted, tr("Not seen", "Belum dilihat"))
             };
             ui.painter().rect_filled(r, theme::r_inner(), fill);
             if current && forest() {
                 ui.painter().rect_stroke(r, theme::r_inner(), Stroke::new(2.0, p.accent), StrokeKind::Inside);
             }
-            widgets::paint_text(ui, Rect::from_min_max(pos2(r.left() + 10.0, r.bottom() - 40.0), pos2(r.right() - 8.0, r.bottom() - 24.0)), &format!("Status {}", i + 1), fonts::ui(12.0, Weight::SemiBold), text, Align::Min);
+            widgets::paint_text(ui, Rect::from_min_max(pos2(r.left() + 10.0, r.bottom() - 40.0), pos2(r.right() - 8.0, r.bottom() - 24.0)), &crate::trf!("Status {}", "Status {}", i + 1), fonts::ui(12.0, Weight::SemiBold), text, Align::Min);
             let mut sub_left = r.left() + 10.0;
-            if sub == "Disukai" {
+            if !current && liked(&post.id) {
                 icons::paint(ui, Rect::from_min_size(pos2(sub_left, r.bottom() - 21.0), vec2(12.0, 12.0)), "heart", 12.0, sub_color);
                 sub_left += 16.0;
             }
@@ -733,18 +743,18 @@ fn side(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry) -> Vec<Command> 
     ScrollArea::vertical().id_salt("status_replies").max_height(height).auto_shrink([false, true]).show(ui, |ui| {
         if replies.is_empty() {
             ui.add_space(8.0);
-            ui.label(rich("Belum ada reaksi atau komentar ke status ini.", 13.0, Weight::Regular, p.muted));
+            ui.label(rich(tr("No reactions or comments on this status yet.", "Belum ada reaksi atau komentar ke status ini."), 13.0, Weight::Regular, p.muted));
         }
         for (k, m) in replies.iter().rev().enumerate() {
             let quote = m.quote.as_ref();
             let number = quote.and_then(|q| e.posts.iter().position(|s| s.id == q.id)).map_or(0, |i| i + 1);
             let text = m.text.trim();
             let (icon, label) = if text == LIKE {
-                (None, format!("Menyukai status {number}"))
+                (None, crate::trf!("Liked status {number}", "Menyukai status {number}"))
             } else if is_reaction(text) {
-                (Some(text), format!("Reaksi {text} ke status {number}"))
+                (Some(text), crate::trf!("Reaction {text} to status {number}", "Reaksi {text} ke status {number}"))
             } else {
-                (None, format!("Komentar ke status {number}"))
+                (None, crate::trf!("Comment on status {number}", "Komentar ke status {number}"))
             };
             if k > 0 {
                 ui.add_space(10.0);
@@ -775,7 +785,13 @@ fn side(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry) -> Vec<Command> 
                         });
                     }
                     let status = super::inbox::delivery_label(&m.status);
-                    let meta = format!("{} · dari {}{}", time::clock(m.ts), super::devices::chip_label(e.session), if status.is_empty() { String::new() } else { format!(" · {status}") });
+                    let meta = crate::trf!(
+                        "{} · from {}{}",
+                        "{} · dari {}{}",
+                        time::clock(m.ts),
+                        super::devices::chip_label(e.session),
+                        if status.is_empty() { String::new() } else { format!(" · {status}") }
+                    );
                     ui.label(rich(&meta, 12.0, Weight::Regular, p.muted));
                 });
             });
@@ -794,8 +810,8 @@ fn side(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry) -> Vec<Command> 
         widgets::row(ui, 44.0, |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(rich("Kirim tanda dilihat", 14.0, Weight::SemiBold, p.text));
-                ui.add(egui::Label::new(rich("Kontak tahu status sudah dilihat nomor ini", 12.0, Weight::Regular, p.muted)).wrap());
+                ui.label(rich(tr("Send seen receipts", "Kirim tanda dilihat"), 14.0, Weight::SemiBold, p.text));
+                ui.add(egui::Label::new(rich(tr("Contacts know this number has seen the status", "Kontak tahu status sudah dilihat nomor ini"), 12.0, Weight::Regular, p.muted)).wrap());
             });
         }, |ui| {
             widgets::toggle(ui, &mut on, "");
@@ -812,7 +828,7 @@ fn side(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry) -> Vec<Command> 
     ui.add_space(12.0);
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::click());
     ui.painter().rect(rect, 21.0, if response.hovered() { p.raised } else { p.panel }, Stroke::new(1.0, p.border_strong), StrokeKind::Inside);
-    let label = ui.painter().layout_no_wrap(format!("Buka chat {title}"), fonts::ui(14.0, Weight::Medium), p.text);
+    let label = ui.painter().layout_no_wrap(crate::trf!("Open chat with {title}", "Buka chat {title}"), fonts::ui(14.0, Weight::Medium), p.text);
     let total = label.size().x + 26.0;
     let left = rect.center().x - total / 2.0;
     icons::paint(&ui, Rect::from_center_size(pos2(left + 8.0, rect.center().y), vec2(16.0, 16.0)), "message-circle", 16.0, p.text);

@@ -18,6 +18,7 @@ use super::fonts::{self, Weight};
 use super::icons;
 use super::theme::{self, R_LG, R_MD};
 use super::widgets::{self, Kind, rich};
+use crate::i18n::tr;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Info {
@@ -155,11 +156,19 @@ fn unreadable(file: &Path) -> bool {
 }
 
 /// What the viewer says instead of pages when the PDF cannot be shown.
-const UNREADABLE: &str = if cfg!(target_os = "macos") {
-    "PDF ini tidak bisa ditampilkan: filenya rusak atau terkunci kata sandi. Coba \"Buka di aplikasi lain\"."
-} else {
-    "PDF ini tidak bisa ditampilkan. Pratinjau butuh poppler (pdftoppm dan pdfinfo); atau pakai \"Buka di aplikasi lain\"."
-};
+fn unreadable_note() -> &'static str {
+    if cfg!(target_os = "macos") {
+        tr(
+            "This PDF cannot be shown: the file is damaged or locked with a password. Try \"Open in another app\".",
+            "PDF ini tidak bisa ditampilkan: filenya rusak atau terkunci kata sandi. Coba \"Buka di aplikasi lain\".",
+        )
+    } else {
+        tr(
+            "This PDF cannot be shown. The preview needs poppler (pdftoppm and pdfinfo); or use \"Open in another app\".",
+            "PDF ini tidak bisa ditampilkan. Pratinjau butuh poppler (pdftoppm dan pdfinfo); atau pakai \"Buka di aplikasi lain\".",
+        )
+    }
+}
 
 /// A rendered page (1-based) about `width` pixels wide; `None` until ready.
 /// Widths are rounded up to steps of 256 px so resizing does not re-render.
@@ -232,29 +241,29 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                     ui.add_space(6.0);
                     ui.label(rich(&viewer.title, 14.0, Weight::SemiBold, p.text));
                     if let Some(info) = info {
-                        ui.label(rich(&format!("{} halaman", info.pages), 12.0, Weight::Regular, p.muted));
+                        ui.label(rich(&crate::trf!("{} pages", "{} halaman", info.pages), 12.0, Weight::Regular, p.muted));
                     }
                 },
                 |ui| {
-                    close = widgets::icon_button(ui, "x", 28.0, false).on_hover_text("Tutup (Esc)").clicked();
+                    close = widgets::icon_button(ui, "x", 28.0, false).on_hover_text(tr("Close (Esc)", "Tutup (Esc)")).clicked();
                     ui.add_space(8.0);
-                    if widgets::button(ui, None, "Buka di aplikasi lain", Kind::Secondary).clicked() {
+                    if widgets::button(ui, None, tr("Open in another app", "Buka di aplikasi lain"), Kind::Secondary).clicked() {
                         crate::platform::open(&viewer.file);
                     }
                     ui.add_space(8.0);
                     let at = ZOOMS.iter().position(|z| *z == viewer.zoom).unwrap_or(2);
-                    if widgets::button(ui, None, "+", Kind::Secondary).on_hover_text("Perbesar").clicked() {
+                    if widgets::button(ui, None, "+", Kind::Secondary).on_hover_text(tr("Zoom in", "Perbesar")).clicked() {
                         viewer.zoom = ZOOMS[(at + 1).min(ZOOMS.len() - 1)];
                     }
                     ui.label(rich_zoom(viewer.zoom, &p));
-                    if widgets::button(ui, None, "−", Kind::Secondary).on_hover_text("Perkecil").clicked() {
+                    if widgets::button(ui, None, "−", Kind::Secondary).on_hover_text(tr("Zoom out", "Perkecil")).clicked() {
                         viewer.zoom = ZOOMS[at.saturating_sub(1)];
                     }
                 },
             );
             ui.add_space(8.0);
             let Some(info) = info else {
-                let note = if unreadable(&viewer.file) { UNREADABLE } else { "Membaca PDF…" };
+                let note = if unreadable(&viewer.file) { unreadable_note() } else { tr("Reading PDF…", "Membaca PDF…") };
                 ui.label(rich(note, 13.0, Weight::Regular, p.muted));
                 return;
             };
@@ -277,7 +286,7 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                         None => widgets::paint_text(
                             ui,
                             rect,
-                            &format!("Memuat halaman {number}…"),
+                            &crate::trf!("Loading page {number}…", "Memuat halaman {number}…"),
                             fonts::ui(13.0, Weight::Regular),
                             egui::Color32::GRAY,
                             Align::Center,

@@ -4,6 +4,7 @@
 use egui::{Align, CentralPanel, Frame, Margin, Panel, ScrollArea, Sense, Stroke, Ui, vec2};
 
 use crate::backend::{Chat, ChatMsg, Delivery, SessionView};
+use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_MD};
 use crate::ui::widgets::{self, rich, rich_mono};
@@ -94,8 +95,12 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) {
             let count_today = entries.iter().filter(|e| time::day(e.message.ts) == today).count();
             super::page_head(
                 ui,
-                "Log pesan",
-                &format!("{count_today} pesan hari ini dari {} nomor. Pilih baris untuk melihat detail.", sessions.len()),
+                tr("Message log", "Log pesan"),
+                &crate::trf!(
+                    "{count_today} messages today from {} numbers. Select a row to see details.",
+                    "{count_today} pesan hari ini dari {} nomor. Pilih baris untuk melihat detail.",
+                    sessions.len()
+                ),
             );
             if let Some((note, at)) = &state.export_note {
                 if at.elapsed().as_secs() < 10 {
@@ -109,7 +114,7 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) {
             theme::surface(ui.ctx()).show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                let labels = ["Semua".to_owned(), "Keluar".to_owned(), "Masuk".to_owned(), format!("Gagal {failed}")];
+                let labels = [tr("All", "Semua").to_owned(), tr("Outgoing", "Keluar").to_owned(), tr("Incoming", "Masuk").to_owned(), crate::trf!("Failed {failed}", "Gagal {failed}")];
                 widgets::row(
                     ui,
                     36.0,
@@ -121,7 +126,7 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) {
                         // Same right edge as the table's cells.
                         ui.add_space(12.0);
                         if visible.len() == LIMIT {
-                            ui.label(rich(&format!("{LIMIT} terbaru"), 12.0, Weight::Regular, p.muted));
+                            ui.label(rich(&crate::trf!("{LIMIT} latest", "{LIMIT} terbaru"), 12.0, Weight::Regular, p.muted));
                         }
                     },
                 );
@@ -131,7 +136,7 @@ pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) {
                 }
                 ui.add_space(8.0);
                 if visible.is_empty() {
-                    super::empty_state(ui, &p, "scroll-text", "Belum ada pesan", "Pesan masuk dan keluar dari semua nomor muncul di sini.");
+                    super::empty_state(ui, &p, "scroll-text", tr("No messages yet", "Belum ada pesan"), tr("Incoming and outgoing messages from all numbers show up here.", "Pesan masuk dan keluar dari semua nomor muncul di sini."));
                     return;
                 }
                 header(ui, &p);
@@ -160,7 +165,11 @@ pub fn export_csv(sessions: &[SessionView]) -> std::io::Result<(std::path::PathB
         .collect();
     entries.sort_by_key(|e| std::cmp::Reverse(e.message.ts));
     let field = |text: &str| format!("\"{}\"", text.replace('"', "\"\""));
-    let mut csv = String::from("waktu,arah,lawan_bicara,jid,isi,status,alasan_gagal,nomor,id_pesan\n");
+    // The file follows the app's language, like the screen it comes from.
+    let mut csv = String::from(tr(
+        "time,direction,contact,jid,text,status,failure_reason,number,message_id\n",
+        "waktu,arah,lawan_bicara,jid,isi,status,alasan_gagal,nomor,id_pesan\n",
+    ));
     for e in &entries {
         let m = e.message;
         let reason = match &m.status {
@@ -169,7 +178,7 @@ pub fn export_csv(sessions: &[SessionView]) -> std::io::Result<(std::path::PathB
         };
         let row = [
             time::full(m.ts),
-            if m.from_me { "keluar".into() } else { "masuk".into() },
+            if m.from_me { tr("out", "keluar") } else { tr("in", "masuk") }.to_owned(),
             super::chat_title(&e.session.book, e.chat),
             super::short_jid(&e.chat.jid),
             m.text.clone(),
@@ -188,22 +197,28 @@ pub fn export_csv(sessions: &[SessionView]) -> std::io::Result<(std::path::PathB
     Ok((path, entries.len()))
 }
 
-fn status_label(status: &Delivery) -> &'static str {
+/// English and Indonesian name of a delivery state.
+fn status_names(status: &Delivery) -> (&'static str, &'static str) {
     match status {
-        Delivery::Received => "Diterima",
-        Delivery::Queued => "Antre",
-        Delivery::Sent => "Terkirim",
-        Delivery::Delivered => "Sampai",
-        Delivery::Read => "Dibaca",
-        Delivery::Failed(_) => "Gagal",
+        Delivery::Received => ("Received", "Diterima"),
+        Delivery::Queued => ("Queued", "Antre"),
+        Delivery::Sent => ("Sent", "Terkirim"),
+        Delivery::Delivered => ("Delivered", "Sampai"),
+        Delivery::Read => ("Read", "Dibaca"),
+        Delivery::Failed(_) => ("Failed", "Gagal"),
     }
+}
+
+fn status_label(status: &Delivery) -> &'static str {
+    let (en, id) = status_names(status);
+    tr(en, id)
 }
 
 fn header(ui: &mut Ui, p: &Palette) {
     let (head, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::hover());
     widgets::hline(ui, head, head.bottom() - 0.5, p.border);
     let cols = cells(head);
-    for (i, title) in ["Waktu", "", "Lawan bicara", "Isi", "Status", "Nomor"].iter().enumerate() {
+    for (i, title) in [tr("Time", "Waktu"), "", tr("Contact", "Lawan bicara"), tr("Text", "Isi"), "Status", tr("Number", "Nomor")].iter().enumerate() {
         if let Some(cell) = cols[i] {
             widgets::paint_text(ui, cell, title, fonts::ui(12.0, Weight::Medium), p.muted, Align::Min);
         }
@@ -259,7 +274,7 @@ fn detail(ui: &mut Ui, p: &Palette, entry: &Entry, webhook: &str) -> bool {
         |ui| {
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
-                ui.label(rich("Detail pesan", 15.0, Weight::SemiBold, p.text));
+                ui.label(rich(tr("Message details", "Detail pesan"), 15.0, Weight::SemiBold, p.text));
                 ui.label(rich_mono(&m.id, 12.0, p.muted));
             });
         },
@@ -270,22 +285,22 @@ fn detail(ui: &mut Ui, p: &Palette, entry: &Entry, webhook: &str) -> bool {
         ui.spacing_mut().item_spacing.y = 8.0;
         let chat = super::chat_title(&entry.session.book, entry.chat);
         let (from, to) = if m.from_me { (entry.session.name.clone(), chat) } else { (chat, entry.session.name.clone()) };
-        kv(ui, p, "Dari", &from);
-        kv(ui, p, "Ke", &to);
-        kv(ui, p, "Waktu", &time::full(m.ts));
+        kv(ui, p, tr("From", "Dari"), &from);
+        kv(ui, p, tr("To", "Ke"), &to);
+        kv(ui, p, tr("Time", "Waktu"), &time::full(m.ts));
         let (_, label) = status_of(p, m);
         kv(ui, p, "Status", label);
         if let Delivery::Failed(reason) = &m.status {
-            kv(ui, p, "Alasan", reason);
+            kv(ui, p, tr("Reason", "Alasan"), reason);
         }
         if entry.chat.is_group() && !m.from_me {
-            kv(ui, p, "Pengirim", &super::sender_label(&entry.session.book, &m.sender));
+            kv(ui, p, tr("Sender", "Pengirim"), &super::sender_label(&entry.session.book, &m.sender));
         }
     });
 
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        widgets::section_label(ui, "Isi pesan");
+        widgets::section_label(ui, tr("Message text", "Isi pesan"));
         Frame::NONE
             .fill(p.bg)
             .stroke(Stroke::new(1.0, p.border))
@@ -299,7 +314,7 @@ fn detail(ui: &mut Ui, p: &Palette, entry: &Entry, webhook: &str) -> bool {
 
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 8.0;
-        widgets::section_label(ui, "Webhook nomor ini");
+        widgets::section_label(ui, tr("This number's webhook", "Webhook nomor ini"));
         ui.label(rich(webhook, 12.0, Weight::Regular, p.muted));
     });
     close

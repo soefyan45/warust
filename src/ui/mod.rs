@@ -20,6 +20,7 @@ mod window;
 use egui::{CursorIcon, Frame, Margin, Panel, Stroke, Theme, ThemePreference, Ui};
 
 use crate::backend::{self, Backend, Command, SessionView, Status};
+use crate::i18n::tr;
 use fonts::Weight;
 use widgets::{Kind, rich, rich_mono};
 
@@ -343,7 +344,7 @@ impl App {
                     },
                 );
                 ui.add_space(14.0);
-                widgets::search(ui, &mut self.search, "Cari", ui.available_width(), true);
+                widgets::search(ui, &mut self.search, tr("Search", "Cari"), ui.available_width(), true);
                 ui.add_space(20.0);
 
                 widgets::section_label(ui, "Gateway");
@@ -361,11 +362,11 @@ impl App {
                 let unseen = if unseen > 0 { unseen.to_string() } else { String::new() };
                 let unseen = (!unseen.is_empty()).then_some(unseen.as_str());
                 let items = [
-                    (Screen::Ringkasan, "gauge", "Ringkasan", None),
-                    (Screen::Nomor, "smartphone", "Nomor", Some(total.as_str())),
+                    (Screen::Ringkasan, "gauge", tr("Overview", "Ringkasan"), None),
+                    (Screen::Nomor, "smartphone", tr("Numbers", "Nomor"), Some(total.as_str())),
                     (Screen::Inbox, "inbox", "Inbox", unread),
                     (Screen::Status, "circle-dashed", "Status", unseen),
-                    (Screen::Log, "scroll-text", "Log pesan", None),
+                    (Screen::Log, "scroll-text", tr("Message log", "Log pesan"), None),
                 ];
                 for (screen, icon, label, count) in items {
                     let selected = self.screen == screen
@@ -375,12 +376,12 @@ impl App {
                     }
                 }
                 ui.add_space(20.0);
-                widgets::section_label(ui, "Integrasi");
+                widgets::section_label(ui, tr("Integrations", "Integrasi"));
                 ui.add_space(4.0);
                 let api_on = matches!(self.api, backend::ApiState::Listening(_)).then_some("API");
                 let items = [
                     (Screen::Integrations, "webhook", "Webhook & API", api_on),
-                    (Screen::Settings, "settings", "Pengaturan", None),
+                    (Screen::Settings, "settings", tr("Settings", "Pengaturan"), None),
                 ];
                 for (screen, icon, label, badge) in items {
                     if widgets::nav_item(ui, icon, label, badge, self.screen == screen).clicked() {
@@ -403,15 +404,15 @@ impl App {
     fn topbar(&mut self, ui: &mut Ui) {
         let p = theme::palette(ui.ctx());
         let (parent, current) = match self.screen {
-            Screen::Ringkasan => ("Gateway", "Ringkasan"),
-            Screen::Nomor => ("Gateway", "Nomor"),
-            Screen::Pairing => ("Nomor", "Tautkan nomor baru"),
+            Screen::Ringkasan => ("Gateway", tr("Overview", "Ringkasan")),
+            Screen::Nomor => ("Gateway", tr("Numbers", "Nomor")),
+            Screen::Pairing => (tr("Numbers", "Nomor"), tr("Link new number", "Tautkan nomor baru")),
             Screen::Inbox => ("Gateway", "Inbox"),
             Screen::Status => ("Gateway", "Status"),
-            Screen::More => ("Gateway", "Lainnya"),
-            Screen::Log => ("Gateway", "Log pesan"),
-            Screen::Integrations => ("Integrasi", "Webhook & API"),
-            Screen::Settings => ("Integrasi", "Pengaturan"),
+            Screen::More => ("Gateway", tr("More", "Lainnya")),
+            Screen::Log => ("Gateway", tr("Message log", "Log pesan")),
+            Screen::Integrations => (tr("Integrations", "Integrasi"), "Webhook & API"),
+            Screen::Settings => (tr("Integrations", "Integrasi"), tr("Settings", "Pengaturan")),
         };
         Panel::top("topbar")
             .exact_size(52.0)
@@ -447,7 +448,7 @@ impl App {
                         }
                         let dark = ui.ctx().theme() == Theme::Dark;
                         let toggle = widgets::icon_button(ui, if dark { "sun" } else { "moon" }, 32.0, false)
-                            .on_hover_text(if dark { "Tema terang" } else { "Tema gelap" });
+                            .on_hover_text(if dark { tr("Light theme", "Tema terang") } else { tr("Dark theme", "Tema gelap") });
                         if toggle.clicked() {
                             self.toggle_theme(dark);
                         }
@@ -476,11 +477,11 @@ impl App {
                     ui.label(rich("warust", 17.0, Weight::SemiBold, p.text));
                     ui.add_space(14.0);
                     let items = [
-                        (Screen::Ringkasan, "Ringkasan"),
-                        (Screen::Nomor, "Nomor"),
+                        (Screen::Ringkasan, tr("Overview", "Ringkasan")),
+                        (Screen::Nomor, tr("Numbers", "Nomor")),
                         (Screen::Inbox, "Inbox"),
                         (Screen::Status, "Status"),
-                        (Screen::Log, "Log pesan"),
+                        (Screen::Log, tr("Message log", "Log pesan")),
                         (Screen::Integrations, "Webhook & API"),
                     ];
                     let current = if self.screen == Screen::Pairing { Screen::Nomor } else { self.screen };
@@ -494,7 +495,7 @@ impl App {
                         ui.spacing_mut().item_spacing.x = 8.0;
                         ui.add_space(6.0);
                         let settings = widgets::icon_button(ui, "settings", 36.0, self.screen == Screen::Settings)
-                            .on_hover_text("Pengaturan");
+                            .on_hover_text(tr("Settings", "Pengaturan"));
                         if settings.clicked() {
                             self.screen = Screen::Settings;
                         }
@@ -510,25 +511,25 @@ impl App {
         let p = theme::palette(ui.ctx());
         match self.screen {
             Screen::Nomor => {
-                if widgets::button(ui, Some("plus"), "Tambah nomor", Kind::Primary).clicked() {
+                if widgets::button(ui, Some("plus"), tr("Add number", "Tambah nomor"), Kind::Primary).clicked() {
                     self.add_number();
                 }
-                if widgets::button(ui, Some("book-open"), "Dokumentasi API", Kind::Secondary).clicked() {
+                if widgets::button(ui, Some("book-open"), tr("API docs", "Dokumentasi API"), Kind::Secondary).clicked() {
                     self.screen = Screen::Integrations;
                     self.state.integrations_tab = 0;
                 }
             }
             Screen::Pairing => {
-                if widgets::button(ui, Some("x"), "Batal", Kind::Secondary).clicked() {
+                if widgets::button(ui, Some("x"), tr("Cancel", "Batal"), Kind::Secondary).clicked() {
                     self.cancel_pairing();
                 }
             }
             Screen::Ringkasan | Screen::Inbox | Screen::Status | Screen::Integrations | Screen::Settings | Screen::More => {}
             Screen::Log => {
-                if widgets::button(ui, Some("download"), "Ekspor CSV", Kind::Secondary).clicked() {
+                if widgets::button(ui, Some("download"), tr("Export CSV", "Ekspor CSV"), Kind::Secondary).clicked() {
                     let note = match screens::log::export_csv(&self.sessions) {
-                        Ok((path, rows)) => format!("{rows} pesan diekspor ke {}", path.display()),
-                        Err(e) => format!("Ekspor gagal: {e}"),
+                        Ok((path, rows)) => crate::trf!("{rows} messages exported to {}", "{rows} pesan diekspor ke {}", path.display()),
+                        Err(e) => crate::trf!("Export failed: {e}", "Ekspor gagal: {e}"),
                     };
                     self.state.export_note = Some((note, std::time::Instant::now()));
                 }
@@ -557,7 +558,7 @@ impl App {
 
     fn add_number(&mut self) {
         let id = Backend::new_id();
-        let name = format!("Nomor {}", self.sessions.len() + 1);
+        let name = crate::trf!("Number {}", "Nomor {}", self.sessions.len() + 1);
         self.backend.send(Command::Add { id: id.clone(), name });
         self.open_pairing(id);
     }
@@ -663,10 +664,13 @@ impl App {
             .show(ctx, |ui| {
                 ui.set_width(380.0);
                 ui.spacing_mut().item_spacing.y = 12.0;
-                ui.label(rich("Ganti nama nomor", 16.0, Weight::SemiBold, p.text));
+                ui.label(rich(tr("Rename number", "Ganti nama nomor"), 16.0, Weight::SemiBold, p.text));
                 ui.add(
                     egui::Label::new(rich(
-                        "Dipakai di daftar Nomor, Inbox, notifikasi, Ringkasan dan Log. Nama perangkat yang terlihat di HP tidak berubah.",
+                        tr(
+                            "Used in the Numbers list, Inbox, notifications, Overview and Log. The device name shown on the phone does not change.",
+                            "Dipakai di daftar Nomor, Inbox, notifikasi, Ringkasan dan Log. Nama perangkat yang terlihat di HP tidak berubah.",
+                        ),
                         13.0,
                         Weight::Regular,
                         p.text_2,
@@ -677,7 +681,7 @@ impl App {
                     egui::TextEdit::singleline(&mut draft)
                         .desired_width(f32::INFINITY)
                         .char_limit(backend::NAME_MAX + 10)
-                        .hint_text("mis. CS Utama"),
+                        .hint_text(tr("e.g. Main support", "mis. CS Utama")),
                 );
                 if !field.has_focus() && !field.lost_focus() {
                     field.request_focus();
@@ -693,9 +697,9 @@ impl App {
                     32.0,
                     |_| {},
                     |ui| {
-                        let ok = ui.add_enabled_ui(checked.is_ok(), |ui| widgets::button(ui, Some("check"), "Simpan", Kind::Primary));
+                        let ok = ui.add_enabled_ui(checked.is_ok(), |ui| widgets::button(ui, Some("check"), tr("Save", "Simpan"), Kind::Primary));
                         save |= ok.inner.clicked();
-                        if widgets::button(ui, None, "Batal", Kind::Secondary).clicked() {
+                        if widgets::button(ui, None, tr("Cancel", "Batal"), Kind::Secondary).clicked() {
                             close = true;
                         }
                     },
@@ -729,10 +733,13 @@ impl App {
         let answer = confirm(
             ctx,
             "confirm_remove",
-            &format!("Hapus {}?", session.name),
-            "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus. Tidak bisa dibatalkan; untuk memakai nomor ini lagi harus pairing ulang.",
+            &crate::trf!("Remove {}?", "Hapus {}?", session.name),
+            tr(
+                "The link on the phone is removed and the session key on this computer is deleted. This cannot be undone; to use this number again you must pair it again.",
+                "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus. Tidak bisa dibatalkan; untuk memakai nomor ini lagi harus pairing ulang.",
+            ),
             "x",
-            "Hapus",
+            tr("Remove", "Hapus"),
         );
         if answer == Some(true) {
             self.backend.send(Command::Remove { id });
@@ -753,10 +760,13 @@ impl App {
         let answer = confirm(
             ctx,
             "confirm_relink",
-            &format!("Tautkan ulang {}?", session.name),
-            "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus, lalu QR baru ditampilkan. Nomor ini terputus sampai dipindai lagi dari HP. Chat tetap tersimpan.",
+            &crate::trf!("Relink {}?", "Tautkan ulang {}?", session.name),
+            tr(
+                "The link on the phone is removed and the session key on this computer is deleted, then a new QR is shown. This number stays disconnected until it is scanned again from the phone. Chats stay saved.",
+                "Tautan di HP dilepas dan kunci sesi di komputer ini dihapus, lalu QR baru ditampilkan. Nomor ini terputus sampai dipindai lagi dari HP. Chat tetap tersimpan.",
+            ),
             "rotate-cw",
-            "Tautkan ulang",
+            tr("Relink", "Tautkan ulang"),
         );
         if answer == Some(true) {
             self.relink(id);
@@ -794,7 +804,7 @@ fn confirm(ctx: &egui::Context, salt: &str, title: &str, text: &str, icon: &str,
                     if widgets::button(ui, Some(icon), label, Kind::Primary).clicked() {
                         answer = Some(true);
                     }
-                    if widgets::button(ui, None, "Batal", Kind::Secondary).clicked() {
+                    if widgets::button(ui, None, tr("Cancel", "Batal"), Kind::Secondary).clicked() {
                         answer = Some(false);
                     }
                 },
@@ -809,9 +819,9 @@ fn confirm(ctx: &egui::Context, salt: &str, title: &str, text: &str, icon: &str,
 /// "API berjalan v0.1.0" in a white pill (Forest top bar).
 fn api_pill(ui: &mut Ui, p: &theme::Palette, api: &backend::ApiState) {
     let (color, label) = match api {
-        backend::ApiState::Listening(_) => (p.green, "API berjalan"),
-        backend::ApiState::Failed(_) => (p.red, "API gagal"),
-        backend::ApiState::Off => (p.gray, "API mati"),
+        backend::ApiState::Listening(_) => (p.green, tr("API running", "API berjalan")),
+        backend::ApiState::Failed(_) => (p.red, tr("API failed", "API gagal")),
+        backend::ApiState::Off => (p.gray, tr("API off", "API mati")),
     };
     Frame::NONE
         .fill(p.panel)
@@ -850,7 +860,7 @@ fn gateway_rows(ui: &mut Ui, p: &theme::Palette, sessions: &[SessionView]) {
             let (dot, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
             let color = if connected > 0 { p.green } else { p.gray };
             ui.painter().circle_filled(dot.center(), 3.5, color);
-            let text = format!("{connected} dari {} terhubung", sessions.len());
+            let text = crate::trf!("{connected} of {} connected", "{connected} dari {} terhubung", sessions.len());
             ui.label(rich(&text, 12.0, Weight::Medium, p.text));
         },
         |_| {},
@@ -859,7 +869,7 @@ fn gateway_rows(ui: &mut Ui, p: &theme::Palette, sessions: &[SessionView]) {
         ui,
         18.0,
         |ui| {
-            ui.label(rich("REST API belum aktif", 12.0, Weight::Regular, p.muted));
+            ui.label(rich(tr("REST API not active", "REST API belum aktif"), 12.0, Weight::Regular, p.muted));
         },
         |ui| {
             ui.label(rich_mono("v0.1.0", 12.0, p.muted));
@@ -894,6 +904,7 @@ impl eframe::App for App {
         }
         self.webhooks = snapshot.webhooks;
         self.api = snapshot.api;
+        crate::i18n::set(&self.settings.language);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.
@@ -947,10 +958,10 @@ impl eframe::App for App {
                 }
             }
             let back = match self.screen {
-                Screen::Pairing => Some(("Tautkan nomor", Screen::Nomor)),
-                Screen::Log => Some(("Log pesan", Screen::More)),
+                Screen::Pairing => Some((tr("Link number", "Tautkan nomor"), Screen::Nomor)),
+                Screen::Log => Some((tr("Message log", "Log pesan"), Screen::More)),
                 Screen::Integrations => Some(("Webhook & API", Screen::More)),
-                Screen::Settings => Some(("Pengaturan", Screen::More)),
+                Screen::Settings => Some((tr("Settings", "Pengaturan"), Screen::More)),
                 _ => None,
             };
             if let Some((title, to)) = back {

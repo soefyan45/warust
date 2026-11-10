@@ -4,7 +4,20 @@
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const DAYS: [&str; 7] = ["Minggu", "Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu"];
+use crate::i18n::tr;
+
+/// Weekday names, Sunday first, in the language that is on.
+fn days() -> [&'static str; 7] {
+    [
+        tr("Sunday", "Minggu"),
+        tr("Monday", "Senin"),
+        tr("Tuesday", "Selasa"),
+        tr("Wednesday", "Rabu"),
+        tr("Thursday", "Kamis"),
+        tr("Friday", "Jumat"),
+        tr("Saturday", "Sabtu"),
+    ]
+}
 
 fn offset() -> i64 {
     static OFFSET: OnceLock<i64> = OnceLock::new();
@@ -42,14 +55,25 @@ pub fn hour(ts: i64) -> usize {
     (local(ts).rem_euclid(86400) / 3600) as usize
 }
 
-/// `Senin, 9 November 2026`
+/// `Monday, 9 November 2026`
 pub fn long_date(ts: i64) -> String {
-    const MONTHS: [&str; 12] = [
-        "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember",
+    let months = [
+        tr("January", "Januari"),
+        tr("February", "Februari"),
+        tr("March", "Maret"),
+        "April",
+        tr("May", "Mei"),
+        tr("June", "Juni"),
+        tr("July", "Juli"),
+        tr("August", "Agustus"),
+        "September",
+        tr("October", "Oktober"),
+        "November",
+        tr("December", "Desember"),
     ];
     let d = day(ts);
     let (y, m, dd) = civil(d);
-    format!("{}, {dd} {} {y}", DAYS[(d + 4).rem_euclid(7) as usize], MONTHS[(m - 1) as usize])
+    format!("{}, {dd} {} {y}", days()[(d + 4).rem_euclid(7) as usize], months[(m - 1) as usize])
 }
 
 /// `09.43`
@@ -64,14 +88,14 @@ pub fn clock_secs(ts: i64) -> String {
     format!("{:02}.{:02}.{:02}", secs / 3600, secs % 3600 / 60, secs % 60)
 }
 
-/// `Hari ini`, `Kemarin`, a weekday within a week, else `12/08/2026`.
+/// `Today`, `Yesterday`, a weekday within a week, else `12/08/2026`.
 pub fn day_label(ts: i64) -> String {
     let d = day(ts);
     let today = day(now());
     match today - d {
-        0 => "Hari ini".to_owned(),
-        1 => "Kemarin".to_owned(),
-        2..=6 => DAYS[(d + 4).rem_euclid(7) as usize].to_owned(),
+        0 => tr("Today", "Hari ini").to_owned(),
+        1 => tr("Yesterday", "Kemarin").to_owned(),
+        2..=6 => days()[(d + 4).rem_euclid(7) as usize].to_owned(),
         _ => {
             let (y, m, dd) = civil(d);
             format!("{dd:02}/{m:02}/{y}")
@@ -112,6 +136,6 @@ mod tests {
         assert_eq!(civil(0), (1970, 1, 1));
         assert_eq!(civil(20_401), (2025, 11, 9));
         // 1970-01-01 was a Thursday.
-        assert_eq!(DAYS[(0i64 + 4).rem_euclid(7) as usize], "Kamis");
+        assert_eq!(days()[(0i64 + 4).rem_euclid(7) as usize], "Thursday");
     }
 }
