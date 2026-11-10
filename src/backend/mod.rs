@@ -55,6 +55,8 @@ pub struct SessionView {
     pub phone: Option<String>,
     /// The full number, digits only; for triggers, never shown in the UI.
     pub own_number: Option<String>,
+    /// The LID user part, digits only; groups that mention by LID use it.
+    pub own_lid: Option<String>,
     pub status: Status,
     /// Current QR payload and when it rotates.
     pub qr: Option<(String, Instant)>,
@@ -76,6 +78,7 @@ impl SessionView {
             name: name.to_owned(),
             phone: None,
             own_number: None,
+            own_lid: None,
             status: Status::Starting,
             qr: None,
             pair_code: None,

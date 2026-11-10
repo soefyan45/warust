@@ -252,6 +252,53 @@ impl Book {
             .map(String::as_str)
     }
 
+    /// `text` with each `@<user part>` of `mentions` shown as `@<name>`. A
+    /// token only counts at a word boundary on both sides (`@6281` is not in
+    /// `@62812`); a mention with no known name stays as it is.
+    pub fn with_mention_names(&self, text: &str, mentions: &[String]) -> String {
+        if mentions.is_empty() || !text.contains('@') {
+            return text.to_owned();
+        }
+        let user = |jid: &str| {
+            let u = jid.split('@').next().unwrap_or(jid);
+            u.split(':').next().unwrap_or(u).to_owned()
+        };
+        let named: Vec<(String, &str)> = mentions
+            .iter()
+            .filter_map(|jid| Some((user(jid), self.name_of(jid).filter(|n| !n.is_empty())?)))
+            .filter(|(token, _)| !token.is_empty())
+            .collect();
+        let mut out = String::with_capacity(text.len());
+        let mut prev: Option<char> = None;
+        let mut rest = text;
+        while let Some(c) = rest.chars().next() {
+            let hit = (c == '@' && prev.is_none_or(|p| !p.is_alphanumeric()))
+                .then(|| {
+                    named
+                        .iter()
+                        .filter(|(token, _)| {
+                            rest[1..].strip_prefix(token.as_str()).is_some_and(|after| after.chars().next().is_none_or(|n| !n.is_alphanumeric()))
+                        })
+                        .max_by_key(|(token, _)| token.len())
+                })
+                .flatten();
+            match hit {
+                Some((token, name)) => {
+                    out.push('@');
+                    out.push_str(name);
+                    prev = name.chars().next_back();
+                    rest = &rest[1 + token.len()..];
+                }
+                None => {
+                    out.push(c);
+                    prev = Some(c);
+                    rest = &rest[c.len_utf8()..];
+                }
+            }
+        }
+        out
+    }
+
     /// Status updates of the last 24 hours by poster (normalized JID, or
     /// `None` for this number), newest poster first; posts oldest first.
     pub fn status_feed(&self, now: i64) -> Vec<(Option<String>, Vec<&StatusPost>)> {
@@ -698,6 +745,32 @@ mod tests {
         assert_eq!(b.chats.len(), 1);
         assert_eq!(b.name_of("9@s.whatsapp.net"), Some("Budi Kantor"));
         assert_eq!(b.name_of("9:2@s.whatsapp.net"), Some("Budi Kantor"));
+    }
+
+    #[test]
+    fn mention_tokens_become_names() {
+        let b = book(&[push_record("6281@s.whatsapp.net", "Budi"), push_record("6282@s.whatsapp.net", "Ani")]);
+        let men = vec!["6281@s.whatsapp.net".to_owned()];
+        assert_eq!(b.with_mention_names("halo @6281 apa", &men), "halo @Budi apa");
+        assert_eq!(b.with_mention_names("@6281", &men), "@Budi");
+        let two = vec!["6281@s.whatsapp.net".to_owned(), "6282@s.whatsapp.net".to_owned()];
+        assert_eq!(b.with_mention_names("@6281 @6282 cek", &two), "@Budi @Ani cek");
+    }
+
+    #[test]
+    fn mention_names_respect_word_boundaries() {
+        let b = book(&[push_record("6281@s.whatsapp.net", "Budi")]);
+        let men = vec!["6281@s.whatsapp.net".to_owned()];
+        assert_eq!(b.with_mention_names("@62812 dan a@6281", &men), "@62812 dan a@6281");
+        assert_eq!(b.with_mention_names("@6281, ok", &men), "@Budi, ok");
+    }
+
+    #[test]
+    fn unknown_mention_name_stays() {
+        let b = book(&[push_record("6281@s.whatsapp.net", "Budi")]);
+        let men = vec!["7777@s.whatsapp.net".to_owned(), "6281@s.whatsapp.net".to_owned()];
+        assert_eq!(b.with_mention_names("@7777 @6281", &men), "@7777 @Budi");
+        assert_eq!(b.with_mention_names("tanpa mention", &men), "tanpa mention");
     }
 
     #[test]

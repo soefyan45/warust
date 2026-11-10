@@ -62,7 +62,7 @@ pub struct State {
     /// Group members by `session|group` (from the backend), and the groups
     /// whose members were already asked for this run.
     pub members_now: std::sync::Arc<std::collections::HashMap<String, Vec<backend::Member>>>,
-    pub members_asked: std::collections::HashSet<(String, String)>,
+    pub members_asked: std::collections::HashMap<(String, String), std::time::Instant>,
     /// `@Name` picked in the composer with the member's JID, the chat they
     /// belong to (`session|chat`), the highlighted picker row, the `@` of a
     /// picker closed with Esc, and the query the highlight belongs to.

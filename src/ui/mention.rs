@@ -72,16 +72,21 @@ pub fn candidates(book: &Book, members: &[Member], query: &str) -> Vec<Candidate
 
 /// Replaces the `@query` (from byte `at` to the cursor, in characters) with
 /// `@<name> `. Returns the new text and the cursor, in characters, after the
-/// inserted text.
-pub fn insert_pick(text: &str, at: usize, cursor_char: usize, name: &str) -> (String, usize) {
+/// inserted text; `None` when `at` is not a character boundary inside `text`.
+pub fn insert_pick(text: &str, at: usize, cursor_char: usize, name: &str) -> Option<(String, usize)> {
     let end = text.char_indices().nth(cursor_char).map_or(text.len(), |(i, _)| i);
+    let head = text.get(..at)?;
+    let tail = text.get(end..)?;
+    if end < at {
+        return None;
+    }
     let shown = format!("@{name} ");
     let mut out = String::with_capacity(text.len() + shown.len());
-    out.push_str(&text[..at]);
+    out.push_str(head);
     out.push_str(&shown);
-    out.push_str(&text[end..]);
-    let cursor = text[..at].chars().count() + shown.chars().count();
-    (out, cursor)
+    out.push_str(tail);
+    let cursor = head.chars().count() + shown.chars().count();
+    Some((out, cursor))
 }
 
 /// `text` as it goes on the wire: each remembered `(@Name, jid)` still in the
@@ -226,12 +231,21 @@ mod tests {
 
     #[test]
     fn insert_replaces_query_and_places_cursor() {
-        let (text, cursor) = insert_pick("halo @bu apa", 5, 8, "Budi");
+        let (text, cursor) = insert_pick("halo @bu apa", 5, 8, "Budi").unwrap();
         assert_eq!(text, "halo @Budi  apa");
         assert_eq!(cursor, 11);
-        let (text, cursor) = insert_pick("@", 0, 1, "Ani Wati");
+        let (text, cursor) = insert_pick("@", 0, 1, "Ani Wati").unwrap();
         assert_eq!(text, "@Ani Wati ");
         assert_eq!(cursor, 10);
+    }
+
+    #[test]
+    fn insert_with_stale_index_changes_nothing() {
+        // `at` past the end, and inside the two bytes of "é".
+        assert_eq!(insert_pick("hi", 9, 2, "Budi"), None);
+        assert_eq!(insert_pick("é@x", 1, 3, "Budi"), None);
+        // Cursor before the `@`.
+        assert_eq!(insert_pick("halo @bu", 5, 2, "Budi"), None);
     }
 
     #[test]

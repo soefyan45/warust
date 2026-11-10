@@ -188,7 +188,7 @@ pub fn show(
                     state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                     commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
                 }
-                match messages(ui, &p, &book, chat, downloads, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), session.own_number.as_deref()) {
+                match messages(ui, &p, &book, chat, downloads, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), (session.own_number.as_deref(), session.own_lid.as_deref())) {
                     Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
                     Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
                     None => {}
@@ -205,6 +205,22 @@ const TYPING_RESEND: std::time::Duration = std::time::Duration::from_secs(8);
 /// No key for this long counts as stopped.
 const TYPING_IDLE: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// A group's members are asked again after this long without an answer.
+const MEMBERS_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Whether to ask for a group's members now: none are known yet, and it was
+/// never asked or the last ask is `MEMBERS_RETRY` old (the backend may have
+/// dropped it).
+fn members_due(state: &State, session: &str, chat: &str, now: std::time::Instant) -> bool {
+    if state.members_now.contains_key(&crate::backend::Typing::key(session, chat)) {
+        return false;
+    }
+    state
+        .members_asked
+        .get(&(session.to_owned(), chat.to_owned()))
+        .is_none_or(|at| now.saturating_duration_since(*at) >= MEMBERS_RETRY)
+}
+
 /// Typing indicators for the chat on screen (`open`: session id, JID): starts
 /// when the composer text changes, repeats while typing goes on, and stops
 /// after a pause, when the text is cleared or sent, or when the chat is left.
@@ -220,7 +236,8 @@ pub fn typing_signal(ctx: &egui::Context, state: &mut State, open: Option<(Strin
     // group asks for its members (the `@` picker), also once per run.
     if let Some((session, chat)) = &open {
         if chat.ends_with("@g.us") {
-            if state.members_asked.insert((session.clone(), chat.clone())) {
+            if members_due(state, session, chat, now) {
+                state.members_asked.insert((session.clone(), chat.clone()), now);
                 commands.push(Command::GroupMembers { id: session.clone(), chat: chat.clone() });
             }
         } else if state.presence_watched.insert((session.clone(), chat.clone())) {
@@ -435,7 +452,7 @@ fn chat_list(
                         && state.chat_selected.as_deref() == Some(chat.jid.as_str());
                     let title = super::chat_title(&s.book, chat);
                     let via_number = via.then_some(*s);
-                    if chat_row(ui, p, rect, &title, chat, picture, selected, via_number, typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
+                    if chat_row(ui, p, &s.book, rect, &title, chat, picture, selected, via_number, typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
                         state.inbox_session = Some(s.id.clone());
                         state.chat_selected = Some(chat.jid.clone());
                         if chat.unread > 0 {
@@ -534,6 +551,7 @@ pub fn number_chip(ui: &Ui, p: &Palette, at: egui::Pos2, session: &SessionView) 
 fn chat_row(
     ui: &Ui,
     p: &Palette,
+    book: &Book,
     row: Rect,
     title: &str,
     chat: &Chat,
@@ -568,7 +586,7 @@ fn chat_row(
     let at = chat.mention_pending();
     let reserve = if chat.unread > 0 { 30.0 } else { 0.0 } + if at { 26.0 } else { 0.0 };
     let preview_rect = Rect::from_min_max(bottom.min, pos2(right - reserve, bottom.bottom()));
-    paint_preview(ui, p, preview_rect, chat, 13.0, p.muted, typing);
+    paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing);
     if at {
         // "@": a mention is waiting; sits before the unread count.
         let x = right - if chat.unread > 0 { 26.0 + 18.0 } else { 18.0 };
@@ -616,7 +634,8 @@ fn tick(p: &Palette, status: &Delivery, grey: Color32, dark: bool) -> Option<(&'
 }
 
 /// The last message in a chat row; ours start with their tick, like WhatsApp.
-fn paint_preview(ui: &Ui, p: &Palette, rect: Rect, chat: &Chat, size: f32, color: Color32, typing: Option<&str>) {
+#[allow(clippy::too_many_arguments)]
+fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, size: f32, color: Color32, typing: Option<&str>) {
     if let Some(typing) = typing {
         widgets::paint_text(ui, rect, typing, fonts::ui(size, Weight::Medium), typing_color(p), Align::Min);
         return;
@@ -632,7 +651,8 @@ fn paint_preview(ui: &Ui, p: &Palette, rect: Rect, chat: &Chat, size: f32, color
             rect.min.x += side + 4.0;
         }
     }
-    widgets::paint_text(ui, rect, &m.text.replace('\n', " "), fonts::ui(size, Weight::Regular), color, Align::Min);
+    let text = book.with_mention_names(&m.text, &m.mentions);
+    widgets::paint_text(ui, rect, &text.replace('\n', " "), fonts::ui(size, Weight::Regular), color, Align::Min);
 }
 
 pub fn delivery_label(status: &Delivery) -> &'static str {
@@ -731,13 +751,13 @@ fn caption(m: &ChatMsg) -> String {
 }
 
 /// The mentions of a message as `@<number>` tokens with the name to show;
-/// `own_number` marks a mention of this number.
-fn mention_refs(book: &Book, m: &ChatMsg, own_number: Option<&str>) -> Vec<markup::MentionRef> {
+/// `own_number` and `own_lid` mark a mention of this account.
+fn mention_refs(book: &Book, m: &ChatMsg, own_number: Option<&str>, own_lid: Option<&str>) -> Vec<markup::MentionRef> {
     m.mentions
         .iter()
         .map(|jid| {
             let token = mention::user_part(jid).to_owned();
-            let me = m.mentions_me && own_number == Some(token.as_str());
+            let me = m.mentions_me && (own_number == Some(token.as_str()) || own_lid == Some(token.as_str()));
             markup::MentionRef { name: super::sender_label(book, jid), token, me }
         })
         .collect()
@@ -928,7 +948,7 @@ fn paint_media(
 }
 
 /// Paints the open chat; returns a message whose media the user wants downloaded.
-fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool, typing: Option<&str>, own_number: Option<&str>) -> Option<MediaClick> {
+fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool, typing: Option<&str>, own: (Option<&str>, Option<&str>)) -> Option<MediaClick> {
     const GAP: f32 = 6.0;
     const DIVIDER: f32 = 36.0;
     let wrap = (ui.available_width() * 0.7).min(420.0);
@@ -973,7 +993,7 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
         let sticker = matches!(media, Some((_, MediaBox::Sticker(_))));
         let meta_color = if sticker { p.muted } else { meta_color };
         let caption = caption(m);
-        let mentions = mention_refs(book, m, own_number);
+        let mentions = mention_refs(book, m, own.0, own.1);
         let accent = if m.from_me { fg } else { p.accent_text };
         let text = (!caption.is_empty()).then(|| ui.painter().layout_job(markup::job_with_mentions(&caption, 14.0, fg, code_bg, wrap, &mentions, accent)));
         let mut meta = time::clock(m.ts);
@@ -1247,6 +1267,7 @@ fn composer(
                             .hint_text(rich(hint, 15.0, Weight::Regular, p.muted))
                             .font(fonts::ui(14.0, Weight::Regular))
                             .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
+                            .event_filter(composer_filter(mention.picked))
                             .desired_rows(1)
                             .desired_width(edit_w),
                     );
@@ -1293,6 +1314,7 @@ fn composer(
                     .hint_text(rich(&hint, 14.0, Weight::Regular, p.muted))
                     .font(fonts::ui(14.0, Weight::Regular))
                     .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter))
+                    .event_filter(composer_filter(mention.picked))
                     .desired_rows(1)
                     .desired_width(f32::INFINITY),
             );
@@ -1355,10 +1377,27 @@ fn composer(
     Some(match state.attachment.take() {
         Some(path) => Outgoing::File(path, message),
         None => {
-            let (text, mentions) = mention::to_wire(&message, &picks);
+            let (text, mentions) = wire_text(chat_jid.ends_with("@g.us"), &message, &picks);
             Outgoing::Text(text, mentions)
         }
     })
+}
+
+/// The text to send and its mentioned JIDs. Only a group has mentions; a
+/// private chat sends the text as typed, whatever picks are left over.
+fn wire_text(group: bool, message: &str, picks: &[(String, String)]) -> (String, Vec<String>) {
+    if group {
+        mention::to_wire(message, picks)
+    } else {
+        (message.to_owned(), Vec::new())
+    }
+}
+
+/// Keys the composer keeps for itself. egui moves focus on Tab and drops it on
+/// Esc before our code runs, so while the picker is open it must hold both:
+/// they are the picker's pick and close keys. Closed: TextEdit's own default.
+fn composer_filter(picker_open: bool) -> egui::EventFilter {
+    egui::EventFilter { tab: picker_open, horizontal_arrows: true, vertical_arrows: true, escape: picker_open }
 }
 
 /// The `@` picker for this frame: what it lists, and where the `@` sits.
@@ -1379,24 +1418,22 @@ struct MentionInput {
 /// (Up/Down, Enter/Tab, Esc) before the text box sees them.
 fn mention_input(ui: &mut Ui, state: &mut State, book: &Book, session: &SessionView, chat_jid: &str, id: egui::Id) -> MentionInput {
     let mut out = MentionInput::default();
-    if !chat_jid.ends_with("@g.us") {
-        return out;
-    }
     let key = crate::backend::Typing::key(&session.id, chat_jid);
     if state.mention_chat != key {
-        // Another chat: its picks do not apply.
+        // Another chat (group or not): its picks do not apply.
         state.mention_picks.clear();
         state.mention_sel = 0;
         state.mention_dismissed = None;
         state.mention_query.clear();
         state.mention_chat = key.clone();
     }
+    if !chat_jid.ends_with("@g.us") {
+        return out;
+    }
     if !ui.memory(|m| m.has_focus(id)) {
         return out;
     }
-    let cursor = egui::TextEdit::load_state(ui.ctx(), id)
-        .and_then(|st| st.cursor.char_range())
-        .map_or(state.composer.chars().count(), |r| r.primary.index.0);
+    let cursor = composer_cursor(ui, id, &state.composer);
     let Some((at, query)) = mention::active_query(&state.composer, cursor) else {
         state.mention_dismissed = None;
         return out;
@@ -1446,11 +1483,21 @@ fn mention_input(ui: &mut Ui, state: &mut State, book: &Book, session: &SessionV
     out
 }
 
+/// The caret in characters, the end of the text when there is no caret yet.
+fn composer_cursor(ui: &Ui, id: egui::Id, text: &str) -> usize {
+    egui::TextEdit::load_state(ui.ctx(), id)
+        .and_then(|st| st.cursor.char_range())
+        .map_or(text.chars().count(), |r| r.primary.index.0)
+}
+
 /// Puts `@Name ` in place of the `@query`, remembers it, and moves the cursor
 /// to just after it.
 fn apply_mention(ui: &Ui, state: &mut State, input: &MentionInput, row: usize, id: egui::Id) {
     let Some(c) = input.list.get(row) else { return };
-    let (text, cursor) = mention::insert_pick(&state.composer, input.at, input.cursor, &c.name);
+    // The text may have changed since the picker was computed: look again.
+    let now = composer_cursor(ui, id, &state.composer);
+    let Some((at, _)) = mention::active_query(&state.composer, now) else { return };
+    let Some((text, cursor)) = mention::insert_pick(&state.composer, at, now, &c.name) else { return };
     state.composer = text;
     let pick = (format!("@{}", c.name), c.jid.clone());
     if !state.mention_picks.contains(&pick) {
@@ -1684,7 +1731,7 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                         }
                         let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
                         let title = super::chat_title(&s.book, chat);
-                        if compact_row(ui, &p, rect, &title, chat, picture, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
+                        if compact_row(ui, &p, &s.book, rect, &title, chat, picture, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
                             state.inbox_session = Some(s.id.clone());
                             state.chat_selected = Some(chat.jid.clone());
                             if chat.unread > 0 {
@@ -1719,7 +1766,7 @@ fn scope_chip(ui: &mut Ui, p: &Palette, label: &str, active: bool) -> egui::Resp
 /// A chat row of the phone list: round avatar, name, time, preview, unread
 /// badge, and "ke CS Utama · 4410" when every number is combined.
 #[allow(clippy::too_many_arguments)]
-fn compact_row(ui: &Ui, p: &Palette, row: Rect, title: &str, chat: &Chat, picture: Option<&Path>, via: Option<&SessionView>, typing: Option<&str>) -> egui::Response {
+fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: &Chat, picture: Option<&Path>, via: Option<&SessionView>, typing: Option<&str>) -> egui::Response {
     use crate::ui::compact::{self as phone, PAD};
     let resp = ui.interact(row, ui.scope_id().with(("m_chat_row", via.map(|s| s.id.as_str()), &chat.jid)), Sense::click());
     if resp.hovered() {
@@ -1739,7 +1786,7 @@ fn compact_row(ui: &Ui, p: &Palette, row: Rect, title: &str, chat: &Chat, pictur
     let unread_w = if chat.unread > 9 { 28.0 } else { 20.0 };
     let reserve = if chat.unread > 0 { unread_w + 12.0 } else { 0.0 } + if at { 28.0 } else { 0.0 };
     let line = Rect::from_min_max(pos2(left, row.top() + 35.0), pos2(right - reserve, row.top() + 56.0));
-    paint_preview(ui, p, line, chat, 14.0, p.text_2, typing);
+    paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing);
     if at {
         let x = right - if chat.unread > 0 { unread_w + 6.0 + 20.0 } else { 20.0 };
         let badge = Rect::from_min_size(pos2(x, line.center().y - 10.0), vec2(20.0, 20.0));
@@ -1874,7 +1921,7 @@ fn compact_chat(
                 state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                 commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
             }
-            match messages(ui, &p, book, chat, downloads, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), session.own_number.as_deref()) {
+            match messages(ui, &p, book, chat, downloads, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), (session.own_number.as_deref(), session.own_lid.as_deref())) {
                 Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
                 Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
                 None => {}
@@ -1914,6 +1961,33 @@ mod typing_tests {
         map.insert(Typing::key("s1", &chat.jid), Typing { who: None, recording: true, since: Instant::now() - Typing::STALE - Duration::from_secs(1) });
         state.typing_now = std::sync::Arc::new(map);
         assert_eq!(typing_label(&state, "s1", &book, &chat), None, "stale");
+    }
+
+    #[test]
+    fn leftover_picks_do_not_leak_into_a_private_chat() {
+        let picks = vec![("@Budi".to_owned(), "6281@s.whatsapp.net".to_owned())];
+        let (text, men) = wire_text(false, "halo @Budi", &picks);
+        assert_eq!(text, "halo @Budi");
+        assert!(men.is_empty());
+        let (text, men) = wire_text(true, "halo @Budi", &picks);
+        assert_eq!(text, "halo @6281");
+        assert_eq!(men, ["6281@s.whatsapp.net"]);
+    }
+
+    #[test]
+    fn members_are_asked_again_after_a_pause_until_they_arrive() {
+        use crate::backend::Typing;
+        use std::time::{Duration, Instant};
+        let mut state = State::default();
+        let t0 = Instant::now();
+        assert!(members_due(&state, "s1", "g@g.us", t0));
+        state.members_asked.insert(("s1".to_owned(), "g@g.us".to_owned()), t0);
+        assert!(!members_due(&state, "s1", "g@g.us", t0 + Duration::from_secs(5)));
+        assert!(members_due(&state, "s1", "g@g.us", t0 + MEMBERS_RETRY));
+        let mut map = std::collections::HashMap::new();
+        map.insert(Typing::key("s1", "g@g.us"), Vec::new());
+        state.members_now = std::sync::Arc::new(map);
+        assert!(!members_due(&state, "s1", "g@g.us", t0 + MEMBERS_RETRY * 2));
     }
 
     #[test]

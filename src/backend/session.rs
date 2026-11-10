@@ -571,7 +571,8 @@ fn on_message(
             timestamp: ctx.info.timestamp.timestamp(),
         });
         if let Some(book) = &book {
-            super::notify::incoming(state, id, book, &chat, &store::bare(&source.sender.to_string()), &push_name, &text, source.is_group, mentioned);
+            let shown = book.with_mention_names(&text, &mentions);
+            super::notify::incoming(state, id, book, &chat, &store::bare(&source.sender.to_string()), &push_name, &shown, source.is_group, mentioned);
         }
     }
     if !source.is_from_me {
@@ -613,6 +614,7 @@ async fn on_event(
             fetch_group_names(state, id, chats, client.clone());
             let phone = client.pn().map(|jid| mask_phone(&jid.to_string()));
             let own_number = client.pn().map(|jid| store::bare(&jid.to_string()).split('@').next().unwrap_or_default().to_owned());
+            let own_lid = client.lid().map(|jid| user_part(&jid.to_string()).to_owned());
             state.update(id, |v| {
                 v.status = Status::Connected;
                 v.qr = None;
@@ -621,6 +623,9 @@ async fn on_event(
                 if phone.is_some() {
                     v.phone = phone;
                     v.own_number = own_number;
+                }
+                if own_lid.is_some() {
+                    v.own_lid = own_lid;
                 }
             });
             // Once per start: what was still queued when the app closed.
@@ -682,7 +687,8 @@ async fn on_event(
             // Decompressing and decoding can take a while; keep it off the event loop.
             let media_dir = media::dir(&state.data_dir, id);
             let own = own_users(client);
-            let records = tokio::task::spawn_blocking(move || history_records(&compressed, &media_dir, &own)).await;
+            let now = unix_secs();
+            let records = tokio::task::spawn_blocking(move || history_records(&compressed, &media_dir, &own, now)).await;
             match records {
                 Ok(Ok(records)) => {
                     log::info!("session {id}: stored {} history records", records.len());
@@ -728,9 +734,18 @@ fn fetch_group_name(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client
     });
 }
 
+/// Mentions in history older than this are not "waiting for a reply".
+const HISTORY_MENTION_WINDOW: i64 = 24 * 3600;
+
+/// Whether a history message counts as a pending mention of us: a live
+/// mention, and recent enough that a reply is still expected.
+fn history_mentions_me(group: bool, from_me: bool, mentions: &[String], own: &[String], ts: i64, now: i64) -> bool {
+    now - ts <= HISTORY_MENTION_WINDOW && mentions_me(group, from_me, mentions, own)
+}
+
 /// Turns one history-sync chunk into chat records: LID mappings, push names,
 /// then conversations (their own names win over push names).
-fn history_records(compressed: &[u8], media_dir: &Path, own: &[String]) -> Result<Vec<Value>, String> {
+fn history_records(compressed: &[u8], media_dir: &Path, own: &[String], now: i64) -> Result<Vec<Value>, String> {
     let mut stream = HistorySyncStream::new(compressed, MAX_DECOMPRESSED);
     let mut conversations = Vec::new();
     while let Some(conversation) = stream.next_conversation().map_err(|e| e.to_string())? {
@@ -772,7 +787,7 @@ fn history_records(compressed: &[u8], media_dir: &Path, own: &[String]) -> Resul
             let ts = info.message_timestamp.unwrap_or(0) as i64;
             let record = store::msg_record(&chat, msg_id, from_me, &sender, &text, ts, &status, false);
             let mentions = mentions_of(message);
-            let record = store::with_mentions(record, &mentions, mentions_me(chat.ends_with("@g.us"), from_me, &mentions, own));
+            let record = store::with_mentions(record, &mentions, history_mentions_me(chat.ends_with("@g.us"), from_me, &mentions, own, ts, now));
             let record = store::with_media(record, media::describe(message, media_dir, msg_id));
             let (background, color) = status_colors(message);
             records.push(store::with_colors(record, background, color));
@@ -928,7 +943,7 @@ pub fn mask_phone(jid: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, mask_phone, mentions_me, queued_body};
+    use super::{Body, HISTORY_MENTION_WINDOW, history_mentions_me, mask_phone, mentions_me, queued_body};
     use crate::backend::store::{self, Delivery, Quote, Store};
 
     /// A stored queued message comes back as what it was: text, file with
@@ -959,6 +974,17 @@ mod tests {
         assert!(body("c").is_none());
         assert!(matches!(body("d"), Some(Body::StatusReply { text, status }) if text == "👍" && status.id == "ST1"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_history_mentions_are_not_pending() {
+        let men = vec!["99@lid".to_owned()];
+        let own = vec!["99".to_owned()];
+        let now = 1_000_000;
+        assert!(history_mentions_me(true, false, &men, &own, now - 60, now));
+        assert!(history_mentions_me(true, false, &men, &own, now - HISTORY_MENTION_WINDOW, now));
+        assert!(!history_mentions_me(true, false, &men, &own, now - HISTORY_MENTION_WINDOW - 1, now));
+        assert!(!history_mentions_me(false, false, &men, &own, now, now), "not a group");
     }
 
     #[test]
