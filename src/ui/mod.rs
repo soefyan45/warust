@@ -1,6 +1,7 @@
 //! Desktop UI (egui), following the Pego design: v4 layout, v4 dark palette
 //! and v3 light palette. Every screen shows the real WhatsApp sessions.
 
+mod call;
 mod compact;
 mod emoji;
 mod fonts;
@@ -138,6 +139,10 @@ pub struct State {
     pub export_note: Option<(String, std::time::Instant)>,
     /// Settings: the picture being chosen (and copied) for the chat wallpaper.
     pub wallpaper_picking: Option<std::sync::mpsc::Receiver<Option<Result<std::path::PathBuf, String>>>>,
+    /// The voice call from the backend (#39), and whether the phone layout
+    /// shows it as a banner.
+    pub call_now: Option<backend::call::CallView>,
+    pub call_minimized: bool,
     /// "Recording audio" last told to this chat, and when.
     pub recording_told: Option<(String, String, std::time::Instant)>,
     /// Chats whose profile picture was already asked for.
@@ -1009,6 +1014,7 @@ impl eframe::App for App {
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
         self.state.members_now = snapshot.members;
+        self.state.call_now = snapshot.call;
         if self.state.typing_now.values().any(backend::Typing::fresh) {
             // So a stale "mengetik…" disappears even when nothing else repaints.
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
@@ -1268,6 +1274,13 @@ impl eframe::App for App {
             self.viewing = viewing;
         }
         // Last, so the resize edges sit above the panels.
+        // A voice call ringing or in progress (#39).
+        if let Some(call) = self.state.call_now.clone() {
+            let compact = compact::is_compact(ui.ctx());
+            for command in call::show(ui.ctx(), &mut self.state, &call, &self.sessions, compact) {
+                self.backend.send(command);
+            }
+        }
         // Anti-peek auto-lock: covers everything until a click or a key.
         if let Some(wake) = self.lock.update(ui.ctx(), &self.settings.privacy) {
             ui.ctx().request_repaint_after(wake);
