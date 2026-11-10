@@ -9,12 +9,15 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use whatsapp_rust::PinDuration;
 use whatsapp_rust::pair_code::PairCodeOptions;
 use whatsapp_rust::prelude::*;
 use whatsapp_rust::serde_json::{Value, json};
 use whatsapp_rust::wacore::history_sync::{HistorySyncStream, MAX_DECOMPRESSED};
 use whatsapp_rust::wacore::proto_helpers::build_quote_context_with_info;
 use whatsapp_rust::wacore::store::DevicePropsOverride;
+use whatsapp_rust::wacore::types::message::AddressingMode;
+use whatsapp_rust::wacore_binary::JidExt;
 use whatsapp_rust::wacore::types::presence::{ChatActivity, ReceiptType};
 
 use super::media;
@@ -47,6 +50,44 @@ pub enum Body {
     /// A comment or reaction on a contact's status, quoting it (sent to the
     /// poster's chat, as WhatsApp does).
     StatusReply { text: String, status: store::StatusPost },
+    /// A text that quotes an earlier message of the same chat.
+    Reply { text: String, quote: ReplyQuote },
+    /// A forwarded text message (stage 1: no media).
+    Forward(String),
+    /// A pin or unpin (`None`). Not a chat message: it shows no bubble, is
+    /// never stored as queued, and so is lost if the app closes before it goes out.
+    Pin { target: PinTarget, length: Option<store::PinLength> },
+}
+
+/// The message a `Body::Reply` quotes.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplyQuote {
+    /// Id of the quoted message.
+    pub id: String,
+    /// Who wrote it, as WhatsApp sent it; `None` for our own message.
+    pub participant: Option<String>,
+    /// Its text or caption, for the quote box.
+    pub text: String,
+}
+
+/// Builds the reply body for `text` quoting message `reply_to` (a real or
+/// local id) of `chat`; `None` when that chat has no such message.
+pub fn reply_body(book: &store::Book, chat: &str, text: String, reply_to: &str) -> Option<Body> {
+    let real = book.aliases.get(reply_to).map(String::as_str).unwrap_or(reply_to);
+    let quoted = book.chats.iter().find(|c| c.jid == chat)?.messages.iter().find(|m| m.id == real || m.id == reply_to)?;
+    Some(Body::Reply { text, quote: reply_quote(quoted) })
+}
+
+fn reply_quote(m: &store::ChatMsg) -> ReplyQuote {
+    ReplyQuote { id: m.id.clone(), participant: (!m.from_me).then(|| m.sender.clone()), text: m.text.clone() }
+}
+
+/// The message to pin or unpin. `sender` is its author as stored, `None` for
+/// our own messages (groups need the author to address a message).
+pub struct PinTarget {
+    pub chat: String,
+    pub msg_id: String,
+    pub sender: Option<String>,
 }
 
 pub struct Running {
@@ -152,6 +193,62 @@ impl Running {
         });
     }
 
+    /// Read receipts (blue ticks) for incoming messages, given as
+    /// `(sender JID, message id)`, plus the app-state "read" flag so the phone
+    /// clears (or sets) its badge. `receipts` is false for "mark unread".
+    pub fn mark_chat_read(&self, id: &str, chat: &str, messages: Vec<(String, String)>, read: bool, receipts: bool) {
+        let Ok(chat) = chat.parse::<Jid>() else {
+            return;
+        };
+        let group = chat.to_string().ends_with("@g.us");
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            if receipts && read {
+                // One receipt per sender: in a group each member is its own author.
+                let mut by_sender: Vec<(Option<Jid>, Vec<String>)> = Vec::new();
+                for (sender, msg_id) in messages {
+                    let sender = group.then(|| sender.parse::<Jid>().ok()).flatten();
+                    match by_sender.iter_mut().find(|(s, _)| *s == sender) {
+                        Some((_, ids)) => ids.push(msg_id),
+                        None => by_sender.push((sender, vec![msg_id])),
+                    }
+                }
+                for (sender, ids) in by_sender {
+                    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+                    if let Err(e) = client.mark_as_read(&chat, sender.as_ref(), &ids).await {
+                        log::warn!("session {id}: read receipt failed: {e}");
+                    }
+                }
+            }
+            if let Err(e) = client.chat_actions().mark_chat_as_read(&chat, read, None).await {
+                log::warn!("session {id}: mark chat as read failed: {e}");
+            }
+        });
+    }
+
+    /// Archives or unarchives a chat on the phone's app state.
+    pub fn set_archived(&self, id: &str, chat: &str, archived: bool) {
+        let Ok(chat) = chat.parse::<Jid>() else {
+            return;
+        };
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            let actions = client.chat_actions();
+            let result = if archived { actions.archive_chat(&chat, None).await } else { actions.unarchive_chat(&chat, None).await };
+            if let Err(e) = result {
+                log::warn!("session {id}: archive sync failed: {e}");
+            }
+        });
+    }
+
+    /// Queues a pin (`Some(length)`) or unpin (`None`) for everyone. It waits
+    /// in the same paced queue as messages, so pinning in a row keeps the
+    /// anti-ban gap. The chat store only changes once WhatsApp accepted it.
+    pub fn pin(&self, target: PinTarget, length: Option<store::PinLength>) {
+        let chat = target.chat.clone();
+        let _ = self.queue.send(Outgoing { local_id: String::new(), chat, body: Body::Pin { target, length } });
+    }
+
     pub fn request_avatar(&self, jid: String) {
         let _ = self.avatars.send(jid);
     }
@@ -163,24 +260,33 @@ impl Running {
 
     /// Like `enqueue`, under an id the caller already handed out (the REST API).
     pub fn enqueue_as(&self, id: &str, chat: String, body: Body, local_id: String, state: &Updater, store: &Mutex<Store>) {
+        if matches!(body, Body::Pin { .. }) {
+            return log::warn!("session {id}: pins go through `pin`, not the message queue");
+        }
         let shown = match &body {
             Body::Text(text) => text.clone(),
             Body::File { path, caption } => media::label(path, caption),
             Body::Sticker(_) => "[Stiker]".to_owned(),
             Body::Voice(_) => "[Pesan suara]".to_owned(),
-            Body::StatusReply { text, .. } => text.clone(),
+            Body::StatusReply { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
+            Body::Pin { .. } => unreachable!("returned above"),
         };
         let media = match &body {
-            Body::Text(_) | Body::StatusReply { .. } => None,
+            Body::Text(_) | Body::StatusReply { .. } | Body::Reply { .. } | Body::Forward(_) => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
             Body::Voice(path) => Some(media::describe_sent_voice(path)),
+            Body::Pin { .. } => unreachable!("returned above"),
         };
         let record = store::msg_record(&chat, &local_id, true, "", &shown, unix_secs(), &Delivery::Queued, false);
         let mut record = store::with_media(record, media);
+        record = store::with_forwarded(record, matches!(body, Body::Forward(_)));
         if let Body::StatusReply { status, .. } = &body {
             let text = if status.media.is_some() && status.caption().is_empty() { status.text.clone() } else { status.caption() };
             record = store::with_quote(record, &store::Quote { id: status.id.clone(), text, status: true });
+        }
+        if let Body::Reply { quote, .. } = &body {
+            record = store::with_quote(record, &store::Quote { id: quote.id.clone(), text: quote.text.clone(), status: false });
         }
         state.record(id, store, &[record]);
         state.update(id, |v| v.queue += 1);
@@ -241,13 +347,22 @@ fn restore_queue(id: &str, queue: &UnboundedSender<Outgoing>, state: &Updater, s
     }
 }
 
-/// What a stored queued message sends: its text, file, sticker or status reply.
+/// What a stored queued message sends: its text, file, sticker, or a reply to a status or message.
 fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
     if let Some(quote) = m.quote.as_ref().filter(|q| q.status) {
         let status = book.statuses.iter().find(|s| s.id == quote.id)?.clone();
         return Some(Body::StatusReply { text: m.text.clone(), status });
     }
     let Some(media) = &m.media else {
+        if m.forwarded {
+            return Some(Body::Forward(m.text.clone()));
+        }
+        if let Some(quote) = &m.quote {
+            // A reply: the quoted message must still be in the book (it gives the participant).
+            let real = book.aliases.get(&quote.id).unwrap_or(&quote.id);
+            let quoted = book.chats.iter().flat_map(|c| &c.messages).find(|q| q.id == *real || q.id == quote.id)?;
+            return Some(Body::Reply { text: m.text.clone(), quote: reply_quote(quoted) });
+        }
         return Some(Body::Text(m.text.clone()));
     };
     let path = media.file.clone().filter(|p| p.is_file())?;
@@ -358,6 +473,27 @@ fn body(message: &wa::Message) -> Option<String> {
     None
 }
 
+/// The pin/unpin a `pinInChatMessage` stands for. The pin lasts for the
+/// duration in its context info (7 days when absent), counted from `ts`.
+fn pin_record_of(message: &wa::Message, chat: &str, ts: i64) -> Option<Value> {
+    use wa::message::pin_in_chat_message::Type;
+    let base = message.get_base_message();
+    let pin = base.pin_in_chat_message.as_option()?;
+    let target = pin.key.as_option()?.id.as_deref()?;
+    match pin.r#type {
+        Some(Type::PinForAll) => {
+            let secs = base
+                .message_context_info
+                .as_option()
+                .and_then(|c| c.message_add_on_duration_in_secs)
+                .map_or(0, i64::from);
+            Some(store::pin_record(chat, target, ts, store::PinLength::from_secs(secs).secs()))
+        }
+        Some(Type::UnpinForAll) => Some(store::unpin_record(chat, target)),
+        _ => None,
+    }
+}
+
 /// Background and text colour of a text status.
 fn status_colors(message: &wa::Message) -> (Option<u32>, Option<u32>) {
     match message.get_base_message().extended_text_message.as_option() {
@@ -424,6 +560,12 @@ fn on_message(
             state.set_typing(id, &book.normalize(&chat), None);
         }
     }
+    // A pin or unpin (from the phone or the contact) updates the chat's pins;
+    // it has no bubble of its own.
+    if let Some(record) = pin_record_of(&ctx.message, &chat, ctx.info.timestamp.timestamp()) {
+        state.record(id, chats, &[record]);
+        return;
+    }
     let Some(text) = body(&ctx.message) else {
         return;
     };
@@ -461,6 +603,7 @@ fn on_message(
     let summary = media.as_ref().map(|m| {
         json!({ "kind": m.get("k"), "name": m.get("name"), "mime": m.get("mime"), "size": m.get("size") })
     });
+    let record = store::with_forwarded(record, ctx.message.is_forwarded());
     records.push(store::with_media(record, media));
     state.record(id, chats, &records);
     if !source.is_from_me {
@@ -606,6 +749,18 @@ async fn on_event(
                 state.emit(id, "message.status", json!({ "id": m.to_string(), "status": status.code() }));
             }
         }
+        Event::ArchiveUpdate(update) => {
+            let archived = update.action.archived.unwrap_or(true);
+            state.record(id, chats, &[store::archive_record(&update.jid.to_string(), archived)]);
+        }
+        Event::MarkChatAsReadUpdate(update) => {
+            let record = if update.action.read.unwrap_or(true) {
+                store::seen_record(&update.jid.to_string())
+            } else {
+                store::unread_record(&update.jid.to_string())
+            };
+            state.record(id, chats, &[record]);
+        }
         Event::HistorySync(lazy) => {
             let compressed = lazy.compressed_bytes().clone();
             // Decompressing and decoding can take a while; keep it off the event loop.
@@ -700,6 +855,7 @@ fn history_records(compressed: &[u8], media_dir: &Path) -> Result<Vec<Value>, St
             let ts = info.message_timestamp.unwrap_or(0) as i64;
             let record = store::msg_record(&chat, msg_id, from_me, &sender, &text, ts, &status, false);
             let record = store::with_media(record, media::describe(message, media_dir, msg_id));
+            let record = store::with_forwarded(record, message.is_forwarded());
             let (background, color) = status_colors(message);
             records.push(store::with_colors(record, background, color));
         }
@@ -727,6 +883,14 @@ async fn send_worker(
                 tokio::time::sleep(gap - last.elapsed()).await;
             }
         }
+        let message = match message {
+            Outgoing { body: Body::Pin { target, length }, .. } => {
+                send_pin(&id, &client, &state, &chats, target, length).await;
+                last = Some(Instant::now());
+                continue;
+            }
+            other => other,
+        };
         let outcome: Result<String, String> = match message.chat.parse::<Jid>() {
             Err(e) => Err(format!("JID tidak valid: {e:?}")),
             Ok(jid) => match prepare(&client, &jid, message.body).await {
@@ -770,6 +934,55 @@ async fn send_worker(
     }
 }
 
+/// Sends one queued pin or unpin and, once WhatsApp accepted it, records it.
+async fn send_pin(id: &str, client: &Client, state: &Updater, chats: &Mutex<Store>, target: PinTarget, length: Option<store::PinLength>) {
+    let Ok(chat_jid) = target.chat.parse::<Jid>() else {
+        return;
+    };
+    let sender_jid = target.sender.as_deref().and_then(|s| s.parse::<Jid>().ok());
+    let from_me = target.sender.is_none();
+    let PinTarget { chat, msg_id, .. } = target;
+    let addressed = MessageId::new(msg_id.as_str()).and_then(|mid| MessageRef::new(&chat_jid, mid, sender_jid.as_ref(), from_me));
+    let addressed = match addressed {
+        Ok(addressed) => addressed,
+        Err(e) => return log::warn!("session {id}: cannot address message {msg_id} to pin: {e}"),
+    };
+    let sent = match length {
+        Some(length) => {
+            let duration = match length {
+                store::PinLength::Hours24 => PinDuration::Hours24,
+                store::PinLength::Days7 => PinDuration::Days7,
+                store::PinLength::Days30 => PinDuration::Days30,
+            };
+            client.pin_message(&addressed, duration).await
+        }
+        None => client.unpin_message(&addressed).await,
+    };
+    match sent {
+        Ok(_) => {
+            let record = match length {
+                Some(length) => store::pin_record(&chat, &msg_id, unix_secs(), length.secs()),
+                None => store::unpin_record(&chat, &msg_id),
+            };
+            state.record(id, chats, &[record]);
+        }
+        Err(e) => log::warn!("session {id}: pin failed: {e}"),
+    }
+}
+
+/// Our own JID (no device part) as the author of a quoted message: the LID in
+/// LID-addressed groups, else the phone number, like the crate's own add-on keys.
+async fn own_author(client: &Client, chat: &Jid) -> Result<Jid, String> {
+    let pn = client.pn().ok_or("Nomor belum tertaut")?;
+    if chat.is_group()
+        && let Ok(routing) = client.groups().routing_info(chat).await
+        && routing.addressing_mode == AddressingMode::Lid
+    {
+        return Ok(client.lid().unwrap_or(pn).to_non_ad());
+    }
+    Ok(pn.to_non_ad())
+}
+
 async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message, String> {
     match body {
         Body::Text(text) => Ok(wa::Message::text(text)),
@@ -780,6 +993,24 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
             let poster = status.sender.parse::<Jid>().map_err(|e| format!("JID pengirim status tidak valid: {e:?}"))?;
             // remote_jid = status@broadcast marks the quote as a status, like WA Web.
             let context = build_quote_context_with_info(status.id.clone(), &poster, &Jid::status_broadcast(), chat, &quoted_status(&status));
+            Ok(wa::Message::text_with_context(text, context))
+        }
+        Body::Reply { text, quote } => {
+            let participant = match &quote.participant {
+                Some(sender) => sender.parse::<Jid>().map_err(|e| format!("JID pengirim pesan tidak valid: {e:?}"))?.to_non_ad(),
+                None => own_author(client, chat).await?,
+            };
+            // Same chat: no remote_jid, like a reply in WA Web.
+            let context = build_quote_context_with_info(quote.id, &participant, chat, chat, &wa::Message::text(quote.text));
+            Ok(wa::Message::text_with_context(text, context))
+        }
+        // The original wa::Message is not kept, so the text is rebuilt with
+        // the same markers `prepare_for_forward` sets (score 1: first hop).
+        Body::Pin { .. } => Err("a pin is not a message".to_owned()),
+        Body::Forward(text) => {
+            let mut context = wa::ContextInfo::default();
+            context.is_forwarded = Some(true);
+            context.forwarding_score = Some(1);
             Ok(wa::Message::text_with_context(text, context))
         }
     }
@@ -850,7 +1081,7 @@ pub fn mask_phone(jid: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Body, mask_phone, queued_body};
+    use super::{Body, ReplyQuote, mask_phone, queued_body, reply_body};
     use crate::backend::store::{self, Delivery, Quote, Store};
 
     /// A stored queued message comes back as what it was: text, file with
@@ -873,7 +1104,8 @@ mod tests {
             store::with_media(q("b", "[Dokumen] nota.pdf tolong dicek"), Some(super::media::describe_sent(&doc))),
             store::with_media(q("c", "[Dokumen] hilang.pdf"), Some(super::media::describe_sent(&dir.join("hilang.pdf")))),
             store::with_quote(q("d", "👍"), &Quote { id: "ST1".to_owned(), text: "Promo".to_owned(), status: true }),
-            store::with_media(q("e", "[Pesan suara]"), Some(super::media::describe_sent_voice(&note))),
+            store::with_forwarded(q("e", "info penting"), true),
+            store::with_media(q("f", "[Pesan suara]"), Some(super::media::describe_sent_voice(&note))),
         ];
         let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
         let path = dir.join("s.jsonl");
@@ -884,7 +1116,39 @@ mod tests {
         assert!(matches!(body("b"), Some(Body::File { path, caption }) if path == doc && caption == "tolong dicek"));
         assert!(body("c").is_none());
         assert!(matches!(body("d"), Some(Body::StatusReply { text, status }) if text == "👍" && status.id == "ST1"));
-        assert!(matches!(body("e"), Some(Body::Voice(path)) if path == note));
+        assert!(matches!(body("e"), Some(Body::Forward(t)) if t == "info penting"));
+        assert!(matches!(body("f"), Some(Body::Voice(path)) if path == note));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reply keeps its quote through a restart; the participant is the
+    /// sender of the quoted message, or `None` for our own.
+    #[test]
+    fn queued_replies_rebuild_their_quote() {
+        let dir = std::env::temp_dir().join(format!("warust-reply-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let group = "120363000000000001@g.us";
+        let them = "628111000002@s.whatsapp.net";
+        let incoming = store::msg_record(group, "IN1", false, them, "kapan kirim?", 90, &Delivery::Received, false);
+        let own = store::msg_record(group, "OUT1", true, "", "besok", 95, &Delivery::Sent, false);
+        let reply = |id: &str, to: &str, text: &str| {
+            let record = store::msg_record(group, id, true, "", text, 100, &Delivery::Queued, false);
+            store::with_quote(record, &Quote { id: to.to_owned(), text: "x".to_owned(), status: false })
+        };
+        let records = [incoming, own, reply("r1", "IN1", "jam 5"), reply("r2", "OUT1", "ok"), reply("r3", "GONE", "?")];
+        let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, lines).unwrap();
+        let (_, book) = Store::open(&path);
+        let body = |id: &str| queued_body(&book, book.chats[0].messages.iter().find(|m| m.id == id).unwrap());
+        let quote = |id: &str, participant: Option<&str>, text: &str| ReplyQuote { id: id.to_owned(), participant: participant.map(str::to_owned), text: text.to_owned() };
+        assert!(matches!(body("r1"), Some(Body::Reply { text, quote: q }) if text == "jam 5" && q == quote("IN1", Some(them), "kapan kirim?")));
+        assert!(matches!(body("r2"), Some(Body::Reply { quote: q, .. }) if q == quote("OUT1", None, "besok")));
+        assert!(body("r3").is_none());
+        // The REST/UI path builds the same quote; an unknown id gives nothing.
+        assert!(matches!(reply_body(&book, group, "hai".to_owned(), "IN1"), Some(Body::Reply { quote: q, .. }) if q == quote("IN1", Some(them), "kapan kirim?")));
+        assert!(reply_body(&book, group, "hai".to_owned(), "NOPE").is_none());
+        assert!(reply_body(&book, "other@g.us", "hai".to_owned(), "IN1").is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

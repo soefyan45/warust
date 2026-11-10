@@ -4,6 +4,7 @@
 mod compact;
 mod emoji;
 mod fonts;
+mod forward;
 mod icons;
 mod markup;
 mod pdf;
@@ -35,6 +36,20 @@ pub enum Screen {
     More,
 }
 
+/// The message the composer is replying to (Balas), for one chat.
+pub struct ReplyTarget {
+    /// Number (session) the message belongs to; the same chat JID can exist under two numbers.
+    pub session: String,
+    /// JID of the chat; the reply is dropped when another chat opens.
+    pub chat: String,
+    /// Id of the quoted message.
+    pub id: String,
+    /// "Anda" or the sender's name.
+    pub author: String,
+    /// Start of its text, for the bar above the composer.
+    pub snippet: String,
+}
+
 /// UI state that survives between frames.
 #[derive(Default)]
 pub struct State {
@@ -58,10 +73,14 @@ pub struct State {
     /// already asked for this run.
     pub typing_now: std::sync::Arc<std::collections::HashMap<String, backend::Typing>>,
     pub presence_watched: std::collections::HashSet<(String, String)>,
+    /// Message the next text goes out as a reply to.
+    pub reply: Option<ReplyTarget>,
     /// File waiting in the composer, sent with the text as its caption.
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
     pub pdf_view: Option<pdf::Viewer>,
+    /// "Teruskan ke…" dialog for a message of the open chat.
+    pub forward: Option<forward::Dialog>,
     /// The file dialog running on its own thread; `None` inside when cancelled.
     pub picking: Option<std::sync::mpsc::Receiver<Option<std::path::PathBuf>>>,
     /// A voice note being recorded in the composer.
@@ -121,6 +140,18 @@ pub struct State {
     pub status_paused: bool,
     /// A screen asked to open this chat (session id, JID) in the Inbox.
     pub open_chat_requested: Option<(String, String)>,
+    /// Unread messages of the chat that was just opened, captured before `Seen` clears them.
+    pub unread_anchor: Option<UnreadAnchor>,
+}
+
+/// Where the unread messages of an opened chat start; `pending` is the
+/// one-shot "scroll to the divider" flag.
+#[derive(Clone, Debug)]
+pub struct UnreadAnchor {
+    pub jid: String,
+    pub count: usize,
+    pub first_id: String,
+    pub pending: bool,
 }
 
 pub struct App {
@@ -762,8 +793,8 @@ impl eframe::App for App {
             None => {}
         }
         if let Some((session, jid)) = self.state.open_chat_requested.take() {
-            self.state.inbox_session = Some(session.clone());
-            self.state.chat_selected = Some(jid.clone());
+            let chat = self.sessions.iter().find(|s| s.id == session).and_then(|s| s.book.chats.iter().find(|c| c.jid == jid));
+            screens::inbox::open_chat(&mut self.state, &session, &jid, chat);
             self.state.chat_tab = screens::inbox::TAB_ALL;
             self.backend.send(Command::Seen { id: session, chat: jid });
             self.screen = Screen::Inbox;
@@ -774,8 +805,8 @@ impl eframe::App for App {
         match summary_action {
             Some(screens::ringkasan::Action::Nomor(a)) => action = Some(a),
             Some(screens::ringkasan::Action::OpenChat { session, jid }) => {
-                self.state.inbox_session = Some(session.clone());
-                self.state.chat_selected = Some(jid.clone());
+                let chat = self.sessions.iter().find(|s| s.id == session).and_then(|s| s.book.chats.iter().find(|c| c.jid == jid));
+                screens::inbox::open_chat(&mut self.state, &session, &jid, chat);
                 self.state.chat_tab = screens::inbox::TAB_ALL;
                 self.backend.send(Command::Seen { id: session, chat: jid });
                 self.screen = Screen::Inbox;
@@ -812,6 +843,9 @@ impl eframe::App for App {
             None
         };
         for command in screens::inbox::typing_signal(ui.ctx(), &mut self.state, open_chat) {
+            self.backend.send(command);
+        }
+        for command in forward::show(ui.ctx(), &mut self.state.forward, &self.sessions) {
             self.backend.send(command);
         }
         // The open chat in a focused window gets no notification.
