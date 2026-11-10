@@ -15,7 +15,7 @@ use whatsapp_rust::serde_json::{Value, json};
 use whatsapp_rust::wacore::history_sync::{HistorySyncStream, MAX_DECOMPRESSED};
 use whatsapp_rust::wacore::proto_helpers::build_quote_context_with_info;
 use whatsapp_rust::wacore::store::DevicePropsOverride;
-use whatsapp_rust::wacore::types::presence::ReceiptType;
+use whatsapp_rust::wacore::types::presence::{ChatActivity, ReceiptType};
 
 use super::media;
 use super::registry::Registry;
@@ -103,6 +103,19 @@ impl Running {
                     log::warn!("session {id}: download failed: {e}");
                     state.set_download(&msg_id, Some(Some(e)));
                 }
+            }
+        });
+    }
+
+    /// Subscribes to the contact's presence, so their typing reaches us.
+    pub fn watch_presence(&self, id: &str, chat: &str) {
+        let Ok(jid) = chat.parse::<Jid>() else {
+            return;
+        };
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            if let Err(e) = client.presence().subscribe(jid).await {
+                log::debug!("session {id}: presence subscribe failed: {e}");
             }
         });
     }
@@ -398,6 +411,12 @@ fn on_message(
     if chat.starts_with("status@") {
         return;
     }
+    // A message from the contact ends their typing.
+    if !source.is_from_me {
+        if let Some(book) = state.book(id) {
+            state.set_typing(id, &book.normalize(&chat), None);
+        }
+    }
     let Some(text) = body(&ctx.message) else {
         return;
     };
@@ -536,6 +555,24 @@ async fn on_event(
                 v.status = Status::Reconnecting;
             }
         }),
+        Event::ChatPresence(update) => {
+            let chat = update.source.chat.to_string();
+            if chat.starts_with("status@") {
+                return;
+            }
+            let Some(book) = state.book(id) else {
+                return;
+            };
+            let typing = match update.state {
+                ChatActivity::Idle => None,
+                activity => Some(super::Typing {
+                    who: update.source.is_group.then(|| book.normalize(&update.source.sender.to_string())),
+                    recording: activity == ChatActivity::RecordingAudio,
+                    since: Instant::now(),
+                }),
+            };
+            state.set_typing(id, &book.normalize(&chat), typing);
+        }
         Event::LoggedOut(_) => state.update(id, |v| v.status = Status::LoggedOut),
         Event::StreamReplaced(_) => state.update(id, |v| v.status = Status::Replaced),
         Event::TemporaryBan(ban) => {

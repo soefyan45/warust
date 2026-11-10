@@ -119,6 +119,31 @@ pub struct Shared {
     pub viewing: Option<(String, String)>,
     /// A clicked notification asks the UI to open this chat.
     pub open_chat: Option<(String, String)>,
+    /// Contacts typing now, by `session|chat` (normalized JID).
+    pub typing: Arc<HashMap<String, Typing>>,
+}
+
+/// A contact typing (or recording a voice note) in a chat.
+#[derive(Clone, Debug)]
+pub struct Typing {
+    /// Who, in a group (normalized JID); `None` in a private chat.
+    pub who: Option<String>,
+    pub recording: bool,
+    pub since: Instant,
+}
+
+impl Typing {
+    /// WhatsApp repeats "typing" while it goes on and says "paused" when it
+    /// stops; this long without news counts as stopped.
+    pub const STALE: Duration = Duration::from_secs(25);
+
+    pub fn key(session: &str, chat: &str) -> String {
+        format!("{session}|{chat}")
+    }
+
+    pub fn fresh(&self) -> bool {
+        self.since.elapsed() < Self::STALE
+    }
 }
 
 /// The local REST API server.
@@ -163,6 +188,9 @@ pub enum Command {
     SendFile { id: String, chat: String, path: PathBuf, caption: String },
     /// The user opened a chat: clear its unread count.
     Seen { id: String, chat: String },
+    /// Ask to be told when this contact types or comes online (as WhatsApp
+    /// Web does when a chat is opened).
+    WatchPresence { id: String, chat: String },
     /// Show (or stop showing) "sedang mengetik" in the chat on the contact's side.
     Typing { id: String, chat: String, typing: bool },
     /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
@@ -353,6 +381,26 @@ impl Updater {
     pub(crate) fn own_number(&self, id: &str) -> Option<String> {
         let shared = self.shared.lock().ok()?;
         shared.sessions.iter().find(|s| s.id == id)?.own_number.clone()
+    }
+
+    /// Records (or, with `None`, clears) a contact typing in a chat.
+    pub(crate) fn set_typing(&self, session: &str, chat: &str, typing: Option<Typing>) {
+        if let Ok(mut shared) = self.shared.lock() {
+            let key = Typing::key(session, chat);
+            let map = Arc::make_mut(&mut shared.typing);
+            map.retain(|_, t| t.fresh());
+            match typing {
+                Some(t) => {
+                    map.insert(key, t);
+                }
+                None => {
+                    if map.remove(&key).is_none() {
+                        return;
+                    }
+                }
+            }
+        }
+        self.ctx.request_repaint();
     }
 
     pub(crate) fn viewing(&self) -> Option<(String, String)> {
@@ -596,6 +644,11 @@ async fn run(
             Command::Avatar { id, jid } => {
                 if let Some(r) = running.get(&id) {
                     r.request_avatar(jid);
+                }
+            }
+            Command::WatchPresence { id, chat } => {
+                if let Some(r) = running.get(&id) {
+                    r.watch_presence(&id, &chat);
                 }
             }
             Command::Typing { id, chat, typing } => {

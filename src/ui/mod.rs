@@ -54,6 +54,10 @@ pub struct State {
     pub typing: Option<(String, String, std::time::Instant)>,
     pub typing_seen_text: String,
     pub typing_changed: Option<std::time::Instant>,
+    /// Contacts typing now (from the backend), and chats whose presence was
+    /// already asked for this run.
+    pub typing_now: std::sync::Arc<std::collections::HashMap<String, backend::Typing>>,
+    pub presence_watched: std::collections::HashSet<(String, String)>,
     /// File waiting in the composer, sent with the text as its caption.
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
@@ -599,6 +603,11 @@ impl eframe::App for App {
         self.settings = snapshot.settings;
         self.state.settings = self.settings.clone();
         self.state.rule_hits = snapshot.rule_hits;
+        self.state.typing_now = snapshot.typing;
+        if self.state.typing_now.values().any(backend::Typing::fresh) {
+            // So a stale "mengetik…" disappears even when nothing else repaints.
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
+        }
         self.webhooks = snapshot.webhooks;
         self.api = snapshot.api;
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {

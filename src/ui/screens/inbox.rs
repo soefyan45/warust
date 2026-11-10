@@ -119,6 +119,7 @@ pub fn show(
     theme::pane(ui.ctx(), p.bg, Margin::ZERO).show(ui, |ui| {
     ui.set_min_size(ui.available_size());
     let surface = theme::pane_bg(ui.ctx());
+    let typing_now = typing_label(state, &session.id, &book, chat);
     Panel::top("conversation_header")
         .exact_size(52.0)
         .resizable(false)
@@ -137,6 +138,9 @@ pub fn show(
                         number_chip(ui, &p, rect.min, session);
                     } else {
                         ui.label(rich_mono(&super::chat_subtitle(chat), 12.0, p.muted));
+                    }
+                    if let Some(typing) = &typing_now {
+                        ui.label(rich(typing, 12.0, Weight::Medium, typing_color(&p)));
                     }
                 },
                 |ui| {
@@ -183,7 +187,7 @@ pub fn show(
                     state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                     commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
                 }
-                match messages(ui, &p, &book, chat, downloads, auto_stickers) {
+                match messages(ui, &p, &book, chat, downloads, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref()) {
                     Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
                     Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
                     None => {}
@@ -211,6 +215,12 @@ pub fn typing_signal(ctx: &egui::Context, state: &mut State, open: Option<(Strin
         state.typing_seen_text = state.composer.clone();
         state.typing_changed = Some(now);
     }
+    // Opening a private chat asks to hear its typing, once per run.
+    if let Some((session, chat)) = &open {
+        if !chat.ends_with("@g.us") && state.presence_watched.insert((session.clone(), chat.clone())) {
+            commands.push(Command::WatchPresence { id: session.clone(), chat: chat.clone() });
+        }
+    }
     let empty = state.composer.trim().is_empty();
     if let Some((session, chat, _)) = state.typing.clone() {
         let here = open.as_ref().is_some_and(|(s, c)| *s == session && *c == chat);
@@ -234,6 +244,22 @@ pub fn typing_signal(ctx: &egui::Context, state: &mut State, open: Option<(Strin
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
     }
     commands
+}
+
+/// "mengetik…", "merekam suara…", or in a group "Andi mengetik…", while
+/// the contact is at it.
+fn typing_label(state: &State, session: &str, book: &Book, chat: &Chat) -> Option<String> {
+    let typing = state.typing_now.get(&crate::backend::Typing::key(session, &chat.jid)).filter(|t| t.fresh())?;
+    let what = if typing.recording { "merekam suara…" } else { "mengetik…" };
+    Some(match &typing.who {
+        Some(who) => format!("{} {what}", super::sender_label(book, who)),
+        None => what.to_owned(),
+    })
+}
+
+/// Green, like WhatsApp's "mengetik…".
+fn typing_color(p: &Palette) -> Color32 {
+    if theme::template().top_nav() { p.accent_text } else { p.green }
 }
 
 /// "Tandai selesai", or "Selesai" on a done chat (a click opens it again).
@@ -403,7 +429,7 @@ fn chat_list(
                         && state.chat_selected.as_deref() == Some(chat.jid.as_str());
                     let title = super::chat_title(&s.book, chat);
                     let via_number = via.then_some(*s);
-                    if chat_row(ui, p, rect, &title, chat, picture, selected, via_number).clicked() {
+                    if chat_row(ui, p, rect, &title, chat, picture, selected, via_number, typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
                         state.inbox_session = Some(s.id.clone());
                         state.chat_selected = Some(chat.jid.clone());
                         if chat.unread > 0 {
@@ -508,6 +534,7 @@ fn chat_row(
     picture: Option<&Path>,
     selected: bool,
     via: Option<&SessionView>,
+    typing: Option<&str>,
 ) -> egui::Response {
     let resp = ui.interact(row, ui.scope_id().with(("chat_row", via.map(|s| s.id.as_str()), &chat.jid)), Sense::click());
     if selected {
@@ -534,7 +561,7 @@ fn chat_row(
     widgets::paint_text(ui, name, title, fonts::ui(14.0, Weight::SemiBold), p.text, Align::Min);
     let reserve = if chat.unread > 0 { 30.0 } else { 0.0 };
     let preview_rect = Rect::from_min_max(bottom.min, pos2(right - reserve, bottom.bottom()));
-    paint_preview(ui, p, preview_rect, chat, 13.0, p.muted);
+    paint_preview(ui, p, preview_rect, chat, 13.0, p.muted, typing);
     if chat.unread > 0 {
         let badge = Rect::from_min_size(pos2(right - 22.0, bottom.center().y - 9.0), vec2(22.0, 18.0));
         ui.painter().rect_filled(badge, 9.0, p.primary);
@@ -575,7 +602,11 @@ fn tick(p: &Palette, status: &Delivery, grey: Color32, dark: bool) -> Option<(&'
 }
 
 /// The last message in a chat row; ours start with their tick, like WhatsApp.
-fn paint_preview(ui: &Ui, p: &Palette, rect: Rect, chat: &Chat, size: f32, color: Color32) {
+fn paint_preview(ui: &Ui, p: &Palette, rect: Rect, chat: &Chat, size: f32, color: Color32, typing: Option<&str>) {
+    if let Some(typing) = typing {
+        widgets::paint_text(ui, rect, typing, fonts::ui(size, Weight::Medium), typing_color(p), Align::Min);
+        return;
+    }
     let Some(m) = chat.messages.last() else {
         return;
     };
@@ -870,7 +901,7 @@ fn paint_media(
 }
 
 /// Paints the open chat; returns a message whose media the user wants downloaded.
-fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool) -> Option<MediaClick> {
+fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Downloads, auto_stickers: bool, typing: Option<&str>) -> Option<MediaClick> {
     const GAP: f32 = 6.0;
     const DIVIDER: f32 = 36.0;
     let wrap = (ui.available_width() * 0.7).min(420.0);
@@ -892,7 +923,10 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
     enum Item<'a> {
         Day(String),
         Bubble(Bubble<'a>),
+        /// "••• sedang mengetik" after the last message (Pego `v5/Inbox · Chat`).
+        Typing(String),
     }
+    const TYPING_ROW: f32 = 36.0;
     let mut items = Vec::new();
     let mut last_day = None;
     for m in shown {
@@ -934,11 +968,15 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
         );
         items.push(Item::Bubble(Bubble { m, media, text, tick, quote, meta, size }));
     }
+    if let Some(label) = typing {
+        items.push(Item::Typing(if label.ends_with("mengetik…") { label.replace("mengetik…", "sedang mengetik") } else { label.to_owned() }));
+    }
     let content: f32 = items
         .iter()
         .map(|i| match i {
             Item::Day(_) => DIVIDER,
             Item::Bubble(b) => b.size.y + GAP,
+            Item::Typing(_) => TYPING_ROW + GAP,
         })
         .sum();
 
@@ -957,6 +995,21 @@ fn messages(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, downloads: &Down
             }
             for item in items {
                 match item {
+                    Item::Typing(label) => {
+                        let dots = Rect::from_min_size(pos2(area.left(), y), vec2(52.0, TYPING_ROW));
+                        painter.rect(dots, 18.0, p.bubble_in, Stroke::new(1.0, p.border), StrokeKind::Inside);
+                        // Three dots, the middle one lifted a little in turn.
+                        let t = ui.input(|i| i.time);
+                        for k in 0..3 {
+                            let phase = ((t * 3.0 - k as f64 * 0.6).sin() * 0.5 + 0.5) as f32;
+                            let at = pos2(dots.left() + 16.0 + k as f32 * 10.0, dots.center().y - phase * 2.5);
+                            painter.circle_filled(at, 3.2, p.muted.gamma_multiply(0.6 + 0.4 * phase));
+                        }
+                        let text = Rect::from_min_max(pos2(dots.right() + 10.0, y), pos2(area.right(), y + TYPING_ROW));
+                        widgets::paint_text(ui, text, &label, fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
+                        ui.ctx().request_repaint_after(std::time::Duration::from_millis(60));
+                        y += TYPING_ROW + GAP;
+                    }
                     Item::Day(label) => {
                         // A pill, so it reads on the wallpaper (Pego m5/Chat "Hari ini").
                         let galley = painter.layout_no_wrap(label, fonts::ui(12.0, Weight::Medium), p.text_2);
@@ -1469,7 +1522,7 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                         }
                         let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
                         let title = super::chat_title(&s.book, chat);
-                        if compact_row(ui, &p, rect, &title, chat, picture, via.then_some(*s)).clicked() {
+                        if compact_row(ui, &p, rect, &title, chat, picture, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref()).clicked() {
                             state.inbox_session = Some(s.id.clone());
                             state.chat_selected = Some(chat.jid.clone());
                             if chat.unread > 0 {
@@ -1503,7 +1556,8 @@ fn scope_chip(ui: &mut Ui, p: &Palette, label: &str, active: bool) -> egui::Resp
 
 /// A chat row of the phone list: round avatar, name, time, preview, unread
 /// badge, and "ke CS Utama · 4410" when every number is combined.
-fn compact_row(ui: &Ui, p: &Palette, row: Rect, title: &str, chat: &Chat, picture: Option<&Path>, via: Option<&SessionView>) -> egui::Response {
+#[allow(clippy::too_many_arguments)]
+fn compact_row(ui: &Ui, p: &Palette, row: Rect, title: &str, chat: &Chat, picture: Option<&Path>, via: Option<&SessionView>, typing: Option<&str>) -> egui::Response {
     use crate::ui::compact::{self as phone, PAD};
     let resp = ui.interact(row, ui.scope_id().with(("m_chat_row", via.map(|s| s.id.as_str()), &chat.jid)), Sense::click());
     if resp.hovered() {
@@ -1521,7 +1575,7 @@ fn compact_row(ui: &Ui, p: &Palette, row: Rect, title: &str, chat: &Chat, pictur
     widgets::paint_text(ui, name, title, fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
     let reserve = if chat.unread > 0 { 32.0 } else { 0.0 };
     let line = Rect::from_min_max(pos2(left, row.top() + 35.0), pos2(right - reserve, row.top() + 56.0));
-    paint_preview(ui, p, line, chat, 14.0, p.text_2);
+    paint_preview(ui, p, line, chat, 14.0, p.text_2, typing);
     if chat.unread > 0 {
         let count = if chat.unread > 99 { "99+".to_owned() } else { chat.unread.to_string() };
         let w = if chat.unread > 9 { 28.0 } else { 20.0 };
@@ -1556,6 +1610,7 @@ fn compact_chat(
     let mut commands = Vec::new();
     let book = &session.book;
     let title = super::chat_title(book, chat);
+    let typing_now = typing_label(state, &session.id, book, chat);
     Panel::top("m_chat_header")
         .exact_size(64.0)
         .resizable(false)
@@ -1584,6 +1639,8 @@ fn compact_chat(
                         icons::paint(ui, Rect::from_min_size(pos2(bottom.left(), bottom.center().y - 6.0), vec2(12.0, 12.0)), "arrow-down-left", 12.0, color);
                         let label = Rect::from_min_max(pos2(bottom.left() + 16.0, bottom.top()), bottom.max);
                         widgets::paint_text(ui, label, &format!("Chat masuk ke {}", super::devices::chip_label(session)), fonts::ui(12.0, Weight::Medium), color, Align::Min);
+                    } else if let Some(typing) = &typing_now {
+                        widgets::paint_text(ui, bottom, typing, fonts::ui(12.0, Weight::Medium), typing_color(&p), Align::Min);
                     } else {
                         widgets::paint_text(ui, bottom, &super::chat_subtitle(chat), fonts::mono(12.0), p.muted, Align::Min);
                     }
@@ -1647,7 +1704,7 @@ fn compact_chat(
                 state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                 commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
             }
-            match messages(ui, &p, book, chat, downloads, auto_stickers) {
+            match messages(ui, &p, book, chat, downloads, auto_stickers, typing_label(state, &session.id, book, chat).as_deref()) {
                 Some(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
                 Some(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
                 None => {}
@@ -1669,6 +1726,24 @@ mod typing_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn contact_typing_label() {
+        use crate::backend::{Book, Chat, Typing};
+        use std::time::{Duration, Instant};
+        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None };
+        let book = Book::default();
+        let mut state = State::default();
+        assert_eq!(typing_label(&state, "s1", &book, &chat), None);
+        let mut map = std::collections::HashMap::new();
+        map.insert(Typing::key("s1", &chat.jid), Typing { who: None, recording: false, since: Instant::now() });
+        state.typing_now = std::sync::Arc::new(map.clone());
+        assert_eq!(typing_label(&state, "s1", &book, &chat).as_deref(), Some("mengetik…"));
+        assert_eq!(typing_label(&state, "s2", &book, &chat), None, "another number's chat");
+        map.insert(Typing::key("s1", &chat.jid), Typing { who: None, recording: true, since: Instant::now() - Typing::STALE - Duration::from_secs(1) });
+        state.typing_now = std::sync::Arc::new(map);
+        assert_eq!(typing_label(&state, "s1", &book, &chat), None, "stale");
     }
 
     #[test]
