@@ -1619,6 +1619,41 @@ fn mic_button(ui: &mut Ui, voice: &mut Option<VoiceNote>, session: &str, chat: &
     }
 }
 
+/// Each frame, outside the composer: a voice note whose chat is no longer on
+/// screen (back to the chat list, another page, its window closed) stops
+/// recording, so the mic is released. One still saving is sent to its chat
+/// once saved, or its file deleted when that number is offline.
+pub fn voice_off_screen(ctx: &egui::Context, state: &mut State, sessions: &[SessionView], open: Option<(&str, &str)>) -> Vec<Command> {
+    let Some(note) = state.voice.as_mut() else { return Vec::new() };
+    if open == Some((note.session.as_str(), note.chat.as_str())) {
+        return Vec::new();
+    }
+    let VoiceStep::Saving(saved) = &note.step else {
+        state.voice = None;
+        return Vec::new();
+    };
+    match saved.try_recv() {
+        Err(std::sync::mpsc::TryRecvError::Empty) => {
+            ctx.request_repaint_after(std::time::Duration::from_millis(50));
+            Vec::new()
+        }
+        Ok(Ok(path)) => {
+            let connected = sessions.iter().any(|s| s.id == note.session && s.status == Status::Connected);
+            let VoiceNote { session, chat, .. } = state.voice.take().expect("checked above");
+            if connected {
+                vec![Command::SendVoice { id: session, chat, path }]
+            } else {
+                let _ = std::fs::remove_file(&path);
+                Vec::new()
+            }
+        }
+        _ => {
+            state.voice = None;
+            Vec::new()
+        }
+    }
+}
+
 /// Moves the composer's voice note along. `Some` holds what to send (to the
 /// chat the note belongs to); `Err` hides the rest of the composer while the
 /// note records or saves here.

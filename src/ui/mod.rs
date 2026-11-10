@@ -857,6 +857,10 @@ impl eframe::App for App {
         } else {
             None
         };
+        let open = open_chat.as_ref().map(|(session, chat)| (session.as_str(), chat.as_str()));
+        for command in screens::inbox::voice_off_screen(ui.ctx(), &mut self.state, &self.sessions, open) {
+            self.backend.send(command);
+        }
         for command in screens::inbox::typing_signal(ui.ctx(), &mut self.state, open_chat) {
             self.backend.send(command);
         }
