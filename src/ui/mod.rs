@@ -210,12 +210,16 @@ impl App {
                 // The logo row continues the title bar across the sidebar.
                 let title = egui::Rect::from_min_size(panel.min - egui::vec2(12.0, 14.0), egui::vec2(panel.width() + 12.0, 52.0));
                 window::drag_area(ui, title, "sidebar");
+                // macOS: the window buttons get the title row to themselves and
+                // the logo row sits under it.
+                if window::buttons_inset(ui.ctx()) > 0.0 {
+                    ui.add_space(title.bottom() - panel.top());
+                }
                 widgets::row(
                     ui,
                     32.0,
                     |ui| {
-                        // Past the macOS window buttons (the panel's margin is 12).
-                        ui.add_space((window::buttons_inset(ui.ctx()) - 12.0).max(6.0));
+                        ui.add_space(6.0);
                         let (mark, _) = ui.allocate_exact_size(egui::Vec2::splat(22.0), egui::Sense::hover());
                         ui.painter().rect_filled(mark, theme::R_SM, p.primary);
                         widgets::paint_text(
