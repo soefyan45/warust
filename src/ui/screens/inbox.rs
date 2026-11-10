@@ -764,7 +764,8 @@ fn paint_card(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, deta
     let back = if m.from_me { p.on_primary_muted.gamma_multiply(0.25) } else { p.panel };
     ui.painter().rect_filled(rect, R_MD, back);
     let icon = match media.kind.as_str() {
-        "image" | "video" => "image",
+        "image" => "image",
+        "video" => "video",
         "sticker" => "sticker",
         _ => "file-text",
     };
@@ -1078,7 +1079,7 @@ fn pick_file(ctx: &egui::Context) -> std::sync::mpsc::Receiver<Option<PathBuf>> 
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
-        let picked = crate::platform::pick_file("Pilih foto atau dokumen", false);
+        let picked = crate::platform::pick_file("Pilih foto, video, atau dokumen", false);
         let _ = tx.send(picked);
         ctx.request_repaint();
     });

@@ -52,7 +52,7 @@ Semua screenshot memakai data contoh.</sub></p>
     <td width="50%" valign="top"><strong>🟢 Status & reaksi</strong><br>Lihat status kontak dari semua nomor, kirim reaksi dan komentar sebagai balasan berkutip.</td>
   </tr>
   <tr>
-    <td valign="top"><strong>🔌 REST API lokal</strong><br>Kirim teks, foto, dokumen dan stiker lewat HTTP di 127.0.0.1, dengan API key Bearer.</td>
+    <td valign="top"><strong>🔌 REST API lokal</strong><br>Kirim teks, foto, video, dokumen dan stiker lewat HTTP di 127.0.0.1, dengan API key Bearer.</td>
     <td valign="top"><strong>🪝 Webhook bertanda tangan</strong><br>Pesan masuk, status kirim dan status sesi dikirim sebagai JSON dengan HMAC-SHA256 dan coba ulang.</td>
   </tr>
   <tr>
@@ -61,7 +61,7 @@ Semua screenshot memakai data contoh.</sub></p>
   </tr>
 </table>
 
-Juga: emoji berwarna, kirim foto/dokumen/stiker, pratinjau PDF di aplikasi, tanda kirim ✓✓,
+Juga: emoji berwarna, kirim foto/video/dokumen/stiker, pratinjau PDF di aplikasi, tanda kirim ✓✓,
 notifikasi desktop, dua template (Forest, dan Klasik gelap/terang), serta tata letak HP saat jendela
 dikecilkan di bawah 1100 px.
 
@@ -129,7 +129,7 @@ curl -X POST http://127.0.0.1:8787/sessions/<id>/messages/text \
 | `GET /sessions` · `POST /sessions` | Daftar nomor dan statusnya · tambah nomor baru |
 | `GET /sessions/{id}/qr` · `POST /sessions/{id}/pair-code` | QR atau kode pairing |
 | `POST /sessions/{id}/messages/text` | Kirim teks lewat antrean anti-ban |
-| `POST /sessions/{id}/messages/media` | Foto, dokumen atau stiker dari `path` atau `url` |
+| `POST /sessions/{id}/messages/media` | Foto, video (MP4/MOV), dokumen atau stiker dari `path` atau `url` |
 | `GET /sessions/{id}/messages/{msg_id}` | Status kirim satu pesan |
 | `GET /sessions/{id}/chats` · `GET /sessions/{id}/statuses` | Daftar chat dan status 24 jam terakhir |
 | `PUT /sessions/{id}/webhook` | URL webhook khusus nomor ini |

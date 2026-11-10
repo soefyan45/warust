@@ -1,5 +1,5 @@
 //! Media in chats. Files the user sends: photos go out as images (JPEG with a
-//! thumbnail), everything else as a document. Received
+//! thumbnail), MP4/MOV as playable videos, everything else as a document. Received
 //! media: the inline thumbnail is kept in `data/media/<session>/` and the CDN
 //! fields are stored with the message so the file can be downloaded on demand.
 
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use whatsapp_rust::download::{DownloadParams, MediaType};
 use whatsapp_rust::serde_json::{Value, json};
-use whatsapp_rust::media::{DocumentOptions, ImageOptions, document_message, image_message};
+use whatsapp_rust::media::{DocumentOptions, ImageOptions, VideoOptions, document_message, image_message, video_message};
 use whatsapp_rust::prelude::*;
 use whatsapp_rust::upload::UploadOptions;
 
@@ -25,6 +25,12 @@ pub fn is_picture(path: &Path) -> bool {
     matches!(extension(path).as_str(), "jpg" | "jpeg" | "png")
 }
 
+/// Videos WhatsApp plays inline. Other formats (mkv, webm, avi, ...) go out
+/// as documents.
+pub fn is_video(path: &Path) -> bool {
+    matches!(extension(path).as_str(), "mp4" | "m4v" | "mov")
+}
+
 pub fn file_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "file".to_owned())
 }
@@ -35,6 +41,8 @@ pub fn label(path: &Path, caption: &str) -> String {
     let tail = if caption.is_empty() { String::new() } else { format!(" {caption}") };
     if is_picture(path) {
         format!("[Gambar]{tail}")
+    } else if is_video(path) {
+        format!("[Video]{tail}")
     } else {
         format!("[Dokumen] {}{tail}", file_name(path))
     }
@@ -63,6 +71,96 @@ fn document_mime(path: &Path) -> &'static str {
     }
 }
 
+/// What a video message carries besides the file: read from the MP4 header.
+#[derive(Debug, PartialEq)]
+struct VideoInfo {
+    seconds: u32,
+    width: u32,
+    height: u32,
+}
+
+/// The boxes directly inside `data`, as (type, payload).
+fn mp4_boxes(mut data: &[u8]) -> impl Iterator<Item = (&[u8], &[u8])> {
+    std::iter::from_fn(move || {
+        let size = u32::from_be_bytes(data.get(..4)?.try_into().ok()?) as u64;
+        let kind = data.get(4..8)?;
+        let (header, size) = match size {
+            0 => (8, data.len() as u64),
+            1 => (16, u64::from_be_bytes(data.get(8..16)?.try_into().ok()?)),
+            n => (8, n),
+        };
+        let size = usize::try_from(size).ok().filter(|&s| s >= header && s <= data.len())?;
+        let payload = &data[header..size];
+        data = &data[size..];
+        Some((kind, payload))
+    })
+}
+
+fn mp4_child<'a>(data: &'a [u8], kind: &[u8]) -> Option<&'a [u8]> {
+    mp4_boxes(data).find(|(k, _)| *k == kind).map(|(_, payload)| payload)
+}
+
+fn be_u32(data: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?))
+}
+
+/// Duration and display size of an MP4/MOV file, or `None` when it has no
+/// movie header or no video track.
+fn video_info(file: &[u8]) -> Option<VideoInfo> {
+    let moov = mp4_child(file, b"moov")?;
+    let mvhd = mp4_child(moov, b"mvhd")?;
+    let (timescale, duration) = if *mvhd.first()? == 1 {
+        (be_u32(mvhd, 20)?, u64::from_be_bytes(mvhd.get(24..32)?.try_into().ok()?))
+    } else {
+        (be_u32(mvhd, 12)?, u64::from(be_u32(mvhd, 16)?))
+    };
+    let seconds = u32::try_from(duration.div_ceil(u64::from(timescale.max(1)))).unwrap_or(u32::MAX);
+    let tkhd = mp4_boxes(moov).filter(|(k, _)| *k == b"trak").find_map(|(_, trak)| {
+        let hdlr = mp4_child(mp4_child(trak, b"mdia")?, b"hdlr")?;
+        (hdlr.get(8..12)? == b"vide").then_some(())?;
+        mp4_child(trak, b"tkhd")
+    })?;
+    // The matrix and size sit after the version-dependent time fields.
+    let at = if *tkhd.first()? == 1 { 52 } else { 40 };
+    let rotated = be_u32(tkhd, at)? == 0;
+    let (width, height) = (be_u32(tkhd, at + 36)? >> 16, be_u32(tkhd, at + 40)? >> 16);
+    let (width, height) = if rotated { (height, width) } else { (width, height) };
+    Some(VideoInfo { seconds, width, height })
+}
+
+/// A still from the video, as a small JPEG: ffmpeg when installed, else
+/// Quick Look on macOS. `None` without either; the video still sends.
+fn video_thumbnail(path: &Path) -> Option<Vec<u8>> {
+    use crate::platform::command;
+    let still = command("ffmpeg")
+        .args(["-v", "error", "-i"])
+        .arg(path)
+        .args(["-vf", "thumbnail", "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "pipe:1"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success() && !o.stdout.is_empty())
+        .map(|o| o.stdout)
+        .or_else(|| quick_look(path))?;
+    let decoded = image::load_from_memory(&still).ok()?;
+    encode_jpeg(&decoded.thumbnail(THUMBNAIL_SIDE, THUMBNAIL_SIDE), 60).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn quick_look(path: &Path) -> Option<Vec<u8>> {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let out = std::env::temp_dir().join(format!("warust-thumb-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&out).ok()?;
+    let made = crate::platform::command("qlmanage").args(["-t", "-s", "320", "-o"]).arg(&out).arg(path).output();
+    let png = made.ok().and_then(|_| std::fs::read(out.join(format!("{}.png", file_name(path)))).ok());
+    let _ = std::fs::remove_dir_all(&out);
+    png
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quick_look(_: &Path) -> Option<Vec<u8>> {
+    None
+}
+
 fn encode_jpeg(image: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality)
@@ -71,61 +169,78 @@ fn encode_jpeg(image: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, Stri
     Ok(bytes)
 }
 
+/// A file read and ready to upload, by how it goes out.
+enum Prepared {
+    Picture { jpeg: Vec<u8>, thumbnail: Option<Vec<u8>>, width: u32, height: u32 },
+    Video { bytes: Vec<u8>, thumbnail: Option<Vec<u8>>, info: Option<VideoInfo> },
+    Document(Vec<u8>),
+}
+
+fn prepare(path: &Path) -> Result<Prepared, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("File tidak terbaca: {e}"))?;
+    if is_video(path) {
+        let info = video_info(&bytes);
+        return Ok(Prepared::Video { thumbnail: video_thumbnail(path), info, bytes });
+    }
+    if !is_picture(path) {
+        return Ok(Prepared::Document(bytes));
+    }
+    let decoded = image::load_from_memory(&bytes).map_err(|e| format!("Gambar rusak: {e}"))?;
+    let jpeg = if matches!(extension(path).as_str(), "jpg" | "jpeg") {
+        bytes
+    } else {
+        encode_jpeg(&decoded, 88)?
+    };
+    let thumbnail = encode_jpeg(&decoded.thumbnail(THUMBNAIL_SIDE, THUMBNAIL_SIDE), 60).ok();
+    Ok(Prepared::Picture { jpeg, thumbnail, width: decoded.width(), height: decoded.height() })
+}
+
 /// Reads, uploads and wraps the file as a message ready for `send_message`.
 pub async fn message(client: &Client, path: &Path, caption: &str) -> Result<wa::Message, String> {
     let size = std::fs::metadata(path).map_err(|e| format!("File tidak terbaca: {e}"))?.len();
     if size > MAX_BYTES {
         return Err(format!("File lebih dari {} MB", MAX_BYTES / 1024 / 1024));
     }
-    let picture = is_picture(path);
     let owned = path.to_owned();
-    // Reading and re-encoding can take a moment: keep it off the runtime.
-    let prepared = tokio::task::spawn_blocking(move || -> Result<_, String> {
-        let bytes = std::fs::read(&owned).map_err(|e| format!("File tidak terbaca: {e}"))?;
-        if !picture {
-            return Ok((bytes, None));
-        }
-        let decoded = image::load_from_memory(&bytes).map_err(|e| format!("Gambar rusak: {e}"))?;
-        let jpeg = if matches!(extension(&owned).as_str(), "jpg" | "jpeg") {
-            bytes
-        } else {
-            encode_jpeg(&decoded, 88)?
-        };
-        let thumbnail = encode_jpeg(&decoded.thumbnail(THUMBNAIL_SIDE, THUMBNAIL_SIDE), 60).ok();
-        Ok((jpeg, Some((thumbnail, decoded.width(), decoded.height()))))
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    // Reading, re-encoding and taking a still can take a moment: keep it off the runtime.
+    let prepared = tokio::task::spawn_blocking(move || prepare(&owned)).await.map_err(|e| e.to_string())??;
 
     let caption = (!caption.is_empty()).then(|| caption.to_owned());
+    let upload = |bytes, kind| async move {
+        client.upload(bytes, kind, UploadOptions::default()).await.map_err(|e| format!("Upload gagal: {e}"))
+    };
     match prepared {
-        (jpeg, Some((thumbnail, width, height))) => {
-            let upload = client
-                .upload(jpeg, MediaType::Image, UploadOptions::default())
-                .await
-                .map_err(|e| format!("Upload gagal: {e}"))?;
+        Prepared::Picture { jpeg, thumbnail, width, height } => {
             let mut options = ImageOptions::default().with_mimetype("image/jpeg");
             options.jpeg_thumbnail = thumbnail;
             options.caption = caption;
-            let mut message = image_message(upload, options);
+            let mut message = image_message(upload(jpeg, MediaType::Image).await?, options);
             if let Some(image) = message.image_message.as_option_mut() {
                 image.width = Some(width);
                 image.height = Some(height);
             }
             Ok(message)
         }
-        (bytes, None) => {
-            let upload = client
-                .upload(bytes, MediaType::Document, UploadOptions::default())
-                .await
-                .map_err(|e| format!("Upload gagal: {e}"))?;
+        Prepared::Video { bytes, thumbnail, info } => {
+            let mut options = VideoOptions::default().with_mimetype("video/mp4");
+            options.jpeg_thumbnail = thumbnail;
+            options.caption = caption;
+            options.duration_seconds = info.as_ref().map(|i| i.seconds);
+            let mut message = video_message(upload(bytes, MediaType::Video).await?, options);
+            if let (Some(video), Some(info)) = (message.video_message.as_option_mut(), info) {
+                video.width = Some(info.width);
+                video.height = Some(info.height);
+            }
+            Ok(message)
+        }
+        Prepared::Document(bytes) => {
             let name = file_name(path);
             let mut options = DocumentOptions::default()
                 .with_mimetype(document_mime(path))
                 .with_file_name(name.clone())
                 .with_title(name);
             options.caption = caption;
-            Ok(document_message(upload, options))
+            Ok(document_message(upload(bytes, MediaType::Document).await?, options))
         }
     }
 }
@@ -323,7 +438,7 @@ pub fn describe_sent(path: &Path) -> Value {
         (None, None)
     };
     json!({
-        "k": if picture { "image" } else { "document" },
+        "k": if picture { "image" } else if is_video(path) { "video" } else { "document" },
         "size": size,
         "w": width,
         "h": height,
@@ -399,6 +514,88 @@ mod tests {
         assert_eq!(label(Path::new("/a/b.jpg"), "hai"), "[Gambar] hai");
         assert_eq!(label(Path::new("/a/laporan.pdf"), ""), "[Dokumen] laporan.pdf");
         assert_eq!(document_mime(Path::new("x.XLSX")).ends_with("sheet"), true);
+        assert_eq!(label(Path::new("/a/klip.MP4"), ""), "[Video]");
+        assert_eq!(label(Path::new("/a/klip.mov"), "lihat"), "[Video] lihat");
+        assert_eq!(label(Path::new("/a/klip.mkv"), ""), "[Dokumen] klip.mkv");
+    }
+
+    fn mp4_box(kind: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = ((payload.len() + 8) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(payload);
+        out
+    }
+
+    /// A version-0 `tkhd` payload with the given matrix a/b and size.
+    fn tkhd(a: i32, b: i32, width: u32, height: u32) -> Vec<u8> {
+        let mut p = vec![0u8; 84];
+        p[40..44].copy_from_slice(&a.to_be_bytes());
+        p[44..48].copy_from_slice(&b.to_be_bytes());
+        p[76..80].copy_from_slice(&(width << 16).to_be_bytes());
+        p[80..84].copy_from_slice(&(height << 16).to_be_bytes());
+        p
+    }
+
+    fn track(handler: &[u8; 4], tkhd_payload: Vec<u8>) -> Vec<u8> {
+        let mut hdlr = vec![0u8; 8];
+        hdlr.extend_from_slice(handler);
+        hdlr.extend_from_slice(&[0u8; 13]);
+        let mdia = mp4_box(b"mdia", &mp4_box(b"hdlr", &hdlr));
+        mp4_box(b"trak", &[mp4_box(b"tkhd", &tkhd_payload), mdia].concat())
+    }
+
+    fn movie(mvhd: Vec<u8>, tracks: &[Vec<u8>]) -> Vec<u8> {
+        let moov = mp4_box(b"moov", &[mp4_box(b"mvhd", &mvhd), tracks.concat()].concat());
+        [mp4_box(b"ftyp", b"isom\0\0\0\0"), mp4_box(b"mdat", &[1, 2, 3]), moov].concat()
+    }
+
+    #[test]
+    fn reads_duration_and_size_of_the_video_track() {
+        // Version 0: timescale 1000, duration 12.4 s (rounds up to 13).
+        let mut mvhd = vec![0u8; 20];
+        mvhd[12..16].copy_from_slice(&1000u32.to_be_bytes());
+        mvhd[16..20].copy_from_slice(&12_400u32.to_be_bytes());
+        let one = 1 << 16;
+        let file = movie(mvhd, &[track(b"soun", tkhd(one, 0, 0, 0)), track(b"vide", tkhd(one, 0, 1280, 720))]);
+        assert_eq!(video_info(&file), Some(VideoInfo { seconds: 13, width: 1280, height: 720 }));
+    }
+
+    #[test]
+    fn rotated_video_swaps_width_and_height() {
+        // Version 1 mvhd (64-bit times), and a phone video turned 90°.
+        let mut mvhd = vec![0u8; 32];
+        mvhd[0] = 1;
+        mvhd[20..24].copy_from_slice(&600u32.to_be_bytes());
+        mvhd[24..32].copy_from_slice(&3_000u64.to_be_bytes());
+        let file = movie(mvhd, &[track(b"vide", tkhd(0, 1 << 16, 1920, 1080))]);
+        assert_eq!(video_info(&file), Some(VideoInfo { seconds: 5, width: 1080, height: 1920 }));
+    }
+
+    /// Reads a real MP4 made by ffmpeg (skipped when it is not installed).
+    #[test]
+    fn real_video_has_info_and_thumbnail() {
+        let dir = std::env::temp_dir().join(format!("warust-video-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("klip.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=duration=2:size=320x240:rate=10", "-pix_fmt", "yuv420p"])
+            .arg(&clip)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            return;
+        }
+        let bytes = std::fs::read(&clip).unwrap();
+        assert_eq!(video_info(&bytes), Some(VideoInfo { seconds: 2, width: 320, height: 240 }));
+        let thumbnail = image::load_from_memory(&video_thumbnail(&clip).unwrap()).unwrap();
+        assert_eq!((thumbnail.width(), thumbnail.height()), (THUMBNAIL_SIDE, 72));
+        assert_eq!(describe_sent(&clip)["k"], "video");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn not_a_movie() {
+        assert_eq!(video_info(b"plain text, not an mp4"), None);
+        assert_eq!(video_info(&mp4_box(b"ftyp", b"isom")), None);
     }
 
     #[test]
