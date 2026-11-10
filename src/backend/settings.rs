@@ -63,7 +63,7 @@ impl Webhook {
 
     pub fn wants(&self, event: &str) -> bool {
         match event {
-            "message.received" | "status.received" => self.message_received,
+            "message.received" | "status.received" | "message.deleted" => self.message_received,
             "message.status" => self.message_status,
             "session.status" => self.session_status,
             _ => true,

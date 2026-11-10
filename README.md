@@ -171,6 +171,7 @@ Set the URL in **Webhook & API → Webhook**: one global URL, and another URL pe
 |---|---|
 | `message.received` | Incoming message |
 | `message.status` | Outgoing message sent, delivered, read, or failed |
+| `message.deleted` | A message was deleted for everyone |
 | `status.received` | A contact posts a status |
 | `session.status` | Number connected, disconnected, needs pairing, and so on |
 

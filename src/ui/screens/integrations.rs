@@ -243,7 +243,7 @@ fn webhook_tab(
                 ui.label(rich(tr("URL must start with http:// or https://", "URL harus diawali http:// atau https://"), 12.0, Weight::Regular, p.red_text));
             }
             ui.label(rich(tr("Events sent", "Event yang dikirim"), 12.0, Weight::Medium, p.text_2));
-            widgets::toggle(ui, &mut draft.webhook.message_received, tr("message.received + status.received: incoming messages and statuses", "message.received + status.received: pesan dan status masuk"));
+            widgets::toggle(ui, &mut draft.webhook.message_received, tr("message.received + status.received + message.deleted: incoming messages, statuses and deletes", "message.received + status.received + message.deleted: pesan masuk, status, dan pesan dihapus"));
             widgets::toggle(ui, &mut draft.webhook.message_status, tr("message.status: sent, delivered, read, failed", "message.status: terkirim, diterima, dibaca, gagal"));
             widgets::toggle(ui, &mut draft.webhook.session_status, tr("session.status: connected, disconnected, logout, etc.", "session.status: terhubung, terputus, logout, dll."));
             let dirty = form.dirty();
