@@ -11,10 +11,11 @@ use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use whatsapp_rust::Client;
-use whatsapp_rust::voip::{CallEvent, CallHandle};
+use whatsapp_rust::voip::{CallEvent, CallHandle, VideoFrame, VideoUpgradeToken};
 use whatsapp_rust::wacore::types::call::{CallAction, CallEndedElsewhere, ElsewhereOutcome, IncomingCall, MissedCall};
 
 use super::store::{self, Delivery, Store};
+use super::video::{self, Camera, Decoder, Latest};
 use super::Updater;
 use crate::i18n::tr;
 
@@ -48,6 +49,15 @@ pub struct CallView {
     pub speaker_off: bool,
     /// Loudness of our microphone and of the caller, 0 to 1.
     pub levels: Arc<Levels>,
+    /// Video (#55): whether it is on, our camera, the caller asking for it,
+    /// and the latest pictures of the caller and of us.
+    pub video_on: bool,
+    pub camera_on: bool,
+    pub video_request: bool,
+    pub remote: Latest,
+    pub local: Latest,
+    /// Why our camera could not start, shown in the call.
+    pub camera_error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -71,6 +81,13 @@ struct Active {
     handle: Option<CallHandle>,
     audio: Option<Bridge>,
     ring: Option<Arc<AtomicBool>>,
+    camera: Option<Camera>,
+    decoder: Option<Decoder>,
+    /// Where the call puts the caller's video, kept to resume our camera.
+    video_sink: Option<async_channel::Sender<VideoFrame>>,
+    /// Keeps a camera-less video source open (we receive, but send nothing).
+    idle_source: Option<async_channel::Sender<Vec<u8>>>,
+    upgrade: Option<VideoUpgradeToken>,
 }
 
 fn active() -> &'static Mutex<Option<Active>> {
@@ -116,6 +133,12 @@ pub fn on_incoming(state: &Updater, session: &str, client: &Arc<Client>, store: 
                     muted: false,
                     speaker_off: false,
                     levels: Arc::default(),
+                    video_on: false,
+                    camera_on: false,
+                    video_request: false,
+                    remote: Arc::default(),
+                    local: Arc::default(),
+                    camera_error: None,
                 },
                 incoming: Box::new(call.clone()),
                 client: client.clone(),
@@ -123,6 +146,11 @@ pub fn on_incoming(state: &Updater, session: &str, client: &Arc<Client>, store: 
                 handle: None,
                 audio: None,
                 ring: Some(ring),
+                camera: None,
+                decoder: None,
+                video_sink: None,
+                idle_source: None,
+                upgrade: None,
             });
             drop(slot);
             super::notify::incoming_call(state, session, &peer, call.notify.as_deref().unwrap_or_default(), *is_video);
@@ -163,13 +191,15 @@ pub fn on_elsewhere(state: &Updater, ended: &CallEndedElsewhere) {
 
 /// Answers the ringing call: opens the microphone and speaker and joins.
 pub fn answer(state: &Updater) {
-    let (client, incoming, levels, call_id) = {
+    let (client, incoming, levels, call_id, wants_video, remote, local) = {
         let Ok(mut slot) = active().lock() else { return };
         let Some(a) = slot.as_mut().filter(|a| a.view.phase == Phase::Ringing) else { return };
         stop_ring(a);
         a.view.phase = Phase::Connecting;
-        (a.client.clone(), a.incoming.clone(), a.view.levels.clone(), a.view.call_id.clone())
+        let wants_video = a.view.video && video::ffmpeg().is_some();
+        (a.client.clone(), a.incoming.clone(), a.view.levels.clone(), a.view.call_id.clone(), wants_video, a.view.remote.clone(), a.view.local.clone())
     };
+    let repaint = state.repaint_handle();
     publish(state);
     let state = state.clone();
     tokio::spawn(async move {
@@ -186,7 +216,27 @@ pub fn answer(state: &Updater) {
                 return;
             }
         };
-        match client.voip().accept(&incoming).audio(mic_rx, spk_tx).start().await {
+        // A video call: the caller's video is decoded; ours comes from the
+        // camera, or from nothing when it cannot start (we still see them).
+        let mut parts = None;
+        let voip = client.voip();
+        let accept = voip.accept(&incoming).audio(mic_rx, spk_tx);
+        let accept = if wants_video {
+            let (sink, frames) = async_channel::bounded::<VideoFrame>(8);
+            let decoder = video::open_decoder(frames, remote, repaint.clone());
+            let (camera, source, idle, error) = match video::open_camera(local, repaint) {
+                Ok((camera, source)) => (Some(camera), source, None, None),
+                Err(e) => {
+                    let (idle, source) = async_channel::bounded::<Vec<u8>>(1);
+                    (None, source, Some(idle), Some(e))
+                }
+            };
+            parts = Some((camera, decoder, sink.clone(), idle, error));
+            accept.video(source, sink)
+        } else {
+            accept
+        };
+        match accept.start().await {
             Ok(handle) => {
                 let events = handle.take_events();
                 let watched = handle.clone();
@@ -195,6 +245,15 @@ pub fn answer(state: &Updater) {
                         Some(a) => {
                             a.handle = Some(handle);
                             a.audio = Some(bridge);
+                            if let Some((camera, decoder, sink, idle, error)) = parts.take() {
+                                a.view.video_on = true;
+                                a.view.camera_on = camera.is_some();
+                                a.view.camera_error = error;
+                                a.camera = camera;
+                                a.decoder = Some(decoder);
+                                a.video_sink = Some(sink);
+                                a.idle_source = idle;
+                            }
                             true
                         }
                         None => false,
@@ -210,6 +269,16 @@ pub fn answer(state: &Updater) {
                     let (state, call_id) = (state.clone(), call_id.clone());
                     tokio::spawn(async move {
                         while let Ok(event) = events.recv().await {
+                            // The caller asks to turn the call into video.
+                            if let CallEvent::PeerVideoStateChanged { upgrade_token: Some(token), .. } = &event {
+                                if let Ok(mut slot) = active().lock() {
+                                    if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == call_id && !a.view.video_on) {
+                                        a.upgrade = Some(token.clone());
+                                        a.view.video_request = true;
+                                    }
+                                }
+                                publish(&state);
+                            }
                             if event == CallEvent::MediaConnected {
                                 if let Ok(mut slot) = active().lock() {
                                     if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == call_id) {
@@ -292,6 +361,140 @@ pub fn set_muted(state: &Updater, muted: bool) {
     }
 }
 
+/// Opens what a call needs for video: the decoder of the caller's video and
+/// our camera. On a camera error the call still shows the caller.
+fn open_video(state: &Updater, view: &CallView) -> (async_channel::Sender<VideoFrame>, Decoder, Result<(Camera, async_channel::Receiver<Vec<u8>>), String>) {
+    let repaint = state.repaint_handle();
+    let (sink, frames) = async_channel::bounded::<VideoFrame>(8);
+    let decoder = video::open_decoder(frames, view.remote.clone(), repaint.clone());
+    let camera = video::open_camera(view.local.clone(), repaint);
+    (sink, decoder, camera)
+}
+
+/// Turns the voice call into a video call (the caller is asked).
+pub fn start_video(state: &Updater) {
+    start_or_accept_video(state, false);
+}
+
+/// Answers the caller's request to turn on video.
+pub fn accept_video(state: &Updater) {
+    start_or_accept_video(state, true);
+}
+
+fn start_or_accept_video(state: &Updater, accept: bool) {
+    let Some((handle, view, token)) = active().lock().ok().and_then(|mut slot| {
+        let a = slot.as_mut()?;
+        let token = if accept { Some(a.upgrade.take()?) } else { None };
+        a.view.video_request = false;
+        Some((a.handle.clone()?, a.view.clone(), token))
+    }) else {
+        return;
+    };
+    let (sink, decoder, camera) = open_video(state, &view);
+    let (camera, source) = match camera {
+        Ok((camera, source)) => (camera, source),
+        Err(e) => {
+            if let Ok(mut slot) = active().lock() {
+                if let Some(a) = slot.as_mut() {
+                    a.view.camera_error = Some(e);
+                }
+            }
+            publish(state);
+            return;
+        }
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let started = match token {
+            Some(token) => handle.accept_video(token, source, sink.clone()).await,
+            None => handle.start_video(source, sink.clone()).await,
+        };
+        match started {
+            Ok(()) => {
+                if let Ok(mut slot) = active().lock() {
+                    if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == view.call_id) {
+                        a.view.video_on = true;
+                        a.view.camera_on = true;
+                        a.view.camera_error = None;
+                        a.camera = Some(camera);
+                        a.decoder = Some(decoder);
+                        a.video_sink = Some(sink);
+                    }
+                }
+            }
+            Err(e) => log::warn!("call: video failed: {e}"),
+        }
+        publish(&state);
+    });
+}
+
+/// Leaves the caller's request for video unanswered (it times out on their side).
+pub fn decline_video(state: &Updater) {
+    if let Ok(mut slot) = active().lock() {
+        if let Some(a) = slot.as_mut() {
+            a.upgrade = None;
+            a.view.video_request = false;
+        }
+    }
+    publish(state);
+}
+
+/// Turns our camera off (the caller stays visible) or on again.
+pub fn set_camera(state: &Updater, on: bool) {
+    let Some((handle, view, sink)) = active().lock().ok().and_then(|slot| {
+        let a = slot.as_ref()?;
+        Some((a.handle.clone()?, a.view.clone(), a.video_sink.clone()?))
+    }) else {
+        return;
+    };
+    if !on {
+        if let Ok(mut slot) = active().lock() {
+            if let Some(a) = slot.as_mut() {
+                a.camera = None;
+                a.view.camera_on = false;
+                if let Ok(mut picture) = a.view.local.lock() {
+                    *picture = None;
+                }
+            }
+        }
+        publish(state);
+        tokio::spawn(async move {
+            let _ = handle.stop_video().await;
+        });
+        return;
+    }
+    let repaint = state.repaint_handle();
+    let (camera, source) = match video::open_camera(view.local.clone(), repaint) {
+        Ok(opened) => opened,
+        Err(e) => {
+            if let Ok(mut slot) = active().lock() {
+                if let Some(a) = slot.as_mut() {
+                    a.view.camera_error = Some(e);
+                }
+            }
+            publish(state);
+            return;
+        }
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        match handle.resume_video(source, sink).await {
+            Ok(()) => {
+                if let Ok(mut slot) = active().lock() {
+                    if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == view.call_id) {
+                        a.camera = Some(camera);
+                        a.view.camera_on = true;
+                        a.view.camera_error = None;
+                        a.idle_source = None;
+                    }
+                }
+            }
+            Err(e) => log::warn!("call: camera on failed: {e}"),
+        }
+        publish(&state);
+    });
+}
+
 /// Silences (or restores) the caller on our speaker.
 pub fn set_speaker_off(state: &Updater, off: bool) {
     if let Ok(mut slot) = active().lock() {
@@ -353,6 +556,9 @@ impl Outcome {
 fn finish(state: &Updater, mut a: Active, outcome: Outcome) {
     stop_ring(&mut a);
     drop(a.audio.take());
+    // Camera and decoder ffmpegs stop here.
+    drop(a.camera.take());
+    drop(a.decoder.take());
     let started = chrono_now() - a.view.since.elapsed().as_secs() as i64;
     log_call(state, &a.view.session, &a.store, &a.view.peer, &a.view.call_id, a.view.video, outcome, started);
     publish(state);

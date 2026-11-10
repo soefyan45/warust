@@ -10,6 +10,7 @@
 use egui::{Align2, Color32, Context, CursorIcon, Key, KeyboardShortcut, Modifiers, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 use crate::backend::call::{CallView, Phase};
+use crate::backend::video::Latest;
 use crate::backend::{Command, SessionView};
 use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
@@ -43,6 +44,8 @@ pub fn show(ctx: &Context, state: &mut State, call: &CallView, sessions: &[Sessi
     }
     let asked = if compact && state.call_minimized {
         banner(ctx, &p, call)
+    } else if call.video_on {
+        video_call(ctx, &p, call, session, &mut state.call_textures, compact)
     } else if compact {
         in_call(ctx, &p, call, session, true)
     } else {
@@ -50,6 +53,10 @@ pub fn show(ctx: &Context, state: &mut State, call: &CallView, sessions: &[Sessi
     };
     match asked {
         Some(Ask::End) => commands.push(Command::EndCall),
+        Some(Ask::Camera) => commands.push(Command::CameraCall(!call.camera_on)),
+        Some(Ask::StartVideo) => commands.push(Command::StartVideo),
+        Some(Ask::AcceptVideo) => commands.push(Command::AcceptVideo),
+        Some(Ask::DeclineVideo) => commands.push(Command::DeclineVideo),
         Some(Ask::Mute) => commands.push(Command::MuteCall(!call.muted)),
         Some(Ask::Speaker) => commands.push(Command::SpeakerOff(!call.speaker_off)),
         Some(Ask::Minimize) => state.call_minimized = true,
@@ -68,6 +75,129 @@ enum Ask {
     Speaker,
     Minimize,
     Restore,
+    Camera,
+    StartVideo,
+    AcceptVideo,
+    DeclineVideo,
+}
+
+/// The call's video pictures uploaded as textures, redone only when a new
+/// picture arrives.
+#[derive(Default)]
+pub struct Textures {
+    remote: Option<(egui::TextureHandle, u64)>,
+    local: Option<(egui::TextureHandle, u64)>,
+}
+
+/// The texture of `latest`, refreshed when its picture changed.
+fn texture(ctx: &Context, slot: &mut Option<(egui::TextureHandle, u64)>, latest: &Latest, name: &str) -> Option<egui::TextureHandle> {
+    let picture = latest.lock().ok()?.clone();
+    let Some(picture) = picture else {
+        *slot = None;
+        return None;
+    };
+    let fresh = slot.as_ref().is_none_or(|(_, generation)| *generation != picture.generation);
+    if fresh {
+        let image = egui::ColorImage::from_rgba_unmultiplied([picture.width, picture.height], &picture.rgba);
+        match slot {
+            Some((handle, generation)) => {
+                handle.set(image, egui::TextureOptions::LINEAR);
+                *generation = picture.generation;
+            }
+            None => *slot = Some((ctx.load_texture(name, image, egui::TextureOptions::LINEAR), picture.generation)),
+        }
+    }
+    slot.as_ref().map(|(handle, _)| handle.clone())
+}
+
+/// `size` fitted inside `rect`, centred.
+fn fit(rect: Rect, size: egui::Vec2) -> Rect {
+    let scale = (rect.width() / size.x.max(1.0)).min(rect.height() / size.y.max(1.0));
+    Rect::from_center_size(rect.center(), size * scale)
+}
+
+/// A video call (Pego `v5/Call · Video call`, `m5/Call 3`): the caller's video
+/// large, the time and that it is encrypted at the top, "You" in a corner, and
+/// Mic / Camera / Screen / Background / End at the bottom. On the desktop it
+/// takes the left of the window and leaves the chat on the right.
+fn video_call(ctx: &Context, p: &Palette, call: &CallView, session: Option<&SessionView>, textures: &mut Textures, full: bool) -> Option<Ask> {
+    let mut asked = None;
+    let screen = ctx.content_rect();
+    let area = if full {
+        screen
+    } else {
+        Rect::from_min_max(pos2(screen.left() + 24.0, screen.top() + 70.0), pos2(screen.right() - 440.0, screen.bottom() - 24.0))
+    };
+    let remote = texture(ctx, &mut textures.remote, &call.remote, "call_remote");
+    let local = texture(ctx, &mut textures.local, &call.local, "call_local");
+    egui::Area::new(egui::Id::unique("call_video")).order(egui::Order::Foreground).fixed_pos(area.min).show(ctx, |ui| {
+        let (rect, _) = ui.allocate_exact_size(area.size(), Sense::click());
+        let radius = if full { 0.0 } else { f32::from(theme::R_LG) };
+        let painter = ui.painter().with_clip_rect(rect);
+        painter.rect_filled(rect, radius, Color32::from_rgb(0x12, 0x14, 0x13));
+        match &remote {
+            Some(texture) => {
+                let shown = fit(rect, texture.size_vec2());
+                painter.image(texture.id(), shown, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            }
+            None => {
+                let name = caller(call, session);
+                avatar_rings(ui, p, rect.center() - vec2(0.0, 30.0), 44.0, &crate::ui::screens::initials(&name), None);
+                let wait = if call.phase == Phase::Active { tr("Waiting for their video…", "Menunggu video mereka…") } else { tr("Connecting…", "Menyambungkan…") };
+                widgets::paint_text(ui, Rect::from_center_size(rect.center() + vec2(0.0, 50.0), vec2(rect.width(), 20.0)), wait, fonts::ui(13.0, Weight::Regular), Color32::from_white_alpha(200), egui::Align::Center);
+            }
+        }
+        // Top: who, how long, where; and the connection.
+        let shade = Rect::from_min_size(rect.min, vec2(rect.width(), 64.0));
+        painter.rect_filled(shade, radius, Color32::from_black_alpha(90));
+        let name = caller(call, session);
+        widgets::paint_text(ui, Rect::from_min_size(rect.min + vec2(18.0, 12.0), vec2(rect.width() - 200.0, 22.0)), &name, fonts::ui(16.0, Weight::SemiBold), Color32::WHITE, egui::Align::Min);
+        let time = call.connected_at.map(|t| clock(t.elapsed().as_secs())).unwrap_or_default();
+        let on = session.map(crate::ui::screens::devices::chip_label).unwrap_or_default();
+        let line = crate::trf!("{time} · {on} · end-to-end encrypted", "{time} · {on} · terenkripsi end-to-end");
+        widgets::paint_text(ui, Rect::from_min_size(rect.min + vec2(18.0, 36.0), vec2(rect.width() - 200.0, 16.0)), &line, fonts::ui(11.5, Weight::Regular), Color32::from_white_alpha(210), egui::Align::Min);
+        let quality = if remote.is_some() { tr("Video connected", "Video tersambung") } else { tr("No video yet", "Belum ada video") };
+        let pill = Rect::from_min_size(pos2(rect.right() - 170.0, rect.top() + 18.0), vec2(152.0, 26.0));
+        painter.rect_filled(pill, 13.0, Color32::from_black_alpha(110));
+        painter.circle_filled(pos2(pill.left() + 14.0, pill.center().y), 3.5, if remote.is_some() { p.green } else { p.amber });
+        widgets::paint_text(ui, pill.shrink2(vec2(24.0, 0.0)).translate(vec2(4.0, 0.0)), quality, fonts::ui(11.5, Weight::Medium), Color32::WHITE, egui::Align::Min);
+        // "You" in the corner: our camera, or that it is off.
+        let you = Rect::from_min_size(pos2(rect.right() - 218.0, rect.top() + 58.0), vec2(200.0, 112.0));
+        painter.rect_filled(you, 12.0, Color32::from_rgb(0x24, 0x27, 0x25));
+        match &local {
+            Some(texture) if call.camera_on => {
+                egui::Image::from_texture(texture).corner_radius(12).fit_to_exact_size(you.size()).paint_at(ui, you);
+            }
+            _ => {
+                icons::paint(ui, Rect::from_center_size(you.center() - vec2(0.0, 8.0), vec2(22.0, 22.0)), "video-off", 22.0, Color32::from_white_alpha(180));
+                let why = call.camera_error.as_deref().unwrap_or(tr("Camera off", "Kamera mati"));
+                widgets::paint_text(ui, Rect::from_center_size(you.center() + vec2(0.0, 22.0), vec2(you.width() - 12.0, 16.0)), why, fonts::ui(10.5, Weight::Regular), Color32::from_white_alpha(180), egui::Align::Center);
+            }
+        }
+        painter.rect_stroke(you, 12.0, Stroke::new(1.0, Color32::from_white_alpha(60)), egui::StrokeKind::Inside);
+        let tag = Rect::from_min_size(you.left_bottom() + vec2(8.0, -24.0), vec2(42.0, 18.0));
+        painter.rect_filled(tag, 9.0, Color32::from_black_alpha(140));
+        widgets::paint_text(ui, tag, tr("You", "Kamu"), fonts::ui(10.5, Weight::SemiBold), Color32::WHITE, egui::Align::Center);
+        // The controls.
+        let row = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 56.0), vec2(5.0 * 64.0 + 4.0 * 14.0, 80.0));
+        let mut child = ui.new_child(egui::UiBuilder::new().max_rect(row).layout(egui::Layout::left_to_right(egui::Align::Center)));
+        child.spacing_mut().item_spacing.x = 14.0;
+        let dark = Color32::from_black_alpha(140);
+        let (mic_icon, mic_fill, mic_glyph) = if call.muted { ("mic-off", Color32::WHITE, Color32::BLACK) } else { ("mic", dark, Color32::WHITE) };
+        if control(&mut child, p, mic_icon, "Mic", mic_fill, mic_glyph, true, tr("Mute your microphone", "Bisukan mikrofon Anda")) {
+            asked = Some(Ask::Mute);
+        }
+        let (cam_icon, cam_fill, cam_glyph) = if call.camera_on { ("video", dark, Color32::WHITE) } else { ("video-off", Color32::WHITE, Color32::BLACK) };
+        if control(&mut child, p, cam_icon, tr("Camera", "Kamera"), cam_fill, cam_glyph, true, tr("Turn your camera off or on", "Matikan atau nyalakan kamera Anda")) {
+            asked = Some(Ask::Camera);
+        }
+        control(&mut child, p, "monitor-up", tr("Screen", "Layar"), dark, Color32::WHITE, false, tr("Screen sharing comes in a later version", "Berbagi layar menyusul di versi berikutnya"));
+        control(&mut child, p, "image", tr("Blur", "Latar blur"), dark, Color32::WHITE, false, tr("Background blur comes in a later version", "Latar blur menyusul di versi berikutnya"));
+        if control(&mut child, p, "phone-off", tr("End", "Akhiri"), p.red, Color32::WHITE, true, tr("End the call", "Akhiri panggilan")) {
+            asked = Some(Ask::End);
+        }
+    });
+    asked
 }
 
 /// Who is calling: their name in this number's book, else what WhatsApp sent,
@@ -307,6 +437,29 @@ fn in_call(ctx: &Context, p: &Palette, call: &CallView, session: Option<&Session
             let label = Rect::from_min_max(pill.min + vec2(40.0, 0.0), pill.max);
             widgets::paint_text(ui, label, tr("Caller is speaking", "Pelanggan sedang bicara"), fonts::ui(11.5, Weight::Medium), p.accent.gamma_multiply(speaking), egui::Align::Min);
         }
+        // The caller asks to turn on video.
+        if call.video_request {
+            let ask = Rect::from_min_size(pos2(rect.left() + 14.0, rect.bottom() - 206.0), vec2(rect.width() - 28.0, 48.0));
+            ui.painter().rect_filled(ask, theme::R_MD, p.accent);
+            widgets::paint_text(ui, Rect::from_min_size(ask.min + vec2(12.0, 0.0), vec2(ask.width() - 150.0, ask.height())), tr("Wants to turn on video", "Ingin menyalakan video"), fonts::ui(12.5, Weight::SemiBold), p.accent_text, egui::Align::Min);
+            let yes = Rect::from_min_size(pos2(ask.right() - 136.0, ask.top() + 9.0), vec2(64.0, 30.0));
+            let no = Rect::from_min_size(pos2(ask.right() - 68.0, ask.top() + 9.0), vec2(58.0, 30.0));
+            let yes_r = ui.interact(yes, egui::Id::unique("call_video_yes"), Sense::click());
+            let no_r = ui.interact(no, egui::Id::unique("call_video_no"), Sense::click());
+            ui.painter().rect_filled(yes, 15.0, p.primary);
+            widgets::paint_text(ui, yes, tr("Turn on", "Nyalakan"), fonts::ui(11.5, Weight::SemiBold), p.on_primary, egui::Align::Center);
+            ui.painter().rect_stroke(no, 15.0, Stroke::new(1.0, p.accent_text), egui::StrokeKind::Inside);
+            widgets::paint_text(ui, no, tr("Not now", "Nanti"), fonts::ui(11.5, Weight::Medium), p.accent_text, egui::Align::Center);
+            if yes_r.clicked() {
+                asked = Some(Ask::AcceptVideo);
+            } else if no_r.clicked() {
+                asked = Some(Ask::DeclineVideo);
+            }
+        }
+        if let Some(error) = &call.camera_error {
+            let line = Rect::from_min_size(pos2(rect.left() + 14.0, rect.bottom() - 176.0), vec2(rect.width() - 28.0, 18.0));
+            widgets::paint_text(ui, line, error, fonts::ui(11.0, Weight::Regular), p.accent, egui::Align::Center);
+        }
         // Which number it is on, then the controls.
         let bottom = Rect::from_min_max(pos2(rect.left() + 14.0, rect.bottom() - 150.0), pos2(rect.right() - 14.0, rect.bottom() - 14.0));
         ui.painter().rect_filled(bottom, theme::R_LG, p.on_primary.gamma_multiply(0.08));
@@ -328,7 +481,15 @@ fn in_call(ctx: &Context, p: &Palette, call: &CallView, session: Option<&Session
         if control(&mut child, p, spk_icon, "Speaker", spk_fill, spk_glyph, true, tr("Silence the caller on this computer", "Senyapkan suara penelepon di komputer ini")) {
             asked = Some(Ask::Speaker);
         }
-        control(&mut child, p, "video", "Video", soft, p.on_primary, false, tr("Video calls come in a later version (#55)", "Video call menyusul di versi berikutnya (#55)"));
+        let can_video = connected && crate::backend::video::ffmpeg().is_some();
+        let hint = if crate::backend::video::ffmpeg().is_none() {
+            tr("Video calls need ffmpeg installed", "Video call butuh ffmpeg terpasang")
+        } else {
+            tr("Turn this into a video call", "Jadikan video call")
+        };
+        if control(&mut child, p, "video", "Video", soft, p.on_primary, can_video, hint) {
+            asked = Some(Ask::StartVideo);
+        }
         if control(&mut child, p, "phone-off", tr("End", "Akhiri"), p.red, Color32::WHITE, true, tr("End the call", "Akhiri panggilan")) {
             asked = Some(Ask::End);
         }
