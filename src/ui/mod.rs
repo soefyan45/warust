@@ -58,6 +58,20 @@ pub struct VoiceNote {
     pub session: String,
     pub chat: String,
     pub step: VoiceStep,
+    /// Microphone level every 60 ms while recording: the live wave, and the
+    /// whole note's wave while it is paused.
+    pub wave: Vec<f32>,
+    /// When `wave` last got a bar.
+    pub sampled: Option<std::time::Instant>,
+    /// What was recorded so far, on its way from the recording thread to be
+    /// heard while paused.
+    pub preview: Option<std::sync::mpsc::Receiver<Vec<f32>>>,
+}
+
+impl VoiceNote {
+    pub fn new(session: &str, chat: &str, step: VoiceStep) -> Self {
+        Self { session: session.to_owned(), chat: chat.to_owned(), step, wave: Vec::new(), sampled: None, preview: None }
+    }
 }
 
 pub enum VoiceStep {
@@ -118,6 +132,8 @@ pub struct State {
     pub voice: Option<VoiceNote>,
     /// Result of the last CSV export, shown for a few seconds.
     pub export_note: Option<(String, std::time::Instant)>,
+    /// "Recording audio" last told to this chat, and when.
+    pub recording_told: Option<(String, String, std::time::Instant)>,
     /// Chats whose profile picture was already asked for.
     pub avatar_asked: std::collections::HashSet<String>,
     /// Chat whose older messages were just requested, and when.

@@ -46,6 +46,8 @@ struct Shared {
 
 enum Command {
     Play { id: String, path: PathBuf, from: f32 },
+    /// Samples already decoded: a recording listened to before it is sent.
+    PlayBuffer { id: String, pcm: Arc<Vec<f32>> },
     Speed(f32),
 }
 
@@ -120,6 +122,22 @@ pub fn seek(id: &str, path: &Path, fraction: f32) {
     }
 }
 
+/// Plays 48 kHz mono `pcm` as `id` (the voice note being recorded, heard
+/// back while paused), from the start.
+pub fn play_buffer(id: &str, pcm: Vec<f32>) {
+    let _ = player().commands.send(Command::PlayBuffer { id: id.to_owned(), pcm: Arc::new(pcm) });
+}
+
+/// Stops message `id` if it is the note loaded.
+pub fn forget(id: &str) {
+    let shared = &player().shared;
+    let Ok(mut track) = shared.track.lock() else { return };
+    if track.as_ref().is_some_and(|t| t.id == id) {
+        shared.playing.store(false, Ordering::Relaxed);
+        *track = None;
+    }
+}
+
 /// The next speed after the current one (1× → 1.5× → 2× → 1×).
 pub fn next_speed(speed: f32) -> f32 {
     let at = SPEEDS.iter().position(|s| (s - speed).abs() < 0.01).unwrap_or(0);
@@ -162,6 +180,19 @@ fn run(shared: Arc<Shared>, commands: mpsc::Receiver<Command>) {
                     *track = Some(Track { id, original: pcm, buffer, speed });
                 }
                 shared.position.store(at.to_bits(), Ordering::Relaxed);
+                if stream.is_none() {
+                    stream = open_output(shared.clone()).inspect_err(|e| log::warn!("audio output: {e}")).ok();
+                }
+                shared.playing.store(stream.is_some(), Ordering::Relaxed);
+            }
+            Command::PlayBuffer { id, pcm } => {
+                if pcm.is_empty() {
+                    continue;
+                }
+                if let Ok(mut track) = shared.track.lock() {
+                    *track = Some(Track { id, buffer: pcm.clone(), original: pcm, speed: 1.0 });
+                }
+                shared.position.store(0f64.to_bits(), Ordering::Relaxed);
                 if stream.is_none() {
                     stream = open_output(shared.clone()).inspect_err(|e| log::warn!("audio output: {e}")).ok();
                 }

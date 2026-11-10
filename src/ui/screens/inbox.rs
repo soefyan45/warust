@@ -282,6 +282,29 @@ pub fn typing_signal(ctx: &egui::Context, state: &mut State, open: Option<(Strin
             }
         }
     }
+    // "Recording audio" for the chat a voice note is being recorded in, sent
+    // again while it goes on, and stopped on pause, send or cancel.
+    let recording = state.voice.as_ref().and_then(|v| match &v.step {
+        VoiceStep::Recording(r) if !r.is_paused() && r.elapsed() > std::time::Duration::ZERO => Some((v.session.clone(), v.chat.clone())),
+        _ => None,
+    });
+    match (&recording, state.recording_told.clone()) {
+        (Some((session, chat)), told) => {
+            let same = told.as_ref().is_some_and(|(s, c, _)| s == session && c == chat);
+            if let Some((s, c, _)) = told.as_ref().filter(|_| !same) {
+                commands.push(Command::RecordingAudio { id: s.clone(), chat: c.clone(), on: false });
+            }
+            if !same || told.is_some_and(|(_, _, at)| now - at >= TYPING_RESEND) {
+                commands.push(Command::RecordingAudio { id: session.clone(), chat: chat.clone(), on: true });
+                state.recording_told = Some((session.clone(), chat.clone(), now));
+            }
+        }
+        (None, Some((session, chat, _))) => {
+            commands.push(Command::RecordingAudio { id: session, chat, on: false });
+            state.recording_told = None;
+        }
+        (None, None) => {}
+    }
     if state.typing.is_some() {
         // Wakes up to notice the pause even when nothing else repaints.
         ctx.request_repaint_after(std::time::Duration::from_secs(1));
@@ -2075,74 +2098,217 @@ enum Recording {
     Keep,
     Cancel,
     Send,
+    Pause,
+    Resume,
+    /// Play or pause the paused note.
+    Listen,
 }
 
 /// How long an error about a voice note stays under the composer.
 const VOICE_ERROR_FOR: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// The composer while a voice note records: a red dot, the time, a level
-/// meter, cancel and send. Esc cancels, Enter sends. While the microphone
-/// opens, or the note is saved, it says so instead.
-fn recording_bar(ui: &mut Ui, p: &Palette, recorder: Option<&crate::backend::voice::Recorder>, compact: bool) -> Recording {
-    // Keeps the clock and meter moving.
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
-    let recording = recorder.filter(|r| r.elapsed() > std::time::Duration::ZERO);
-    let elapsed = recording.map(|r| r.elapsed().as_secs()).unwrap_or(0);
-    if elapsed >= crate::backend::voice::MAX_SECONDS {
+/// The player id of the note being recorded, heard back while paused.
+const PREVIEW: &str = "voice-preview";
+/// A new bar of the live wave every 60 ms (Pego "Perilaku wave").
+const WAVE_EVERY: std::time::Duration = std::time::Duration::from_millis(60);
+/// About the last second of bars is drawn full, older ones faded.
+const WAVE_FRESH: usize = 16;
+
+/// Height of a wave bar for a microphone level (0 to 1): log scale from 3 to
+/// `max` px, so quiet speech still moves; under -50 dB it is a 3 px dot.
+fn wave_height(level: f32, max: f32) -> f32 {
+    let db = 20.0 * level.max(1e-5).log10();
+    let v = ((db + 50.0) / 50.0).clamp(0.0, 1.0);
+    3.0 + v * (max - 3.0)
+}
+
+/// The live wave: the newest bar enters at the right and the others slide
+/// left, smoothly between samples; the last second is full colour.
+fn paint_live_wave(ui: &Ui, rect: Rect, wave: &[f32], sampled: Option<std::time::Instant>, color: Color32) {
+    const STEP: f32 = 5.0;
+    let painter = ui.painter().with_clip_rect(rect);
+    let slide = sampled.map(|t| (t.elapsed().as_secs_f32() / WAVE_EVERY.as_secs_f32()).min(1.0)).unwrap_or(0.0) * STEP;
+    let fits = (rect.width() / STEP) as usize + 2;
+    // A thin baseline, as the bars fill it from the right.
+    painter.line_segment([pos2(rect.left(), rect.center().y), pos2(rect.right(), rect.center().y)], Stroke::new(1.0, color.gamma_multiply(0.2)));
+    for (age, level) in wave.iter().rev().take(fits).enumerate() {
+        let x = rect.right() - 2.0 - age as f32 * STEP - slide + STEP;
+        let height = wave_height(*level, rect.height());
+        let fill = if age < WAVE_FRESH { color } else { color.gamma_multiply(0.4) };
+        painter.rect_filled(Rect::from_center_size(pos2(x, rect.center().y), vec2(3.0, height)), 1.5, fill);
+    }
+}
+
+/// The whole note's wave while paused, 0..1 of it played.
+fn paint_note_wave(ui: &Ui, rect: Rect, wave: &[f32], played: f32, color: Color32, rest: Color32) {
+    let bars = ((rect.width() / 5.0) as usize).max(1);
+    let step = rect.width() / bars as f32;
+    for bar in 0..bars {
+        let from = bar * wave.len() / bars;
+        let to = ((bar + 1) * wave.len() / bars).max(from + 1).min(wave.len());
+        let level = wave.get(from..to).and_then(|w| w.iter().copied().reduce(f32::max)).unwrap_or(0.0);
+        let x = rect.left() + step * (bar as f32 + 0.5);
+        let done = (bar as f32 + 0.5) / bars as f32 <= played;
+        let height = wave_height(level, rect.height());
+        ui.painter().rect_filled(Rect::from_center_size(pos2(x, rect.center().y), vec2(3.0, height)), 1.5, if done { color } else { rest });
+    }
+    if played > 0.0 {
+        ui.painter().circle_filled(pos2(rect.left() + rect.width() * played, rect.center().y), 6.0, color);
+    }
+}
+
+/// A round icon button for the recorder.
+fn round_button(ui: &mut Ui, icon: &str, size: f32, fill: Color32, glyph: Color32, outline: Option<Color32>, hint: &str) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(size, size), Sense::click());
+    let grow = if response.hovered() { 1.0 } else { 0.0 };
+    ui.painter().circle_filled(rect.center(), size / 2.0 + grow, fill);
+    if let Some(outline) = outline {
+        ui.painter().circle_stroke(rect.center(), size / 2.0 - 0.5, Stroke::new(1.0, outline));
+    }
+    icons::paint(ui, Rect::from_center_size(rect.center(), vec2(18.0, 18.0)), icon, 18.0, glyph);
+    response.on_hover_text(hint).on_hover_cursor(CursorIcon::PointingHand).clicked()
+}
+
+/// A key hint chip: "Esc" beside "cancel".
+fn key_hint(ui: &mut Ui, p: &Palette, key: &str, what: &str) {
+    let galley = ui.painter().layout_no_wrap(key.to_owned(), fonts::mono(11.0), p.text_2);
+    let (rect, _) = ui.allocate_exact_size(galley.size() + vec2(10.0, 6.0), Sense::hover());
+    ui.painter().rect(rect, 4.0, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, p.text_2);
+    ui.label(rich(what, 12.0, Weight::Regular, p.muted));
+}
+
+/// The composer while a voice note records (Pego `v5/VN · Rekam & putar`,
+/// `m5/VN 2` and `m5/VN 3`):
+/// - recording: 🗑, a red dot and the time, the live wave, ⏸ and send;
+/// - paused: 🗑, ▶ to listen, the whole wave as it plays, the time, "Resume"
+///   and send.
+/// A strip above names the number it goes out from, with Esc and Enter hints.
+/// While the microphone opens, or the note is saved, it says so instead.
+fn recording_bar(ui: &mut Ui, p: &Palette, note: Option<&mut VoiceNote>, from: &str, compact: bool) -> Recording {
+    let saving = note.as_ref().is_none_or(|n| !matches!(n.step, VoiceStep::Recording(_)));
+    let (recorder, mut wave, mut sampled) = match note {
+        Some(VoiceNote { step: VoiceStep::Recording(recorder), wave, sampled, .. }) => (Some(recorder), Some(wave), Some(sampled)),
+        _ => (None, None, None),
+    };
+    let paused = recorder.as_ref().is_some_and(|r| r.is_paused());
+    let recording = recorder.as_ref().is_some_and(|r| r.elapsed() > std::time::Duration::ZERO || r.is_paused());
+    let elapsed = recorder.as_ref().map(|r| r.elapsed().as_secs_f32()).unwrap_or(0.0);
+    if elapsed >= crate::backend::voice::MAX_SECONDS as f32 {
         return Recording::Send;
+    }
+    // A new bar every 60 ms while recording; the wave keeps sliding between.
+    if let (Some(recorder), Some(wave), Some(sampled)) = (&recorder, wave.as_deref_mut(), sampled.as_deref_mut()) {
+        if recording && !paused && sampled.is_none_or(|t| t.elapsed() >= WAVE_EVERY) {
+            wave.push(recorder.level());
+            *sampled = Some(std::time::Instant::now());
+        }
+    }
+    let listen = player_status_preview();
+    if (recording && !paused) || listen.is_some_and(|s| s.playing) || recorder.is_none() {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(16));
+    } else {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
     let mut action = ui.input_mut(|i| {
         if recorder.is_some() && i.consume_key(Modifiers::NONE, Key::Escape) {
             Recording::Cancel
-        } else if recording.is_some() && enter_sends(i) {
+        } else if recording && enter_sends(i) {
             Recording::Send
+        } else if recording && i.consume_key(Modifiers::NONE, Key::Space) {
+            if paused { Recording::Listen } else { Recording::Pause }
         } else {
             Recording::Keep
         }
     });
+
+    // The strip: what is happening, from which number, and the keys.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (icon, label) = if saving {
+            ("loader-circle", tr("Saving voice message…", "Menyimpan pesan suara…").to_owned())
+        } else if paused {
+            ("pause", tr("Paused · listen before sending", "Dijeda · dengarkan dulu sebelum kirim").to_owned())
+        } else {
+            ("lock", crate::trf!("Recording voice message · sent from {from}", "Merekam voice note · dikirim dari {from}"))
+        };
+        icons::show(ui, icon, 13.0, p.text_2);
+        ui.label(rich(&label, 12.0, Weight::Medium, p.text_2));
+        if !saving && !compact {
+            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                key_hint(ui, p, "Enter", tr("send", "kirim"));
+                key_hint(ui, p, "Esc", tr("cancel", "batal"));
+            });
+        }
+    });
+    ui.add_space(6.0);
+
     Frame::NONE
-        .fill(p.panel)
-        .stroke(Stroke::new(1.0, p.border_strong))
+        .fill(p.raised)
         .corner_radius(if compact { 24 } else { R_LG })
-        .inner_margin(Margin { left: 14, right: 8, top: 8, bottom: 8 })
+        .inner_margin(Margin { left: 6, right: 6, top: 6, bottom: 6 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 ui.set_min_height(40.0);
-                let Some(recorder) = recorder else {
+                if saving {
+                    ui.add_space(8.0);
                     ui.label(rich(tr("Saving voice message…", "Menyimpan pesan suara…"), 14.0, Weight::Regular, p.muted));
                     return;
-                };
-                let cancel = widgets::icon_button(ui, "x", 32.0, false).on_hover_text(tr("Cancel recording (Esc)", "Batalkan rekaman (Esc)"));
-                if cancel.clicked() {
+                }
+                if round_button(ui, "trash", 36.0, p.red_soft, p.red, None, tr("Delete recording (Esc)", "Hapus rekaman (Esc)")) {
                     action = Recording::Cancel;
                 }
-                if recording.is_none() {
-                    ui.label(rich(tr("Preparing the microphone…", "Menyiapkan mikrofon…"), 14.0, Weight::Regular, p.muted));
+                if !recording {
+                    ui.label(rich(tr("Getting the microphone ready…", "Menyiapkan mikrofon…"), 14.0, Weight::Regular, p.muted));
                     return;
                 }
-                // Blinks once a second while recording.
-                let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
-                let on = recorder.elapsed().as_millis() % 1000 < 600;
-                ui.painter().circle_filled(dot.center(), 5.0, if on { p.red } else { p.red.gamma_multiply(0.35) });
-                let clock = format!("{}:{:02}", elapsed / 60, elapsed % 60);
-                ui.label(rich_mono(&clock, 14.0, p.text));
-                let meter_w = (ui.available_width() - 60.0).max(40.0);
-                let (meter, _) = ui.allocate_exact_size(vec2(meter_w, 6.0), Sense::hover());
-                ui.painter().rect_filled(meter, 3.0, p.border);
-                // Speech peaks are low; the square root makes the bar readable.
-                let filled = meter.width() * recorder.level().sqrt();
-                ui.painter().rect_filled(egui::Rect::from_min_size(meter.min, vec2(filled, meter.height())), 3.0, p.primary);
-                let (rect, response) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
-                ui.painter().circle_filled(rect.center(), 20.0, p.primary);
-                icons::paint(ui, Rect::from_center_size(rect.center() + vec2(-1.0, 1.0), vec2(18.0, 18.0)), "send", 18.0, p.on_primary);
-                if response.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text(tr("Send voice message (Enter)", "Kirim pesan suara (Enter)")).clicked() {
-                    action = Recording::Send;
+                let clock = format!("{}:{:02}", elapsed as u32 / 60, elapsed as u32 % 60);
+                let right = if paused { 36.0 + 40.0 + 130.0 + 30.0 } else { 36.0 + 40.0 + 20.0 };
+                if paused {
+                    let listening = listen.is_some_and(|s| s.playing);
+                    if round_button(ui, if listening { "pause" } else { "play" }, 36.0, p.primary, p.on_primary, None, tr("Listen (Space)", "Dengarkan (Spasi)")) {
+                        action = Recording::Listen;
+                    }
+                    let played = listen.map(|s| s.position / s.duration.max(0.01)).unwrap_or(0.0);
+                    let width = (ui.available_width() - right - 70.0).max(40.0);
+                    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+                    paint_note_wave(ui, rect, wave.as_deref().map(Vec::as_slice).unwrap_or(&[]), played, p.primary, p.border_strong);
+                    let heard = listen.map(|s| format!("{}:{:02} / ", s.position as u32 / 60, s.position as u32 % 60)).unwrap_or_default();
+                    ui.label(rich_mono(&format!("{heard}{clock}"), 13.0, p.text_2));
+                } else {
+                    // Blinks once a second while recording.
+                    let (dot, _) = ui.allocate_exact_size(vec2(10.0, 10.0), Sense::hover());
+                    let on = (elapsed * 1000.0) as u64 % 1000 < 600;
+                    ui.painter().circle_filled(dot.center(), 5.0, if on { p.red } else { p.red.gamma_multiply(0.35) });
+                    ui.label(rich_mono(&clock, 14.0, p.text));
+                    let width = (ui.available_width() - right).max(40.0);
+                    let (rect, _) = ui.allocate_exact_size(vec2(width, 32.0), Sense::hover());
+                    paint_live_wave(ui, rect, wave.as_deref().map(Vec::as_slice).unwrap_or(&[]), sampled.as_deref().copied().flatten(), p.primary);
                 }
+                ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 8.0;
+                    if round_button(ui, "send", 40.0, p.primary, p.on_primary, None, tr("Send voice message (Enter)", "Kirim pesan suara (Enter)")) {
+                        action = Recording::Send;
+                    }
+                    if paused {
+                        let resume = widgets::button(ui, Some("mic"), tr("Resume", "Lanjut rekam"), Kind::Secondary);
+                        if resume.clicked() {
+                            action = Recording::Resume;
+                        }
+                    } else if round_button(ui, "pause", 36.0, p.panel, p.text, Some(p.border_strong), tr("Pause (Space)", "Jeda (Spasi)")) {
+                        action = Recording::Pause;
+                    }
+                });
             });
         });
     action
+}
+
+/// Playback of the paused note, when it is the one in the player.
+fn player_status_preview() -> Option<crate::backend::player::Playback> {
+    crate::backend::player::status(PREVIEW)
 }
 
 /// The microphone button: starts recording a voice note for this chat.
@@ -2150,7 +2316,7 @@ fn mic_button(ui: &mut Ui, voice: &mut Option<VoiceNote>, session: &str, chat: &
     let button = ui.add_enabled_ui(connected, |ui| widgets::icon_button(ui, "mic", size, false)).inner;
     if button.on_hover_text(tr("Record a voice message", "Rekam pesan suara")).clicked() {
         let recorder = crate::backend::voice::Recorder::start();
-        *voice = Some(VoiceNote { session: session.to_owned(), chat: chat.to_owned(), step: VoiceStep::Recording(recorder) });
+        *voice = Some(VoiceNote::new(session, chat, VoiceStep::Recording(recorder)));
     }
 }
 
@@ -2202,7 +2368,7 @@ fn voice_note(ui: &mut Ui, p: &Palette, state: &mut State, session: &SessionView
             Err(std::sync::mpsc::TryRecvError::Empty) => {
                 ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
                 if here {
-                    recording_bar(ui, p, None, compact);
+                    recording_bar(ui, p, None, &session.name, compact);
                     return Err(());
                 }
             }
@@ -2225,14 +2391,46 @@ fn voice_note(ui: &mut Ui, p: &Palette, state: &mut State, session: &SessionView
                 note.step = failed(e);
                 return Ok(None);
             }
-            match recording_bar(ui, p, Some(recorder), compact) {
+            // The paused note arrived from the recording thread: play it.
+            if let Some(pcm) = note.preview.as_ref().and_then(|r| r.try_recv().ok()) {
+                note.preview = None;
+                crate::backend::player::play_buffer(PREVIEW, pcm);
+            }
+            match recording_bar(ui, p, Some(note), &session.name, compact) {
                 Recording::Keep => {}
-                Recording::Cancel => state.voice = None,
+                Recording::Cancel => {
+                    crate::backend::player::forget(PREVIEW);
+                    state.voice = None;
+                }
+                Recording::Pause => {
+                    if let Some(VoiceNote { step: VoiceStep::Recording(recorder), .. }) = state.voice.as_mut() {
+                        recorder.pause();
+                    }
+                }
+                Recording::Resume => {
+                    crate::backend::player::forget(PREVIEW);
+                    if let Some(VoiceNote { step: VoiceStep::Recording(recorder), sampled, .. }) = state.voice.as_mut() {
+                        recorder.resume();
+                        *sampled = None;
+                    }
+                }
+                Recording::Listen => {
+                    if crate::backend::player::status(PREVIEW).is_some() {
+                        crate::backend::player::toggle(PREVIEW, Path::new(""));
+                    } else if let Some(note) = state.voice.as_mut() {
+                        if let VoiceStep::Recording(recorder) = &note.step {
+                            note.preview = Some(recorder.preview());
+                        }
+                    }
+                }
                 Recording::Send => {
-                    let VoiceStep::Recording(recorder) = std::mem::replace(&mut note.step, VoiceStep::Failed(String::new(), std::time::Instant::now())) else {
-                        unreachable!("matched above")
-                    };
-                    note.step = VoiceStep::Saving(recorder.finish(crate::platform::data_dir().join("voice")));
+                    crate::backend::player::forget(PREVIEW);
+                    if let Some(note) = state.voice.as_mut() {
+                        let VoiceStep::Recording(recorder) = std::mem::replace(&mut note.step, VoiceStep::Failed(String::new(), std::time::Instant::now())) else {
+                            unreachable!("matched above")
+                        };
+                        note.step = VoiceStep::Saving(recorder.finish(crate::platform::data_dir().join("voice")));
+                    }
                 }
             }
             return Err(());
@@ -3073,6 +3271,23 @@ fn compact_chat(
         });
     });
     commands
+}
+
+#[cfg(test)]
+mod wave_tests {
+    use super::*;
+
+    #[test]
+    fn wave_heights_are_log_scaled() {
+        assert_eq!(wave_height(0.0, 32.0), 3.0);
+        assert_eq!(wave_height(1.0, 32.0), 32.0);
+        // Quiet speech (about -30 dB) is already well above the dot.
+        assert!(wave_height(0.03, 32.0) > 12.0);
+        assert_eq!(voice_bars(&[]).len(), VOICE_BARS);
+        let bars = voice_bars(&(0..64).map(|i| i as u8).collect::<Vec<_>>());
+        assert_eq!(bars.len(), VOICE_BARS);
+        assert!(bars.windows(2).all(|w| w[0] <= w[1]));
+    }
 }
 
 #[cfg(test)]
