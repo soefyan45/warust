@@ -740,7 +740,16 @@ async fn run(
     // again until the lock frees, instead of staying "Dipakai proses lain".
     let mut retry = tokio::time::interval(LOCK_RETRY);
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Pictures asked for a number not running yet, sent once it runs (#116).
+    let mut waiting_avatars: HashMap<String, Vec<String>> = HashMap::new();
     loop {
+        waiting_avatars.retain(|id, jids| match running.get(id) {
+            Some(r) => {
+                jids.drain(..).for_each(|jid| r.request_avatar(jid));
+                false
+            }
+            None => stores.contains_key(id),
+        });
         let command = tokio::select! {
             command = commands.recv() => match command {
                 Some(command) => command,
@@ -1014,11 +1023,10 @@ async fn run(
                     _ => log::warn!("download: nothing to download for a message in {id}"),
                 }
             }
-            Command::Avatar { id, jid } => {
-                if let Some(r) = running.get(&id) {
-                    r.request_avatar(jid);
-                }
-            }
+            Command::Avatar { id, jid } => match running.get(&id) {
+                Some(r) => r.request_avatar(jid),
+                None => waiting_avatars.entry(id).or_default().push(jid),
+            },
             Command::AvatarFull { id, jid } => {
                 if let Some(r) = running.get(&id) {
                     let (client, state) = (r.client(), state.clone());
