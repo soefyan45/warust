@@ -26,9 +26,18 @@ use super::registry::Registry;
 use super::store::{self, Delivery, Store};
 use super::{Status, Updater};
 
-/// Name shown in the phone's Linked devices list. Never the hostname, which
-/// would leak the machine's name to every linked phone.
-const DEVICE_NAME: &str = "Warust";
+/// What WhatsApp is told this device is, for the phone's Linked devices list.
+fn platform(kind: super::registry::DeviceKind) -> wa::device_props::PlatformType {
+    use super::registry::DeviceKind;
+    use wa::device_props::PlatformType;
+    match kind {
+        DeviceKind::Desktop => PlatformType::DESKTOP,
+        DeviceKind::Chrome => PlatformType::CHROME,
+        DeviceKind::Firefox => PlatformType::FIREFOX,
+        DeviceKind::Safari => PlatformType::SAFARI,
+        DeviceKind::Edge => PlatformType::EDGE,
+    }
+}
 
 
 /// Messages asked for per "load older" click.
@@ -535,12 +544,14 @@ pub async fn start(id: &str, registry: &Registry, state: &Updater, chats: Arc<Mu
     // Groups whose subject was already asked for, so it is fetched once.
     let asked: Arc<Mutex<HashSet<String>>> = Arc::default();
     let messages = (state.clone(), id.to_owned(), chats.clone(), asked);
+    // Sent while pairing: the name and type the phone lists this device under (#82).
+    let shown = registry.device(id);
     let bot = Bot::builder()
         .with_backend(device)
         .with_device_props(
             DevicePropsOverride::new()
-                .with_os(DEVICE_NAME)
-                .with_platform_type(wa::device_props::PlatformType::DESKTOP),
+                .with_os(shown.name.as_str())
+                .with_platform_type(platform(shown.kind)),
         )
         .on_event(move |event, client| {
             let (state, id, chats, queue, restored) = events.clone();

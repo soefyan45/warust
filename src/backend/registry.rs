@@ -12,6 +12,64 @@ use whatsapp_rust::serde_json::{self, Value, json};
 pub struct Entry {
     pub id: String,
     pub name: String,
+    /// How the number shows on the phone's Linked devices list (#82).
+    pub device: Device,
+}
+
+/// The linked-device name and type a session sends when it pairs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Device {
+    pub name: String,
+    pub kind: DeviceKind,
+}
+
+impl Default for Device {
+    fn default() -> Self {
+        Self { name: DEFAULT_DEVICE_NAME.to_owned(), kind: DeviceKind::Desktop }
+    }
+}
+
+/// Never the hostname, which would leak the machine's name to every linked phone.
+pub const DEFAULT_DEVICE_NAME: &str = "Warust";
+
+/// The device types offered for the Linked devices list; WhatsApp's
+/// `DeviceProps.PlatformType` has more, these are the computer ones.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceKind {
+    Desktop,
+    Chrome,
+    Firefox,
+    Safari,
+    Edge,
+}
+
+impl DeviceKind {
+    pub const ALL: [DeviceKind; 5] = [DeviceKind::Desktop, DeviceKind::Chrome, DeviceKind::Firefox, DeviceKind::Safari, DeviceKind::Edge];
+
+    /// The key in `sessions.json` and the REST API.
+    pub fn code(self) -> &'static str {
+        match self {
+            DeviceKind::Desktop => "desktop",
+            DeviceKind::Chrome => "chrome",
+            DeviceKind::Firefox => "firefox",
+            DeviceKind::Safari => "safari",
+            DeviceKind::Edge => "edge",
+        }
+    }
+
+    pub fn parse(code: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.code() == code.trim().to_ascii_lowercase())
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DeviceKind::Desktop => "Desktop",
+            DeviceKind::Chrome => "Chrome",
+            DeviceKind::Firefox => "Firefox",
+            DeviceKind::Safari => "Safari",
+            DeviceKind::Edge => "Edge",
+        }
+    }
 }
 
 pub struct Registry {
@@ -30,10 +88,12 @@ impl Registry {
             .unwrap_or_default()
             .iter()
             .filter_map(|item| {
-                Some(Entry {
-                    id: item.get("id")?.as_str()?.to_owned(),
-                    name: item.get("name")?.as_str()?.to_owned(),
-                })
+                let text = |key: &str| item.get(key).and_then(Value::as_str);
+                let device = Device {
+                    name: text("device_name").map(str::to_owned).unwrap_or_else(|| DEFAULT_DEVICE_NAME.to_owned()),
+                    kind: text("device_type").and_then(DeviceKind::parse).unwrap_or(DeviceKind::Desktop),
+                };
+                Some(Entry { id: text("id")?.to_owned(), name: text("name")?.to_owned(), device })
             })
             .collect();
         // Device stores without an entry (created before the registry existed).
@@ -44,7 +104,7 @@ impl Registry {
                 .filter(|id| !entries.iter().any(|e| &e.id == id))
                 .collect();
             found.sort();
-            entries.extend(found.into_iter().map(|id| Entry { name: id.clone(), id }));
+            entries.extend(found.into_iter().map(|id| Entry { name: id.clone(), id, device: Device::default() }));
         }
         let registry = Self { dir, entries };
         registry.save();
@@ -55,7 +115,7 @@ impl Registry {
         let list: Vec<Value> = self
             .entries
             .iter()
-            .map(|e| json!({ "id": e.id, "name": e.name }))
+            .map(|e| json!({ "id": e.id, "name": e.name, "device_name": e.device.name, "device_type": e.device.kind.code() }))
             .collect();
         let path = self.dir.with_file_name("sessions.json");
         let text = serde_json::to_string_pretty(&list).unwrap_or_else(|_| "[]".to_owned());
@@ -64,9 +124,22 @@ impl Registry {
         }
     }
 
-    pub fn add(&mut self, id: &str, name: &str) {
-        self.entries.push(Entry { id: id.to_owned(), name: name.to_owned() });
+    pub fn add(&mut self, id: &str, name: &str, device: Device) {
+        self.entries.push(Entry { id: id.to_owned(), name: name.to_owned(), device });
         self.save();
+    }
+
+    /// What the session sends when it pairs; the default for an unknown id.
+    pub fn device(&self, id: &str) -> Device {
+        self.entries.iter().find(|e| e.id == id).map(|e| e.device.clone()).unwrap_or_default()
+    }
+
+    /// Changes the linked-device name and type; `clean_name` checks the name first.
+    pub fn set_device(&mut self, id: &str, device: Device) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.id == id) {
+            entry.device = device;
+            self.save();
+        }
     }
 
     /// Gives a number a new name; `clean_name` checks it first.
@@ -137,6 +210,22 @@ pub fn clean_name(raw: &str) -> Result<String, &'static str> {
 #[cfg(test)]
 mod name_tests {
     use super::*;
+
+    #[test]
+    fn device_name_and_type_are_kept_per_session() {
+        let dir = std::env::temp_dir().join(format!("warust-registry-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mut registry = Registry::load(&dir);
+        registry.add("s1", "CS", Device::default());
+        registry.set_device("s1", Device { name: "Kasir".into(), kind: DeviceKind::Chrome });
+        let again = Registry::load(&dir);
+        assert_eq!(again.device("s1"), Device { name: "Kasir".into(), kind: DeviceKind::Chrome });
+        // Older entries without the fields, and unknown ids, are "Warust" on Desktop.
+        assert_eq!(again.device("nope"), Device::default());
+        assert_eq!(DeviceKind::parse(" Firefox "), Some(DeviceKind::Firefox));
+        assert_eq!(DeviceKind::parse("tv"), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn names_are_cleaned() {

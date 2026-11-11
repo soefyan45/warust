@@ -134,7 +134,7 @@ curl -X POST http://127.0.0.1:8787/sessions/<id>/messages/text \
 | Endpoint | Guna |
 |---|---|
 | `GET /healthz` | Cek server hidup (tanpa API key) |
-| `GET /sessions` · `POST /sessions` | Daftar nomor dan statusnya · tambah nomor baru |
+| `GET /sessions` · `POST /sessions` | Daftar nomor dan statusnya · tambah nomor baru; opsional `name`, `device_name` (tampil di daftar Perangkat tertaut di HP, default `Warust`) dan `device_type` (`desktop`, `chrome`, `firefox`, `safari`, `edge`) |
 | `GET /sessions/{id}/qr` · `POST /sessions/{id}/pair-code` | QR atau kode pairing |
 | `POST /sessions/{id}/messages/text` | Kirim teks lewat antrean anti-ban |
 | `POST /sessions/{id}/messages/media` | Foto, video (MP4/MOV), dokumen atau stiker dari `path` atau `url` |

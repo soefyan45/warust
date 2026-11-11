@@ -123,6 +123,8 @@ fn session_json(view: &SessionView, shared_webhook: Option<&str>) -> Value {
     json!({
         "id": view.id,
         "name": view.name,
+        "device_name": view.device.name,
+        "device_type": view.device.kind.code(),
         "phone": view.phone,
         "status": status,
         "detail": detail,
@@ -165,6 +167,9 @@ async fn get_session(_: Authed, State(context): State<Context>, Path(id): Path<S
 #[derive(Deserialize, Default)]
 struct CreateSession {
     name: Option<String>,
+    /// How the number shows on the phone's Linked devices list (#82).
+    device_name: Option<String>,
+    device_type: Option<String>,
 }
 
 async fn create_session(_: Authed, State(context): State<Context>, body: Option<Json<CreateSession>>) -> Answer {
@@ -176,14 +181,23 @@ async fn create_session(_: Authed, State(context): State<Context>, body: Option<
     while context.shared.lock().is_ok_and(|s| s.sessions.iter().any(|v| v.id == id)) {
         id.push('b');
     }
+    let body = body.map(|Json(b)| b).unwrap_or_default();
+    let mut device = super::Device::default();
+    if let Some(raw) = body.device_name.as_deref() {
+        device.name = super::clean_name(raw).map_err(|why| error(StatusCode::BAD_REQUEST, "invalid_device_name", why))?;
+    }
+    if let Some(code) = body.device_type.as_deref() {
+        device.kind = super::DeviceKind::parse(code)
+            .ok_or_else(|| error(StatusCode::BAD_REQUEST, "invalid_device_type", "device_type must be desktop, chrome, firefox, safari or edge"))?;
+    }
     let name = body
-        .and_then(|Json(b)| b.name)
+        .name
         .map(|n| n.trim().to_owned())
         .filter(|n| !n.is_empty())
         .unwrap_or_else(|| crate::trf!("Number {}", "Nomor {}", count + 1));
-    send(&context, Command::Add { id: id.clone(), name: name.clone() })?;
+    send(&context, Command::Add { id: id.clone(), name: name.clone(), device: device.clone() })?;
     let next = format!("GET /sessions/{id}/qr for the QR, or POST /sessions/{id}/pair-code");
-    Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": name, "status": "starting", "next": next }))).into_response())
+    Ok((StatusCode::CREATED, Json(json!({ "id": id, "name": name, "device_name": device.name, "device_type": device.kind.code(), "status": "starting", "next": next }))).into_response())
 }
 
 async fn get_qr(_: Authed, State(context): State<Context>, Path(id): Path<String>) -> Answer {
