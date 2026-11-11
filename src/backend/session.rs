@@ -343,6 +343,11 @@ impl Running {
         let _ = self.queue.send(Outgoing { local_id: String::new(), chat, body: Body::Edit { target, text } });
     }
 
+    /// The WhatsApp client, for calls placed from a chat.
+    pub fn client(&self) -> Arc<Client> {
+        self.client.clone()
+    }
+
     pub fn request_avatar(&self, jid: String) {
         let _ = self.avatars.send(jid);
     }

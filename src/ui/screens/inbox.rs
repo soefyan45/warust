@@ -140,6 +140,7 @@ pub fn show(
         .resizable(false)
         .frame(Frame::NONE.fill(surface).corner_radius(theme::top_corners()).inner_margin(Margin { left: 24, right: 16, top: 0, bottom: 0 }))
         .show(ui, |ui| {
+            let call_on = state.call_now.is_some();
             widgets::row(
                 ui,
                 52.0,
@@ -171,6 +172,8 @@ pub fn show(
                     if widgets::icon_button(ui, "panel-right", 32.0, state.contact_panel).clicked() {
                         state.contact_panel = !state.contact_panel;
                     }
+                    ui.add_space(4.0);
+                    call_buttons(ui, &p, call_on, session, chat, 40.0, &mut commands);
                     // A group only while a mention waits: marking it done clears the `@`.
                     if !chat.is_group() || chat.mention_pending() || chat.is_done() {
                         ui.add_space(4.0);
@@ -344,6 +347,38 @@ fn typing_color(p: &Palette) -> Color32 {
 
 /// "Tandai selesai", or "Selesai" on a done chat (a click opens it again).
 /// Returns the new state when clicked.
+/// The round video and voice call buttons of a 1:1 chat's header (Pego
+/// `Ref · Chat lengkap`), laid out right to left. Off while the number is not
+/// connected or another call is on; video also without ffmpeg.
+fn call_buttons(ui: &mut Ui, p: &Palette, call_on: bool, session: &SessionView, chat: &Chat, size: f32, commands: &mut Vec<Command>) {
+    if chat.is_group() {
+        return;
+    }
+    let free = !call_on && session.status == Status::Connected;
+    let ffmpeg = crate::backend::video::ffmpeg().is_some();
+    let busy = if call_on {
+        tr("A call is already on", "Sedang ada panggilan")
+    } else {
+        tr("This number is not connected", "Nomor ini tidak terhubung")
+    };
+    let buttons = [
+        (true, "video", free && ffmpeg, if !free { busy } else if !ffmpeg { tr("Video calls need ffmpeg installed", "Video call butuh ffmpeg terpasang") } else { tr("Video call", "Video call") }),
+        (false, "phone", free, if free { tr("Voice call", "Panggilan suara") } else { busy }),
+    ];
+    for (video, icon, enabled, hint) in buttons {
+        ui.add_space(4.0);
+        let (rect, response) = ui.allocate_exact_size(vec2(size, size), if enabled { Sense::click() } else { Sense::hover() });
+        let lift = ui.ctx().animate_bool_with_time(response.id, enabled && response.hovered(), 0.12);
+        let fill = if enabled { p.accent_soft } else { p.raised };
+        ui.painter().circle_filled(rect.center(), size / 2.0 + lift, fill);
+        icons::paint(ui, rect, icon, size * 0.45, if enabled { p.primary } else { p.muted });
+        let response = response.on_hover_text(hint);
+        if enabled && response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            commands.push(Command::PlaceCall { id: session.id.clone(), chat: chat.jid.clone(), video });
+        }
+    }
+}
+
 fn done_button(ui: &mut Ui, chat: &Chat) -> Option<bool> {
     let done = chat.is_done();
     let (icon, label, hint) = if done {
@@ -1079,6 +1114,8 @@ enum MediaClick {
     Download(String),
     /// A downloaded PDF and its title, for the in-app viewer.
     OpenPdf(PathBuf, String),
+    /// "Call back" on a call's line: a video call (true) or a voice call.
+    Call(bool),
 }
 
 const PREVIEW_HEIGHT: f32 = 140.0;
@@ -1094,7 +1131,7 @@ impl MediaBox {
             MediaBox::Sticker(_) => STICKER,
             MediaBox::Document { .. } => vec2(CARD.x, PREVIEW_HEIGHT + CARD.y),
             MediaBox::Voice(width) => vec2(*width, VOICE_HEIGHT),
-            MediaBox::Call => vec2(250.0, 44.0),
+            MediaBox::Call => vec2(250.0, 84.0),
         }
     }
 }
@@ -1224,17 +1261,26 @@ fn media_action(m: &ChatMsg, media: &Media, downloads: &Downloads) -> MediaState
 
 /// A call's line in the chat (Pego `FM/Call/LogBubble`): a red icon for a
 /// missed or declined call, else a soft one; what happened and when.
-fn paint_call_log(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media) {
+fn paint_call_log(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media) -> Option<MediaClick> {
     let out = media.raw.get("out").and_then(|v| v.as_str()).unwrap_or("missed");
     let video = media.raw.get("video").and_then(|v| v.as_bool()).unwrap_or(false);
     let seconds = media.raw.get("secs").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-    let bad = matches!(out, "missed" | "declined" | "failed");
-    let (fill, glyph) = if bad { (p.red_soft, p.red) } else { (p.accent_soft, p.accent_text) };
-    let icon = match (bad, video) {
-        (true, _) => "phone-missed",
-        (false, true) => "video",
-        (false, false) => "phone",
+    // Ours went out; a call to us that we did not take is the red kind.
+    let mine = m.from_me;
+    let bad = out == "failed" || (!mine && matches!(out, "missed" | "declined"));
+    let (fill, glyph) = match (bad, mine && out != "outgoing") {
+        (true, _) => (p.red_soft, p.red),
+        (false, true) => (p.raised, p.muted),
+        (false, false) => (p.accent_soft, p.accent_text),
     };
+    let icon = match (bad, mine, video) {
+        (true, _, _) => "phone-missed",
+        (false, _, true) => "video",
+        (false, true, false) => "phone-outgoing",
+        (false, false, false) => "phone",
+    };
+    let (line, button) = (Rect::from_min_size(rect.min, vec2(rect.width(), 44.0)), Rect::from_min_max(pos2(rect.left(), rect.bottom() - 34.0), rect.max));
+    let rect = line;
     let center = pos2(rect.left() + 18.0, rect.center().y);
     ui.painter().circle_filled(center, 18.0, fill);
     icons::paint(ui, Rect::from_center_size(center, vec2(16.0, 16.0)), icon, 16.0, glyph);
@@ -1244,7 +1290,24 @@ fn paint_call_log(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media) 
     let text = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top() + 2.0), pos2(rect.right(), rect.top() + 22.0));
     widgets::paint_text(ui, text, title, fonts::ui(13.5, Weight::SemiBold), fg, Align::Min);
     let when = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top() + 22.0), pos2(rect.right(), rect.bottom()));
-    widgets::paint_text(ui, when, &time::clock(m.ts), fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
+    let sub = if mine { p.on_primary_muted } else { p.muted };
+    widgets::paint_text(ui, when, &time::clock(m.ts), fonts::ui(12.0, Weight::Regular), sub, Align::Min);
+    // "Call back" after one we missed, "Call again" otherwise (Pego `FM/Call/LogBubble`).
+    let label = match (!mine && matches!(out, "missed" | "declined"), video) {
+        (true, false) => tr("Call back", "Telepon balik"),
+        (true, true) => tr("Video call back", "Video call balik"),
+        (false, false) => tr("Call again", "Telepon lagi"),
+        (false, true) => tr("Video call again", "Video call lagi"),
+    };
+    let response = ui.interact(button, ui.scope_id().with(("call_back", &m.id)), Sense::click());
+    let (back, fg) = if mine { (p.on_primary.gamma_multiply(if response.hovered() { 0.2 } else { 0.12 }), p.on_primary) } else { (if response.hovered() { p.border } else { p.raised }, p.primary) };
+    ui.painter().rect_filled(button, R_MD, back);
+    let text = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(12.5, Weight::SemiBold), fg);
+    let width = text.size().x + 22.0;
+    let start = pos2(button.center().x - width / 2.0, button.center().y);
+    icons::paint(ui, Rect::from_center_size(start + vec2(7.0, 0.0), vec2(14.0, 14.0)), if video { "video" } else { "phone" }, 14.0, fg);
+    ui.painter().galley(pos2(start.x + 22.0, start.y - text.size().y / 2.0), text, fg);
+    response.on_hover_cursor(CursorIcon::PointingHand).clicked().then_some(MediaClick::Call(video))
 }
 
 const VOICE_HEIGHT: f32 = 46.0;
@@ -1538,8 +1601,7 @@ fn paint_media(
         return paint_voice(ui, p, rect, m, media, downloads);
     }
     if matches!(shown, MediaBox::Call) {
-        paint_call_log(ui, p, rect, m, media);
-        return None;
+        return paint_call_log(ui, p, rect, m, media);
     }
     let state = media_action(m, media, downloads);
     let action = state.label();
@@ -1779,6 +1841,11 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
     match event {
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
+        MsgEvent::Media(MediaClick::Call(video)) => {
+            if state.call_now.is_none() && !chat.is_group() {
+                commands.push(Command::PlaceCall { id: session.id.clone(), chat: chat.jid.clone(), video });
+            }
+        }
         // Handled inline where the menu is shown.
         MsgEvent::Menu(MsgAction::Copy, _) => {}
         MsgEvent::Menu(MsgAction::Forward, msg_id) => {
@@ -3936,6 +4003,7 @@ fn compact_chat(
         .show(ui, |ui| {
             let bar = ui.max_rect().expand2(vec2(8.0, 0.0));
             ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, p.border));
+            let call_on = state.call_now.is_some();
             widgets::row(
                 ui,
                 64.0,
@@ -3964,6 +4032,7 @@ fn compact_chat(
                 },
                 |ui| {
                     let menu = widgets::icon_button(ui, "ellipsis-vertical", 36.0, false);
+                    call_buttons(ui, &p, call_on, session, chat, 36.0, &mut commands);
                     egui::Popup::menu(&menu).show(|ui| {
                         ui.set_min_width(200.0);
                         if ui.button(tr("Load older messages from phone", "Muat pesan lama dari HP")).clicked() {

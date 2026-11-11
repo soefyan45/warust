@@ -231,8 +231,10 @@ pub enum Command {
     /// The ringing call: answer or decline it (#39).
     AnswerCall,
     DeclineCall,
-    /// Hang up the call in progress.
+    /// Hang up the call in progress (or cancel ours before it is answered).
     EndCall,
+    /// Call the contact of a 1:1 chat from its number (#39 stage 2, #55).
+    PlaceCall { id: String, chat: String, video: bool },
     /// Mute our microphone, or silence the caller on our speaker.
     MuteCall(bool),
     SpeakerOff(bool),
@@ -858,6 +860,10 @@ async fn run(
             Command::AnswerCall => call::answer(&state),
             Command::DeclineCall => call::decline(&state),
             Command::EndCall => call::end(&state),
+            Command::PlaceCall { id, chat, video } => match (running.get(&id), stores.get(&id)) {
+                (Some(r), Some(store)) => call::place(&state, &id, &r.client(), store, &chat, video),
+                _ => log::warn!("call: session {id} is not running"),
+            },
             Command::MuteCall(muted) => call::set_muted(&state, muted),
             Command::SpeakerOff(off) => call::set_speaker_off(&state, off),
             Command::CameraCall(on) => call::set_camera(&state, on),
