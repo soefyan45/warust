@@ -178,6 +178,8 @@ pub struct State {
     /// The voice call from the backend (#39), and whether the phone layout
     /// shows it as a banner.
     pub call_now: Option<backend::call::CallView>,
+    /// The latest release check (#93), for the banner and Settings.
+    pub update: backend::update::UpdateState,
     pub call_minimized: bool,
     /// The call's video pictures as textures (#55).
     pub call_textures: call::Textures,
@@ -295,6 +297,8 @@ pub struct App {
     seen: seen::Watch,
     /// The unread count last shown on the taskbar icon and the title.
     shown_unread: Option<u32>,
+    /// A ready update was asked to install (once per download, #93).
+    update_asked: bool,
     /// Numbers open in windows of their own (issue #28).
     windows: Vec<NumberWindow>,
 }
@@ -368,6 +372,7 @@ impl App {
             lock: privacy::Lock::default(),
             windows: Vec::new(),
             shown_unread: None,
+            update_asked: false,
             state: State {
                 contact_panel: true,
                 // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
@@ -530,6 +535,83 @@ impl App {
                     });
                 });
             });
+    }
+
+    /// The update bar under the top bar (#93): a new release to download
+    /// (What's new, Download, Later), or, installing by itself, its download,
+    /// "installs when idle" and the install. Once nothing is going on (no
+    /// call, empty queues, no recording, nothing typed) a ready update
+    /// installs, and the window closes for warust to start again.
+    fn update_banner(&mut self, ui: &mut Ui) {
+        use backend::update::UpdateState;
+        let update = self.state.update.clone();
+        if !matches!(update, UpdateState::Ready(_)) {
+            self.update_asked = false;
+        }
+        let (text, release, buttons) = match &update {
+            UpdateState::Restarting => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            UpdateState::Available(r) if self.settings.updates.skipped != r.version => (
+                crate::trf!("warust {} is available (you have {})", "warust {} sudah tersedia (terpasang {})", r.version, backend::update::current()),
+                r.clone(),
+                true,
+            ),
+            UpdateState::Downloading(r) => (crate::trf!("Downloading warust {}…", "Mengunduh warust {}…", r.version), r.clone(), false),
+            UpdateState::Installing(r) => (crate::trf!("Installing warust {}; warust restarts by itself", "Memasang warust {}; warust akan mulai ulang sendiri", r.version), r.clone(), false),
+            UpdateState::Ready(r) => {
+                let idle = self.state.call_now.is_none()
+                    && self.sessions.iter().all(|s| s.queue == 0)
+                    && self.state.voice.is_none()
+                    && self.state.composer.trim().is_empty();
+                if idle && !self.update_asked {
+                    self.update_asked = true;
+                    self.backend.send(Command::InstallUpdate);
+                }
+                // Looks again for an idle moment even when nothing repaints.
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
+                (crate::trf!("warust {} is ready and installs once warust is idle", "warust {} siap dan dipasang saat warust tidak dipakai", r.version), r.clone(), false)
+            }
+            _ => return,
+        };
+        let p = theme::palette(ui.ctx());
+        let mut later = false;
+        Panel::top("update_banner")
+            .exact_size(44.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::NONE.fill(p.accent_soft).inner_margin(Margin::symmetric(16, 0)))
+            .show(ui, |ui| {
+                widgets::row(
+                    ui,
+                    44.0,
+                    |ui| {
+                        icons::show(ui, if buttons { "download" } else { "loader-circle" }, 16.0, p.accent_text);
+                        ui.add_space(4.0);
+                        ui.add(egui::Label::new(rich(&text, 13.0, Weight::SemiBold, p.accent_text)).truncate());
+                    },
+                    |ui| {
+                        if !buttons {
+                            return;
+                        }
+                        if widgets::button(ui, None, tr("Later", "Nanti"), Kind::Secondary).clicked() {
+                            later = true;
+                        }
+                        if widgets::button(ui, None, tr("What's new", "Apa yang baru"), Kind::Secondary).clicked() {
+                            crate::platform::open_url(&release.page);
+                        }
+                        if widgets::button(ui, Some("download"), tr("Download", "Unduh"), Kind::Primary).clicked() {
+                            crate::platform::open_url(&release.download);
+                        }
+                    },
+                );
+            });
+        if later {
+            let mut settings = (*self.settings).clone();
+            settings.updates.skipped = release.version.clone();
+            self.backend.send(Command::SaveSettings(settings));
+        }
     }
 
     /// Forest: brand, pill navigation, API state and the window buttons in one
@@ -1133,6 +1215,7 @@ impl eframe::App for App {
         self.state.members_now = snapshot.members;
         self.state.groups_now = snapshot.groups;
         self.state.call_now = snapshot.call;
+        self.state.update = snapshot.update;
         if self.state.typing_now.values().any(backend::Typing::fresh) {
             // So a stale "mengetik…" disappears even when nothing else repaints.
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
@@ -1216,6 +1299,7 @@ impl eframe::App for App {
             self.sidebar(ui);
             self.topbar(ui);
         }
+        self.update_banner(ui);
         // Heights of compact::title_bar, topnav and the sidebar/topbar row.
         let bar = if compact { 40.0 } else if theme::template().top_nav() { 72.0 } else { 52.0 };
         // In full screen the title bar lives in AppKit's own toolbar window.

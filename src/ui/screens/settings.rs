@@ -495,6 +495,46 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                     ));
                 });
 
+                super::card(ui, tr("Updates", "Pembaruan"), tr("warust looks for new releases on GitHub. Nothing else is sent.", "warust mencari rilis baru di GitHub. Tidak ada data lain yang dikirim."), |ui| {
+                    use crate::backend::update::{UpdateState, current};
+                    let draft = form.draft.as_mut().expect("synced");
+                    line(ui, tr("Version", "Versi"), |ui| {
+                        ui.label(rich_mono(&format!("warust {}", current()), 12.0, p.text));
+                    });
+                    widgets::toggle(ui, &mut draft.updates.auto_check, tr("Check for updates automatically (on start and once a day)", "Cek pembaruan otomatis (saat dibuka dan sekali sehari)"));
+                    ui.add_enabled_ui(draft.updates.auto_check, |ui| {
+                        widgets::toggle(
+                            ui,
+                            &mut draft.updates.auto_install,
+                            tr("Install updates automatically, then restart (checked against the release's SHA-256)", "Pasang pembaruan otomatis lalu mulai ulang (dicek dengan SHA-256 rilis)"),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        let checking = state.update == UpdateState::Checking;
+                        let clicked = ui.add_enabled_ui(!checking, |ui| widgets::button(ui, Some("rotate-cw"), tr("Check now", "Cek sekarang"), Kind::Secondary)).inner.clicked();
+                        if clicked && !checking {
+                            commands.push(Command::CheckUpdate);
+                        }
+                        let (text, color) = match &state.update {
+                            UpdateState::Idle => (String::new(), p.muted),
+                            UpdateState::Checking => (tr("Checking…", "Mengecek…").to_owned(), p.muted),
+                            UpdateState::UpToDate => (tr("You have the latest version.", "Anda memakai versi terbaru.").to_owned(), p.muted),
+                            UpdateState::Available(r) => (crate::trf!("warust {} is available.", "warust {} sudah tersedia.", r.version), p.accent_text),
+                            UpdateState::Downloading(r) => (crate::trf!("Downloading warust {}…", "Mengunduh warust {}…", r.version), p.accent_text),
+                            UpdateState::Ready(r) => (crate::trf!("warust {} is ready; it installs once warust is idle.", "warust {} siap; dipasang saat warust sedang tidak dipakai.", r.version), p.accent_text),
+                            UpdateState::Installing(r) => (crate::trf!("Installing warust {}…", "Memasang warust {}…", r.version), p.accent_text),
+                            UpdateState::Restarting => (tr("Restarting…", "Memulai ulang…").to_owned(), p.accent_text),
+                            UpdateState::Failed(e) => (crate::trf!("Could not check: {e}", "Tidak bisa mengecek: {e}"), p.red_text),
+                        };
+                        ui.label(rich(&text, 12.0, Weight::Regular, color));
+                    });
+                    if let UpdateState::Available(r) = &state.update {
+                        if widgets::button(ui, Some("download"), tr("Download", "Unduh"), Kind::Primary).clicked() {
+                            crate::platform::open_url(&r.download);
+                        }
+                    }
+                });
+
                 super::card(ui, "Data", tr("Sessions, chats, media, and settings are stored on this computer.", "Sesi, chat, media, dan pengaturan disimpan di komputer ini."), |ui| {
                     line(ui, tr("Data folder", "Folder data"), |ui| {
                         ui.add(egui::Label::new(rich_mono(&data_dir.display().to_string(), 12.0, p.text)).truncate());

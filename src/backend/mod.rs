@@ -6,6 +6,7 @@
 mod api;
 pub mod call;
 pub mod video;
+pub mod update;
 pub mod movie;
 mod avatars;
 mod media;
@@ -117,6 +118,8 @@ pub struct Shared {
     pub sessions: Vec<SessionView>,
     /// Profile pictures by normalized JID: a cached file, or `None` for no picture.
     pub avatars: Arc<HashMap<String, Option<PathBuf>>>,
+    /// The latest release check (#93).
+    pub update: update::UpdateState,
     /// Full-size profile pictures asked for the photo viewer (#92), by JID.
     pub full_avatars: Arc<HashMap<String, Option<PathBuf>>>,
     /// Downloads by message id: `None` while running, else why it failed.
@@ -151,6 +154,28 @@ pub struct Member {
     pub jid: String,
     /// Phone-number JID when known: for `Book::name_of` and display.
     pub phone: Option<String>,
+}
+
+/// Shows what a check found; a new release that may install by itself is
+/// downloaded and checked first (#93 stage 2), off the async workers.
+fn fetch_update(state: &Updater, found: update::UpdateState) {
+    let update::UpdateState::Available(release) = found else {
+        state.set_update(found);
+        return;
+    };
+    if !(state.settings().updates.auto_install && update::installable()) {
+        state.set_update(update::UpdateState::Available(release));
+        return;
+    }
+    state.set_update(update::UpdateState::Downloading(release.clone()));
+    let state = state.clone();
+    std::thread::spawn(move || match update::download(&release) {
+        Ok(()) => state.set_update(update::UpdateState::Ready(release)),
+        Err(e) => {
+            log::warn!("update {}: {e}", release.version);
+            state.set_update(update::UpdateState::Available(release));
+        }
+    });
 }
 
 /// What the contact panel shows about a group (#91).
@@ -326,6 +351,10 @@ pub enum Command {
     EditMessage { id: String, chat: String, msg_id: String, text: String },
     /// Save new settings; restarts the API server when its part changed.
     SaveSettings(Settings),
+    /// Look for a new release now ("Check now" in Settings).
+    CheckUpdate,
+    /// Install the downloaded update now (the app is idle) and restart.
+    InstallUpdate,
     /// Send a `webhook.test` event to the global webhook URL.
     TestWebhook,
 }
@@ -354,6 +383,20 @@ impl Backend {
                     .build()
                     .expect("tokio runtime");
                 runtime.spawn(webhook::dispatcher(hook_events, state.clone()));
+    // New releases (#93): on start, then once a day, while the setting is on.
+    // A failed automatic check stays quiet.
+    let watcher = state.clone();
+    runtime.spawn(async move {
+        loop {
+            if watcher.settings().updates.auto_check {
+                let found = tokio::task::spawn_blocking(update::check).await.unwrap_or_default();
+                if !matches!(found, update::UpdateState::Failed(_)) {
+                    fetch_update(&watcher, found);
+                }
+            }
+            tokio::time::sleep(update::EVERY).await;
+        }
+    });
                 runtime.block_on(run(data_dir, state, receiver, api_commands));
             })
             .expect("whatsapp thread");
@@ -483,6 +526,17 @@ impl Updater {
     pub(crate) fn set_full_avatar(&self, jid: &str, picture: Option<PathBuf>) {
         if let Ok(mut shared) = self.shared.lock() {
             Arc::make_mut(&mut shared.full_avatars).insert(jid.to_owned(), picture);
+        }
+        self.ctx.request_repaint();
+    }
+
+    pub(crate) fn update_state(&self) -> update::UpdateState {
+        self.shared.lock().map(|s| s.update.clone()).unwrap_or_default()
+    }
+
+    pub(crate) fn set_update(&self, update: update::UpdateState) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.update = update;
         }
         self.ctx.request_repaint();
     }
@@ -863,6 +917,27 @@ async fn run(
                 (Some(r), Some(store)) => r.enqueue_as(&id, chat, body, local_id, &state, store),
                 _ => log::warn!("api send: session {id} is not running"),
             },
+            Command::CheckUpdate => {
+                state.set_update(update::UpdateState::Checking);
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || fetch_update(&state, update::check()));
+            }
+            Command::InstallUpdate => {
+                let release = match state.update_state() {
+                    update::UpdateState::Ready(release) => release,
+                    _ => continue,
+                };
+                state.set_update(update::UpdateState::Installing(release.clone()));
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || match update::install() {
+                    Ok(()) => state.set_update(update::UpdateState::Restarting),
+                    Err(e) => {
+                        log::warn!("update {}: install failed: {e}", release.version);
+                        // The banner's Download is still there.
+                        state.set_update(update::UpdateState::Available(release));
+                    }
+                });
+            }
             Command::SaveSettings(settings) => {
                 let old = state.settings();
                 settings.save(&data_dir);
