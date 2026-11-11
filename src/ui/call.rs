@@ -143,7 +143,7 @@ fn video_call(ctx: &Context, p: &Palette, call: &CallView, session: Option<&Sess
             None => {
                 let name = caller(call, session);
                 avatar_rings(ui, p, rect.center() - vec2(0.0, 30.0), 44.0, &crate::ui::screens::initials(&name), None);
-                let wait = if call.phase == Phase::Active { tr("Waiting for their video…", "Menunggu video mereka…") } else { tr("Connecting…", "Menyambungkan…") };
+                let wait = if call.phase == Phase::Active { tr("Waiting for their video…", "Menunggu video mereka…") } else { waiting(call) };
                 widgets::paint_text(ui, Rect::from_center_size(rect.center() + vec2(0.0, 50.0), vec2(rect.width(), 20.0)), wait, fonts::ui(13.0, Weight::Regular), Color32::from_white_alpha(200), egui::Align::Center);
             }
         }
@@ -420,7 +420,7 @@ fn in_call(ctx: &Context, p: &Palette, call: &CallView, session: Option<&Session
         widgets::paint_text(ui, Rect::from_center_size(center + vec2(0.0, 96.0), vec2(rect.width() - 24.0, 26.0)), &name, fonts::ui(19.0, Weight::SemiBold), p.on_primary, egui::Align::Center);
         let status = match call.connected_at {
             Some(t) if connected => clock(t.elapsed().as_secs()),
-            _ => tr("Connecting…", "Menyambungkan…").to_owned(),
+            _ => waiting(call).to_owned(),
         };
         widgets::paint_text(ui, Rect::from_center_size(center + vec2(0.0, 122.0), vec2(rect.width(), 18.0)), &status, fonts::mono(13.0), p.on_primary_muted, egui::Align::Center);
         // "Speaking", with a small wave, while the caller's voice is heard.
@@ -490,11 +490,22 @@ fn in_call(ctx: &Context, p: &Palette, call: &CallView, session: Option<&Session
         if control(&mut child, p, "video", "Video", soft, p.on_primary, can_video, hint) {
             asked = Some(Ask::StartVideo);
         }
-        if control(&mut child, p, "phone-off", tr("End", "Akhiri"), p.red, Color32::WHITE, true, tr("End the call", "Akhiri panggilan")) {
+        let (end, end_hint) = if call.phase == Phase::Calling { (tr("Cancel", "Batalkan"), tr("Cancel the call", "Batalkan panggilan")) } else { (tr("End", "Akhiri"), tr("End the call", "Akhiri panggilan")) };
+        if control(&mut child, p, "phone-off", end, p.red, Color32::WHITE, true, end_hint) {
             asked = Some(Ask::End);
         }
     });
     asked
+}
+
+/// What a call shows until it connects: ours "Calling…", then "Ringing…" once
+/// their phone rings; an answered one "Connecting…".
+fn waiting(call: &CallView) -> &'static str {
+    match (call.phase, call.ringing) {
+        (Phase::Calling, true) => tr("Ringing…", "Berdering…"),
+        (Phase::Calling, false) => tr("Calling…", "Memanggil…"),
+        _ => tr("Connecting…", "Menyambungkan…"),
+    }
 }
 
 /// Phone layout, minimised: a forest strip at the top (`m5/Call 4`); a tap

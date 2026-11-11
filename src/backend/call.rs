@@ -1,6 +1,7 @@
-//! WhatsApp voice calls (issue #39, stage 1: incoming 1:1 calls). One call at
-//! a time across every number: it rings (a tone and a notification), can be
-//! answered, declined or ended, muted, and the speaker silenced. Audio runs
+//! WhatsApp voice calls (issue #39): incoming 1:1 calls (stage 1) and calls
+//! placed from a chat (stage 2). One call at a time across every number: it
+//! rings (a tone and a notification), can be answered, declined or ended,
+//! muted, and the speaker silenced. Audio runs
 //! between the default microphone and speaker and the call's 16 kHz mono
 //! frames, on threads of its own. Each call leaves a line in the chat.
 
@@ -26,7 +27,10 @@ const FRAME: usize = 960;
 /// Where a call stands, for the UI.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Phase {
+    /// A call to us, waiting for an answer.
     Ringing,
+    /// Our call, waiting for theirs (see `CallView::ringing`).
+    Calling,
     Connecting,
     Active,
 }
@@ -41,6 +45,9 @@ pub struct CallView {
     /// The caller's push name, when WhatsApp sent one.
     pub name: Option<String>,
     pub video: bool,
+    /// We placed the call (#39 stage 2); `ringing` once their phone rings.
+    pub outgoing: bool,
+    pub ringing: bool,
     pub phase: Phase,
     /// When it started ringing, and when its media connected.
     pub since: Instant,
@@ -75,7 +82,11 @@ impl Levels {
 /// The call being handled, with what it needs to go on.
 struct Active {
     view: CallView,
-    incoming: Box<IncomingCall>,
+    /// The offer we answer; none for a call we placed.
+    incoming: Option<Box<IncomingCall>>,
+    /// Our call was hung up before it was answered, or they declined it.
+    canceled: bool,
+    declined: bool,
     client: Arc<Client>,
     store: Arc<Mutex<Store>>,
     handle: Option<CallHandle>,
@@ -127,6 +138,8 @@ pub fn on_incoming(state: &Updater, session: &str, client: &Arc<Client>, store: 
                     peer: peer.clone(),
                     name: call.notify.clone().filter(|n| !n.is_empty()),
                     video: *is_video,
+                    outgoing: false,
+                    ringing: false,
                     phase: Phase::Ringing,
                     since: Instant::now(),
                     connected_at: None,
@@ -140,7 +153,9 @@ pub fn on_incoming(state: &Updater, session: &str, client: &Arc<Client>, store: 
                     local: Arc::default(),
                     camera_error: None,
                 },
-                incoming: Box::new(call.clone()),
+                incoming: Some(Box::new(call.clone())),
+                canceled: false,
+                declined: false,
                 client: client.clone(),
                 store: store.clone(),
                 handle: None,
@@ -156,6 +171,21 @@ pub fn on_incoming(state: &Updater, session: &str, client: &Arc<Client>, store: 
             super::notify::incoming_call(state, session, &peer, call.notify.as_deref().unwrap_or_default(), *is_video);
             publish(state);
         }
+        // The person we call declined (no reason): our handle ends next.
+        CallAction::Reject { call_id, reason: None, .. } => {
+            let handle = active().lock().ok().and_then(|mut slot| {
+                let a = slot.as_mut().filter(|a| a.view.call_id == *call_id && a.view.outgoing)?;
+                a.declined = true;
+                a.handle.clone()
+            });
+            if let Some(handle) = handle {
+                tokio::spawn(async move {
+                    let _ = handle.terminate().await;
+                });
+            }
+        }
+        // Our own call is wound up by `follow` once its handle ends.
+        CallAction::Terminate { call_id, .. } if active().lock().ok().is_some_and(|s| s.as_ref().is_some_and(|a| a.view.call_id == *call_id && a.view.outgoing)) => {}
         CallAction::Terminate { call_id, duration, .. } => {
             let ended = take_if(call_id);
             if let Some(a) = ended {
@@ -177,7 +207,7 @@ pub fn on_missed(state: &Updater, session: &str, store: &Arc<Mutex<Store>>, miss
         finish(state, a, Outcome::Missed);
     } else {
         let peer = normalize(state, session, &missed.from.to_string());
-        log_call(state, session, store, &peer, &missed.call_id, false, Outcome::Missed, missed.timestamp.timestamp());
+        log_call(state, session, store, &peer, &missed.call_id, false, false, Outcome::Missed, missed.timestamp.timestamp());
     }
 }
 
@@ -197,7 +227,8 @@ pub fn answer(state: &Updater) {
         stop_ring(a);
         a.view.phase = Phase::Connecting;
         let wants_video = a.view.video && video::ffmpeg().is_some();
-        (a.client.clone(), a.incoming.clone(), a.view.levels.clone(), a.view.call_id.clone(), wants_video, a.view.remote.clone(), a.view.local.clone())
+        let Some(incoming) = a.incoming.clone() else { return };
+        (a.client.clone(), incoming, a.view.levels.clone(), a.view.call_id.clone(), wants_video, a.view.remote.clone(), a.view.local.clone())
     };
     let repaint = state.repaint_handle();
     publish(state);
@@ -237,67 +268,7 @@ pub fn answer(state: &Updater) {
             accept
         };
         match accept.start().await {
-            Ok(handle) => {
-                let events = handle.take_events();
-                let watched = handle.clone();
-                let kept = match active().lock() {
-                    Ok(mut slot) => match slot.as_mut().filter(|a| a.view.call_id == call_id) {
-                        Some(a) => {
-                            a.handle = Some(handle);
-                            a.audio = Some(bridge);
-                            if let Some((camera, decoder, sink, idle, error)) = parts.take() {
-                                a.view.video_on = true;
-                                a.view.camera_on = camera.is_some();
-                                a.view.camera_error = error;
-                                a.camera = camera;
-                                a.decoder = Some(decoder);
-                                a.video_sink = Some(sink);
-                                a.idle_source = idle;
-                            }
-                            true
-                        }
-                        None => false,
-                    },
-                    Err(_) => false,
-                };
-                // Ended (or declined) while it was being set up.
-                if !kept {
-                    let _ = watched.terminate().await;
-                    return;
-                }
-                if let Some(mut events) = events {
-                    let (state, call_id) = (state.clone(), call_id.clone());
-                    tokio::spawn(async move {
-                        while let Ok(event) = events.recv().await {
-                            // The caller asks to turn the call into video.
-                            if let CallEvent::PeerVideoStateChanged { upgrade_token: Some(token), .. } = &event {
-                                if let Ok(mut slot) = active().lock() {
-                                    if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == call_id && !a.view.video_on) {
-                                        a.upgrade = Some(token.clone());
-                                        a.view.video_request = true;
-                                    }
-                                }
-                                publish(&state);
-                            }
-                            if event == CallEvent::MediaConnected {
-                                if let Ok(mut slot) = active().lock() {
-                                    if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == call_id) {
-                                        a.view.phase = Phase::Active;
-                                        a.view.connected_at = Some(Instant::now());
-                                    }
-                                }
-                                publish(&state);
-                            }
-                        }
-                    });
-                }
-                // However it ends (either side, or the network), clean up once.
-                watched.wait_ended().await;
-                if let Some(a) = take_if(&call_id) {
-                    let seconds = talk_seconds(&a.view);
-                    finish(&state, a, Outcome::Ended(seconds));
-                }
-            }
+            Ok(handle) => follow(state, call_id, handle, bridge, parts).await,
             Err(e) => {
                 log::warn!("call {call_id}: answer failed: {e}");
                 let _ = client.voip().reject(&incoming).await;
@@ -309,11 +280,234 @@ pub fn answer(state: &Updater) {
     });
 }
 
+/// What a started call brings along: camera, decoder, where their video
+/// goes, a camera-less source, and why the camera did not start.
+type VideoParts = (Option<Camera>, Decoder, async_channel::Sender<VideoFrame>, Option<async_channel::Sender<Vec<u8>>>, Option<String>);
+
+/// A started call (answered or placed), until it ends: keeps its handle,
+/// audio and video, follows its events, and logs it once it is over.
+async fn follow(state: Updater, call_id: String, handle: CallHandle, bridge: Bridge, mut parts: Option<VideoParts>) {
+    let events = handle.take_events();
+    let watched = handle.clone();
+    let kept = match active().lock() {
+        Ok(mut slot) => match slot.as_mut().filter(|a| a.view.call_id == call_id) {
+            Some(a) => {
+                a.handle = Some(handle);
+                a.audio = Some(bridge);
+                if let Some((camera, decoder, sink, idle, error)) = parts.take() {
+                    a.view.video_on = true;
+                    a.view.camera_on = camera.is_some();
+                    a.view.camera_error = error;
+                    a.camera = camera;
+                    a.decoder = Some(decoder);
+                    a.video_sink = Some(sink);
+                    a.idle_source = idle;
+                }
+                true
+            }
+            None => false,
+        },
+        Err(_) => false,
+    };
+    publish(&state);
+    // Ended (or declined) while it was being set up.
+    if !kept {
+        let _ = watched.terminate().await;
+        return;
+    }
+    if let Some(mut events) = events {
+        let (state, call_id) = (state.clone(), call_id.clone());
+        tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                // The caller asks to turn the call into video.
+                if let CallEvent::PeerVideoStateChanged { upgrade_token: Some(token), .. } = &event {
+                    if let Ok(mut slot) = active().lock() {
+                        if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == call_id && !a.view.video_on) {
+                            a.upgrade = Some(token.clone());
+                            a.view.video_request = true;
+                        }
+                    }
+                    publish(&state);
+                }
+                if event == CallEvent::MediaConnected {
+                    if let Ok(mut slot) = active().lock() {
+                        if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == call_id) {
+                            stop_ring(a);
+                            a.view.phase = Phase::Active;
+                            a.view.connected_at = Some(Instant::now());
+                        }
+                    }
+                    publish(&state);
+                }
+            }
+        });
+    }
+    // Our call: "Ringing…" once their phone rings, and given up after a while.
+    if active().lock().ok().is_some_and(|s| s.as_ref().is_some_and(|a| a.view.call_id == call_id && a.view.outgoing)) {
+        let (state, call_id, handle) = (state.clone(), call_id.clone(), watched.clone());
+        tokio::spawn(async move {
+            let started = Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                let ringing = handle.phase() == Some(whatsapp_rust::wacore::voip_control::signaling::CallPhase::Ringing);
+                let (waiting, changed) = match active().lock() {
+                    Ok(mut slot) => match slot.as_mut().filter(|a| a.view.call_id == call_id && a.view.phase == Phase::Calling) {
+                        Some(a) => {
+                            let changed = ringing && !a.view.ringing;
+                            a.view.ringing |= ringing;
+                            (true, changed)
+                        }
+                        None => (false, false),
+                    },
+                    Err(_) => (false, false),
+                };
+                if changed {
+                    publish(&state);
+                }
+                if !waiting {
+                    break;
+                }
+                if started.elapsed() > NO_ANSWER_AFTER {
+                    let _ = handle.terminate().await;
+                    break;
+                }
+            }
+        });
+    }
+    // However it ends (either side, or the network), clean up once.
+    watched.wait_ended().await;
+    if let Some(a) = take_if(&call_id) {
+        let outcome = match (a.view.outgoing, a.view.connected_at.is_some()) {
+            (_, true) => Outcome::Ended(talk_seconds(&a.view)),
+            (true, false) if a.declined => Outcome::Declined,
+            (true, false) if a.canceled => Outcome::Canceled,
+            (true, false) => Outcome::Unanswered,
+            (false, false) => Outcome::Ended(0),
+        };
+        finish(&state, a, outcome);
+    }
+}
+
+/// How long our call rings on their side before we give up.
+const NO_ANSWER_AFTER: Duration = Duration::from_secs(60);
+
+/// Places a call from a chat to `peer` (a phone-number JID) on `session`'s
+/// number. Refused while another call is on.
+pub fn place(state: &Updater, session: &str, client: &Arc<Client>, store: &Arc<Mutex<Store>>, peer: &str, video: bool) {
+    let wants_video = video && video::ffmpeg().is_some();
+    let pending = format!("placing-{}", chrono_now());
+    let levels: Arc<Levels> = Arc::default();
+    let (remote, local): (Latest, Latest) = (Arc::default(), Arc::default());
+    {
+        let Ok(mut slot) = active().lock() else { return };
+        if slot.is_some() {
+            return log::info!("session {session}: a call is already on; not placing another");
+        }
+        let ring = Arc::new(AtomicBool::new(true));
+        ring_tone(ring.clone());
+        *slot = Some(Active {
+            view: CallView {
+                session: session.to_owned(),
+                call_id: pending.clone(),
+                peer: normalize(state, session, peer),
+                name: None,
+                video: wants_video,
+                outgoing: true,
+                ringing: false,
+                phase: Phase::Calling,
+                since: Instant::now(),
+                connected_at: None,
+                muted: false,
+                speaker_off: false,
+                levels: levels.clone(),
+                video_on: false,
+                camera_on: false,
+                video_request: false,
+                remote: remote.clone(),
+                local: local.clone(),
+                camera_error: None,
+            },
+            incoming: None,
+            canceled: false,
+            declined: false,
+            client: client.clone(),
+            store: store.clone(),
+            handle: None,
+            audio: None,
+            ring: Some(ring),
+            camera: None,
+            decoder: None,
+            video_sink: None,
+            idle_source: None,
+            upgrade: None,
+        });
+    }
+    publish(state);
+    let (state, client, peer) = (state.clone(), client.clone(), peer.to_owned());
+    let repaint = state.repaint_handle();
+    tokio::spawn(async move {
+        let fail = |why: String| {
+            log::warn!("call to a contact failed: {why}");
+            if let Some(a) = take_if(&pending) {
+                finish(&state, a, Outcome::Failed(why));
+            }
+        };
+        let Ok(jid) = peer.parse::<whatsapp_rust::Jid>() else { return fail("bad number".into()) };
+        let (mic_tx, mic_rx) = async_channel::bounded::<Vec<i16>>(3);
+        let (spk_tx, spk_rx) = async_channel::bounded::<Vec<i16>>(64);
+        let bridge = match Bridge::open(mic_tx, spk_rx, levels) {
+            Ok(bridge) => bridge,
+            Err(e) => return fail(e),
+        };
+        let voip = client.voip();
+        let mut parts = None;
+        let call = voip.call(&jid).audio(mic_rx, spk_tx);
+        let call = if wants_video {
+            let (sink, frames) = async_channel::bounded::<VideoFrame>(8);
+            let decoder = video::open_decoder(frames, remote, repaint.clone());
+            let (camera, source, idle, error) = match video::open_camera(local, repaint) {
+                Ok((camera, source)) => (Some(camera), source, None, None),
+                Err(e) => {
+                    let (idle, source) = async_channel::bounded::<Vec<u8>>(1);
+                    (None, source, Some(idle), Some(e))
+                }
+            };
+            parts = Some((camera, decoder, sink.clone(), idle, error));
+            call.video(source, sink)
+        } else {
+            call
+        };
+        match call.start().await {
+            Ok(handle) => {
+                // The call has its real id now; a hang-up while it was being set up ends it.
+                let call_id = handle.call_id().to_owned();
+                let canceled = match active().lock() {
+                    Ok(mut slot) => match slot.as_mut().filter(|a| a.view.call_id == pending) {
+                        Some(a) => {
+                            a.view.call_id = call_id.clone();
+                            false
+                        }
+                        None => true,
+                    },
+                    Err(_) => true,
+                };
+                if canceled {
+                    let _ = handle.terminate().await;
+                    return;
+                }
+                follow(state, call_id, handle, bridge, parts).await;
+            }
+            Err(e) => fail(e.to_string()),
+        }
+    });
+}
+
 /// Declines the ringing call.
 pub fn decline(state: &Updater) {
     let Some(a) = take_ringing() else { return };
     let (client, incoming) = (a.client.clone(), a.incoming.clone());
     finish(state, a, Outcome::Declined);
+    let Some(incoming) = incoming else { return };
     tokio::spawn(async move {
         if let Err(e) = client.voip().reject(&incoming).await {
             log::warn!("call: decline failed: {e}");
@@ -323,9 +517,14 @@ pub fn decline(state: &Updater) {
 
 /// Hangs up the call in progress.
 pub fn end(state: &Updater) {
-    let handle = active().lock().ok().and_then(|slot| slot.as_ref().and_then(|a| a.handle.clone()));
+    let handle = active().lock().ok().and_then(|mut slot| {
+        let a = slot.as_mut()?;
+        // Our call hung up before they answered.
+        a.canceled |= a.view.outgoing && a.view.connected_at.is_none();
+        a.handle.clone()
+    });
     match handle {
-        // `wait_ended` in `answer` logs it and cleans up.
+        // `wait_ended` in `follow` logs it and cleans up.
         Some(handle) => {
             tokio::spawn(async move {
                 let _ = handle.terminate().await;
@@ -334,10 +533,14 @@ pub fn end(state: &Updater) {
         None => {
             if let Some(a) = active().lock().ok().and_then(|mut slot| slot.take()) {
                 let (client, incoming) = (a.client.clone(), a.incoming.clone());
-                finish(state, a, Outcome::Declined);
-                tokio::spawn(async move {
-                    let _ = client.voip().reject(&incoming).await;
-                });
+                // Our call still being placed: `place` ends it once it has started.
+                let outcome = if a.view.outgoing { Outcome::Canceled } else { Outcome::Declined };
+                finish(state, a, outcome);
+                if let Some(incoming) = incoming {
+                    tokio::spawn(async move {
+                        let _ = client.voip().reject(&incoming).await;
+                    });
+                }
             }
         }
     }
@@ -538,6 +741,9 @@ enum Outcome {
     /// Talked for this many seconds.
     Ended(u32),
     Failed(String),
+    /// Our call: hung up before they answered, or never answered.
+    Canceled,
+    Unanswered,
 }
 
 impl Outcome {
@@ -548,6 +754,8 @@ impl Outcome {
             Outcome::Elsewhere => "elsewhere",
             Outcome::Ended(_) => "ended",
             Outcome::Failed(_) => "failed",
+            Outcome::Canceled => "canceled",
+            Outcome::Unanswered => "unanswered",
         }
     }
 }
@@ -560,7 +768,7 @@ fn finish(state: &Updater, mut a: Active, outcome: Outcome) {
     drop(a.camera.take());
     drop(a.decoder.take());
     let started = chrono_now() - a.view.since.elapsed().as_secs() as i64;
-    log_call(state, &a.view.session, &a.store, &a.view.peer, &a.view.call_id, a.view.video, outcome, started);
+    log_call(state, &a.view.session, &a.store, &a.view.peer, &a.view.call_id, a.view.video, a.view.outgoing, outcome, started);
     publish(state);
 }
 
@@ -571,11 +779,14 @@ fn chrono_now() -> i64 {
 /// The call's line in the chat: a message from the caller whose media is
 /// `{"k": "call", ...}`, so it sorts, previews and syncs like any other.
 #[allow(clippy::too_many_arguments)]
-fn log_call(state: &Updater, session: &str, store: &Mutex<Store>, peer: &str, call_id: &str, video: bool, outcome: Outcome, ts: i64) {
+fn log_call(state: &Updater, session: &str, store: &Mutex<Store>, peer: &str, call_id: &str, video: bool, outgoing: bool, outcome: Outcome, ts: i64) {
     let seconds = if let Outcome::Ended(s) = outcome { s } else { 0 };
-    let label = call_label(outcome.key(), video, seconds);
-    let record = store::msg_record(peer, &format!("call-{call_id}"), false, peer, &label, ts, &Delivery::Received, false);
-    let media = whatsapp_rust::serde_json::json!({ "k": "call", "out": outcome.key(), "secs": seconds, "video": video });
+    // A call we placed and talked in is "outgoing"; the rest keep their outcome.
+    let key = if outgoing && matches!(outcome, Outcome::Ended(_)) { "outgoing" } else { outcome.key() };
+    let label = call_label(key, video, seconds);
+    let (sender, delivery) = if outgoing { ("", Delivery::Sent) } else { (peer, Delivery::Received) };
+    let record = store::msg_record(peer, &format!("call-{call_id}"), outgoing, sender, &label, ts, &delivery, false);
+    let media = whatsapp_rust::serde_json::json!({ "k": "call", "out": key, "secs": seconds, "video": video, "mine": outgoing });
     state.record(session, store, &[store::with_media(record, Some(media))]);
 }
 
@@ -588,6 +799,10 @@ pub fn call_label(outcome: &str, video: bool, seconds: u32) -> String {
         ("declined", _) => tr("[Declined call]", "[Panggilan ditolak]").to_owned(),
         ("elsewhere", _) => tr("[Answered on another device]", "[Dijawab di perangkat lain]").to_owned(),
         ("failed", _) => tr("[Call could not be connected]", "[Panggilan gagal tersambung]").to_owned(),
+        ("canceled", _) => tr("[Canceled call]", "[Panggilan dibatalkan]").to_owned(),
+        ("unanswered", _) => tr("[Unanswered call]", "[Panggilan tidak dijawab]").to_owned(),
+        ("outgoing", true) => crate::trf!("[Outgoing video call · {duration}]", "[Panggilan video keluar · {duration}]"),
+        ("outgoing", false) => crate::trf!("[Outgoing voice call · {duration}]", "[Panggilan suara keluar · {duration}]"),
         (_, true) => crate::trf!("[Video call · {duration}]", "[Panggilan video · {duration}]"),
         _ => crate::trf!("[Voice call · {duration}]", "[Panggilan suara · {duration}]"),
     }
@@ -837,6 +1052,14 @@ impl Resampler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outgoing_calls_have_their_own_lines() {
+        assert_eq!(call_label("outgoing", false, 156), "[Outgoing voice call · 2:36]");
+        assert_eq!(call_label("outgoing", true, 5), "[Outgoing video call · 0:05]");
+        assert_eq!(call_label("canceled", false, 0), "[Canceled call]");
+        assert_eq!(call_label("unanswered", true, 0), "[Unanswered call]");
+    }
 
     #[test]
     fn resampler_keeps_rate_across_chunks() {
