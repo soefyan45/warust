@@ -347,6 +347,10 @@ pub struct Book {
     /// The phone's mutes were read in full once (#87): a number linked
     /// before warust read mutes gets them on its next connection.
     pub mutes_synced: bool,
+    /// Contacts whose status updates are muted (normalized JIDs, #101), and
+    /// whether those were read in full once like `mutes_synced`.
+    status_muted: HashSet<String>,
+    pub status_mutes_synced: bool,
     /// Messages deleted for me: history repeating them does not bring them back.
     hidden: HashSet<String>,
 }
@@ -374,6 +378,11 @@ impl Book {
             .collect();
         out.sort_by_key(|(_, name)| name.to_lowercase());
         out
+    }
+
+    /// Whether `jid`'s status updates are muted (#101).
+    pub fn status_muted(&self, jid: &str) -> bool {
+        self.status_muted.contains(&self.normalize(jid))
     }
 
     /// Contact name or group subject, else the person's own push name.
@@ -669,6 +678,17 @@ impl Book {
                 }
             }
             Some("mutesync") => self.mutes_synced = true,
+            Some("smutesync") => self.status_mutes_synced = true,
+            Some("smute") => {
+                if let Some(jid) = text("jid") {
+                    let jid = self.normalize(&jid);
+                    if record.get("v").and_then(Value::as_bool).unwrap_or(true) {
+                        self.status_muted.insert(jid);
+                    } else {
+                        self.status_muted.remove(&jid);
+                    }
+                }
+            }
             Some("mute") => {
                 // `until` 0 (or missing) unmutes.
                 if let Some(chat) = text("chat") {
@@ -940,6 +960,16 @@ pub fn seen_record(chat: &str) -> Value {
 /// The phone's mutes were read in full.
 pub fn mutes_synced_record() -> Value {
     json!({ "t": "mutesync" })
+}
+
+/// The phone's status mutes were read in full (#101).
+pub fn status_mutes_synced_record() -> Value {
+    json!({ "t": "smutesync" })
+}
+
+/// `jid`'s status updates muted, or unmuted again.
+pub fn status_mute_record(jid: &str, muted: bool) -> Value {
+    json!({ "t": "smute", "jid": jid, "v": muted })
 }
 
 /// Mutes a chat until `until` (Unix seconds, `i64::MAX` for always), or
@@ -1277,6 +1307,14 @@ mod tests {
             status_record("x", &Delivery::Queued),
         ]);
         assert_eq!(b.chats[0].messages[0].status, Delivery::Sent);
+    }
+
+    #[test]
+    fn status_mutes_come_and_go() {
+        let b = book(&[status_mute_record("1@s.whatsapp.net", true), status_mute_record("2@s.whatsapp.net", true), status_mute_record("2@s.whatsapp.net", false)]);
+        assert!(b.status_muted("1@s.whatsapp.net"));
+        assert!(!b.status_muted("2@s.whatsapp.net"));
+        assert!(!b.status_muted("3@s.whatsapp.net"));
     }
 
     #[test]
