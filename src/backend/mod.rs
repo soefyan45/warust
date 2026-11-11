@@ -312,7 +312,7 @@ pub enum Command {
     /// that saw it; goes to the poster's chat through the paced queue.
     StatusReply { id: String, msg_id: String, text: String },
     /// Queue a forwarded text message to each chat (paced like any send).
-    Forward { id: String, chats: Vec<String>, text: String },
+    Forward { id: String, chats: Vec<String>, msg_id: String },
     /// Queue a message from the REST API under an id chosen by the caller.
     Enqueue { id: String, chat: String, body: session::Body, local_id: String },
     /// Pin a message for everyone (for `length`), or unpin it. `msg_id` is a real
@@ -815,14 +815,21 @@ async fn run(
                     _ => log::warn!("reply: session {id} is not running"),
                 }
             }
-            Command::Forward { id, chats, text } => match (running.get(&id), stores.get(&id)) {
-                (Some(r), Some(store)) => {
-                    for chat in chats {
-                        r.enqueue(&id, chat, Body::Forward(text.clone()), &state, store);
+            Command::Forward { id, chats, msg_id } => {
+                let message = state.book(&id).and_then(|book| book.chats.iter().flat_map(|c| &c.messages).find(|m| m.id == msg_id).cloned());
+                match (running.get(&id), stores.get(&id), message) {
+                    (Some(r), Some(store), Some(m)) => {
+                        // Built for each chat: a body goes to one queue.
+                        for chat in chats {
+                            match session::forward_body(&m, &state.data_dir) {
+                                Some(body) => r.enqueue(&id, chat, body, &state, store),
+                                None => log::warn!("forward: message {msg_id} cannot be forwarded"),
+                            }
+                        }
                     }
+                    _ => log::warn!("forward: session {id} is not running, or message {msg_id} is gone"),
                 }
-                _ => log::warn!("forward: session {id} is not running"),
-            },
+            }
             Command::SendFile { id, chat, path, caption } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::File { path, caption }, &state, store),
                 _ => log::warn!("send file: session {id} is not running"),

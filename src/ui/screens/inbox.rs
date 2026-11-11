@@ -1916,6 +1916,30 @@ fn delete_dialog(ctx: &egui::Context, state: &mut State, commands: &mut Vec<Comm
     }
 }
 
+/// A round ⋯ just outside a bubble (left of ours, right of theirs), shown
+/// while the pointer is on the bubble or its menu is open; its response
+/// anchors the message menu (#3).
+fn more_button(ui: &Ui, p: &Palette, bubble: Rect, m: &ChatMsg) -> Option<egui::Response> {
+    let id = ui.scope_id().with(("msg_more", &m.id));
+    let open = egui::Popup::is_id_open(ui.ctx(), id.with("popup"));
+    let side = if m.from_me { -1.0 } else { 1.0 };
+    let center = pos2(if m.from_me { bubble.left() - 18.0 } else { bubble.right() + 18.0 }, bubble.top() + 16.0);
+    let button = Rect::from_center_size(center, vec2(28.0, 28.0));
+    // The hover zone reaches the button, so moving onto it keeps it there.
+    let zone = Rect::from_min_max(
+        pos2(bubble.left().min(bubble.left() + side * 36.0), bubble.top()),
+        pos2(bubble.right().max(bubble.right() + side * 36.0), bubble.bottom()),
+    );
+    if !open && !ui.rect_contains_pointer(zone) {
+        return None;
+    }
+    let response = ui.interact(button, id, Sense::click());
+    let fill = if response.hovered() || open { p.raised } else { p.panel };
+    ui.painter().circle(center, 14.0, fill, Stroke::new(1.0, p.border));
+    icons::paint(ui, button, "ellipsis", 15.0, p.text_2);
+    Some(response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Message actions", "Aksi pesan")))
+}
+
 /// Room under a failed bubble for its "Not sent · Retry" line.
 const FAILED_FOOT: f32 = 22.0;
 
@@ -1953,8 +1977,11 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         // Handled inline where the menu is shown.
         MsgEvent::Menu(MsgAction::Copy, _) => {}
         MsgEvent::Menu(MsgAction::Forward, msg_id) => {
-            if let Some(m) = chat.messages.iter().find(|m| m.id == msg_id).filter(|m| m.forwardable()) {
-                state.forward = Some(forward::Dialog::new(session.id.clone(), m.text.clone()));
+            let ready = |m: &&ChatMsg| m.forwardable() || m.forwardable_media() == Some(true);
+            if let Some(m) = chat.messages.iter().find(|m| m.id == msg_id).filter(ready) {
+                // The dialog previews the caption, else the file's name.
+                let preview = Some(caption(m)).filter(|c| !c.is_empty()).or_else(|| m.media.as_ref().map(media_title)).unwrap_or_default();
+                state.forward = Some(forward::Dialog::new(session.id.clone(), preview, m.id.clone()));
             }
         }
         MsgEvent::Menu(MsgAction::Reply, msg_id) => {
@@ -2115,8 +2142,16 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
         action = Some(MsgAction::Reply);
     }
     // Text only for now; media forwarding is stage 2.
-    if m.forwardable() && ui.button(tr("Forward", "Teruskan")).clicked() {
-        action = Some(MsgAction::Forward);
+    // Text, or a file once it is downloaded (#6 stage 2).
+    match m.forwardable_media() {
+        Some(ready) => {
+            let item = ui.add_enabled(ready, egui::Button::new(tr("Forward", "Teruskan")));
+            if item.on_disabled_hover_text(tr("Download the file first", "Unduh file-nya dulu")).clicked() {
+                action = Some(MsgAction::Forward);
+            }
+        }
+        None if m.forwardable() && ui.button(tr("Forward", "Teruskan")).clicked() => action = Some(MsgAction::Forward),
+        None => {}
     }
     // Media without a caption has nothing to copy.
     if !caption(m).is_empty() && ui.button(tr("Copy", "Salin")).clicked() {
@@ -2393,6 +2428,14 @@ fn messages(
                         // A deleted message has nothing left to reply to, copy, forward or pin.
                         if !m.deleted {
                             bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                            // The same menu from a ⋯ beside the bubble, for a plain click (#3).
+                            if let Some(picked) = more_button(ui, &p, rect, m).and_then(|btn| {
+                                let mut picked = None;
+                                egui::Popup::menu(&btn).show(|ui| picked = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                                picked
+                            }) {
+                                action = Some(picked);
+                            }
                         }
                         if jump.as_deref() == Some(m.id.as_str()) {
                             ui.scroll_to_rect(rect, Some(Align::Center));

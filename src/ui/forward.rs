@@ -17,13 +17,15 @@ pub struct Dialog {
     /// The number the message belongs to; the chats offered are its own.
     session: String,
     text: String,
+    /// The message to forward: text again, or its file (#6 stage 2).
+    msg_id: String,
     search: String,
     picked: Vec<String>,
 }
 
 impl Dialog {
-    pub fn new(session: String, text: String) -> Self {
-        Self { session, text, search: String::new(), picked: Vec::new() }
+    pub fn new(session: String, text: String, msg_id: String) -> Self {
+        Self { session, text, msg_id, search: String::new(), picked: Vec::new() }
     }
 }
 
@@ -51,6 +53,11 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Dialog>, sessions: &[SessionV
             ui.set_width(width);
             ui.spacing_mut().item_spacing.y = 10.0;
             ui.label(rich(tr("Forward to…", "Teruskan ke…"), 16.0, Weight::SemiBold, p.text));
+            // What goes on: the text or caption, else the file's name.
+            let preview: String = dialog.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            if !preview.is_empty() {
+                ui.add(egui::Label::new(rich(&preview, 12.5, Weight::Regular, p.muted)).truncate());
+            }
             widgets::search(ui, &mut dialog.search, tr("Search chats", "Cari chat"), width, false);
             let query = dialog.search.trim().to_lowercase();
             let rows: Vec<(&str, String)> = session
@@ -100,7 +107,7 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Dialog>, sessions: &[SessionV
         close = true;
     }
     if send {
-        commands.push(Command::Forward { id: session.id.clone(), chats: dialog.picked.clone(), text: dialog.text.clone() });
+        commands.push(Command::Forward { id: session.id.clone(), chats: dialog.picked.clone(), msg_id: dialog.msg_id.clone() });
         close = true;
     }
     if close {
