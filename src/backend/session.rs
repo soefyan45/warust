@@ -550,7 +550,8 @@ pub async fn start(id: &str, registry: &Registry, state: &Updater, chats: Arc<Mu
         .with_backend(device)
         .with_device_props(
             DevicePropsOverride::new()
-                .with_os(shown.name.as_str())
+                // A browser type is listed as "<Browser> (<OS>)": give it the real OS.
+                .with_os(if shown.kind.named() { shown.name.as_str() } else { super::registry::this_os() })
                 .with_platform_type(platform(shown.kind)),
         )
         .on_event(move |event, client| {

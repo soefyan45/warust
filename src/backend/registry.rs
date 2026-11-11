@@ -29,6 +29,18 @@ impl Default for Device {
     }
 }
 
+/// This computer's OS as WhatsApp accepts it in "<Browser> (<OS>)": any
+/// other text becomes "Linux" on the phone.
+pub fn this_os() -> &'static str {
+    if cfg!(windows) {
+        "Windows"
+    } else if cfg!(target_os = "macos") {
+        "Mac OS"
+    } else {
+        "Linux"
+    }
+}
+
 /// Never the hostname, which would leak the machine's name to every linked phone.
 pub const DEFAULT_DEVICE_NAME: &str = "Warust";
 
@@ -59,6 +71,21 @@ impl DeviceKind {
 
     pub fn parse(code: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|k| k.code() == code.trim().to_ascii_lowercase())
+    }
+
+    /// Desktop shows the typed name on the phone; WhatsApp names browser
+    /// devices itself, as "<Browser> (<OS>)".
+    pub fn named(self) -> bool {
+        self == DeviceKind::Desktop
+    }
+
+    /// How the phone's Linked devices list shows a device of this type.
+    pub fn on_phone(self, name: &str) -> String {
+        match self {
+            DeviceKind::Desktop => name.to_owned(),
+            DeviceKind::Chrome => format!("Google Chrome ({})", this_os()),
+            other => format!("{} ({})", other.label(), this_os()),
+        }
     }
 
     pub fn label(self) -> &'static str {
@@ -210,6 +237,14 @@ pub fn clean_name(raw: &str) -> Result<String, &'static str> {
 #[cfg(test)]
 mod name_tests {
     use super::*;
+
+    #[test]
+    fn only_desktop_shows_the_typed_name_on_the_phone() {
+        assert_eq!(DeviceKind::Desktop.on_phone("komputer kantor"), "komputer kantor");
+        assert_eq!(DeviceKind::Chrome.on_phone("komputer kantor"), format!("Google Chrome ({})", this_os()));
+        assert_eq!(DeviceKind::Firefox.on_phone("x"), format!("Firefox ({})", this_os()));
+        assert!(["Windows", "Mac OS", "Linux"].contains(&this_os()));
+    }
 
     #[test]
     fn device_name_and_type_are_kept_per_session() {
