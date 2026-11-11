@@ -1,8 +1,8 @@
 //! Anti-peek mode (issue #57, Pego `v5/Privasi`): chat text stays frosted
-//! until the cursor is on it, previews and (if chosen) names are hidden, and
-//! the app locks after a while without input. Frosting draws rounded bars in
-//! place of each line, so no text is on screen to read, and nothing is
-//! computed from it but its line lengths.
+//! until the cursor is on it (a bubble, or a chat's row for its preview),
+//! names are hidden if chosen, and the app locks after a while without input.
+//! Frosting draws rounded bars in place of each line, so no text is on screen
+//! to read, and nothing is computed from it but its line lengths.
 
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
