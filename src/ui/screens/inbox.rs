@@ -273,7 +273,7 @@ pub fn show(
     CentralPanel::default()
         .frame(Frame::NONE)
         .show(ui, |ui| {
-            widgets::wallpaper(ui, ui.max_rect());
+            widgets::wallpaper(ui, ui.max_rect(), &session.id);
             Frame::NONE.inner_margin(Margin { left: 32, right: 24, top: 0, bottom: 8 }).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 if several {
@@ -4421,7 +4421,7 @@ fn compact_chat(
             }
         });
     CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
-        widgets::wallpaper(ui, ui.max_rect());
+        widgets::wallpaper(ui, ui.max_rect(), &session.id);
         Frame::NONE.inner_margin(Margin { left: 12, right: 12, top: 0, bottom: 6 }).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             if older_bar(ui, &p, state, session, chat) {

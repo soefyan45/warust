@@ -797,6 +797,15 @@ async fn run(
                 stores.remove(&id);
                 let _ = std::fs::remove_file(Store::path(&data_dir, &id));
                 state.remove(&id);
+                // Its own wallpaper and the picture copied for it go too (#60).
+                let mut settings = (*state.settings()).clone();
+                if let Some(wall) = settings.number_wallpapers.remove(&id) {
+                    settings::forget_wallpaper(&data_dir, &wall.file);
+                    settings.save(&data_dir);
+                    if let Ok(mut shared) = state.shared.lock() {
+                        shared.settings = Arc::new(settings);
+                    }
+                }
             }
             Command::Send { id, chat, text, mentions } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => {

@@ -34,6 +34,8 @@ pub enum Action {
     Window(String),
     /// Open the "Rename" dialog.
     Rename(String),
+    /// Choose the number's own chat wallpaper (#60).
+    Wallpaper(String),
 }
 
 pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) -> Option<Action> {
@@ -404,6 +406,9 @@ pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView) -> 
         }
         if ui.button(tr("Rename…", "Ganti nama…")).clicked() {
             action = Some(Action::Rename(session.id.clone()));
+        }
+        if ui.button(tr("Chat wallpaper…", "Wallpaper chat…")).clicked() {
+            action = Some(Action::Wallpaper(session.id.clone()));
         }
         // Kept apart from the steps that unlink, so a slip does not relink.
         ui.separator();

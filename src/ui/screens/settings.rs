@@ -175,23 +175,32 @@ fn template_option(ui: &mut Ui, p: &theme::Palette, template: Template, active: 
 }
 
 /// A label column, then the control.
+/// What the wallpaper picker edits: the app's choice, or a number's (#60).
+pub struct WallDraft<'a> {
+    pub key: &'a mut String,
+    pub file: &'a mut String,
+    pub dim: &'a mut u8,
+}
+
 /// "Chat wallpaper" (#56): Auto, the six designed wallpapers, None, and the
-/// user's own picture with how much it is dimmed.
-fn wallpaper_picker(
+/// user's own picture with how much it is dimmed. For a number (`app` given)
+/// it starts with "Same as the app", the key `app`.
+pub fn wallpaper_picker(
     ui: &mut Ui,
     p: &theme::Palette,
-    draft: &mut Settings,
+    wall: WallDraft,
     picking: &mut Option<std::sync::mpsc::Receiver<Option<Result<std::path::PathBuf, String>>>>,
     dark: bool,
+    app: Option<&Settings>,
 ) {
     // A picture chosen and copied on its own thread.
     if let Some(answer) = picking.as_ref().and_then(|r| r.try_recv().ok()) {
         *picking = None;
         match answer {
             Some(Ok(path)) => {
-                forget_custom(&draft.wallpaper_file);
-                draft.wallpaper = "custom".to_owned();
-                draft.wallpaper_file = path.to_string_lossy().into_owned();
+                forget_custom(wall.file);
+                *wall.key = "custom".to_owned();
+                *wall.file = path.to_string_lossy().into_owned();
             }
             Some(Err(e)) => log::warn!("wallpaper picture: {e}"),
             None => {}
@@ -205,20 +214,31 @@ fn wallpaper_picker(
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
         let auto = widgets::auto_wallpaper(dark);
-        if wallpaper_tile(ui, p, Some(auto), tr("Auto", "Otomatis"), draft.wallpaper == "auto") {
-            draft.wallpaper = "auto".to_owned();
-        }
-        for wall in &widgets::WALLPAPERS {
-            if wallpaper_tile(ui, p, Some(wall), tr(wall.name.0, wall.name.1), draft.wallpaper == wall.key) {
-                draft.wallpaper = wall.key.to_owned();
+        if let Some(app) = app {
+            let name = tr("Same as the app", "Ikuti aplikasi");
+            let active = wall.key.as_str() == "app";
+            let clicked = match app.wallpaper.as_str() {
+                "custom" if !app.wallpaper_file.is_empty() => custom_tile(ui, p, &app.wallpaper_file, name, active),
+                "none" => wallpaper_tile(ui, p, None, name, active),
+                key => wallpaper_tile(ui, p, Some(widgets::WALLPAPERS.iter().find(|w| w.key == key).unwrap_or(auto)), name, active),
+            };
+            if clicked {
+                *wall.key = "app".to_owned();
             }
         }
-        if wallpaper_tile(ui, p, None, tr("None", "Polos"), draft.wallpaper == "none") {
-            draft.wallpaper = "none".to_owned();
+        if wallpaper_tile(ui, p, Some(auto), tr("Auto", "Otomatis"), wall.key.as_str() == "auto") {
+            *wall.key = "auto".to_owned();
         }
-        let has_custom = !draft.wallpaper_file.is_empty();
-        if has_custom && custom_tile(ui, p, &draft.wallpaper_file, draft.wallpaper == "custom") {
-            draft.wallpaper = "custom".to_owned();
+        for design in &widgets::WALLPAPERS {
+            if wallpaper_tile(ui, p, Some(design), tr(design.name.0, design.name.1), wall.key.as_str() == design.key) {
+                *wall.key = design.key.to_owned();
+            }
+        }
+        if wallpaper_tile(ui, p, None, tr("None", "Polos"), wall.key.as_str() == "none") {
+            *wall.key = "none".to_owned();
+        }
+        if !wall.file.is_empty() && custom_tile(ui, p, wall.file, tr("Your picture", "Gambar Anda"), wall.key.as_str() == "custom") {
+            *wall.key = "custom".to_owned();
         }
     });
     ui.horizontal(|ui| {
@@ -227,27 +247,30 @@ fn wallpaper_picker(
         if ui.add_enabled_ui(!busy, |ui| widgets::button(ui, Some("image"), label, Kind::Secondary)).inner.clicked() {
             *picking = Some(pick_wallpaper(ui.ctx()));
         }
-        if !draft.wallpaper_file.is_empty() && widgets::button(ui, Some("x"), tr("Remove picture", "Hapus gambar"), Kind::Secondary).clicked() {
-            forget_custom(&draft.wallpaper_file);
-            draft.wallpaper_file.clear();
-            if draft.wallpaper == "custom" {
-                draft.wallpaper = "auto".to_owned();
+        if !wall.file.is_empty() && widgets::button(ui, Some("x"), tr("Remove picture", "Hapus gambar"), Kind::Secondary).clicked() {
+            forget_custom(wall.file);
+            wall.file.clear();
+            if wall.key.as_str() == "custom" {
+                *wall.key = if app.is_some() { "app" } else { "auto" }.to_owned();
             }
         }
     });
-    if draft.wallpaper == "custom" {
-        let mut dim = f32::from(draft.wallpaper_dim);
+    if wall.key.as_str() == "custom" {
+        let mut dim = f32::from(*wall.dim);
         line(ui, tr("Dim the picture", "Redupkan gambar"), |ui| {
             ui.add(egui::Slider::new(&mut dim, 0.0..=80.0).suffix(" %").step_by(5.0));
         });
-        draft.wallpaper_dim = dim.round() as u8;
+        *wall.dim = dim.round() as u8;
     }
-    ui.label(rich(
-        tr("Applies to every open chat once saved. Bubbles and date pills keep their own background.", "Berlaku untuk semua chat setelah disimpan. Bubble dan label tanggal tetap punya latar sendiri."),
-        12.0,
-        Weight::Regular,
-        p.muted,
-    ));
+    let note = if app.is_some() {
+        tr("Used in this number's chats, here and in its own window, once saved.", "Dipakai di chat nomor ini, di sini dan di jendelanya sendiri, setelah disimpan.")
+    } else {
+        tr(
+            "Applies to every open chat once saved, except numbers with their own wallpaper. Bubbles and date pills keep their own background.",
+            "Berlaku untuk semua chat setelah disimpan, kecuali nomor yang punya wallpaper sendiri. Bubble dan label tanggal tetap punya latar sendiri.",
+        )
+    };
+    ui.add(egui::Label::new(rich(note, 12.0, Weight::Regular, p.muted)).wrap());
 }
 
 /// One choice in the wallpaper picker: a phone-shaped preview and its name.
@@ -266,8 +289,8 @@ fn wallpaper_tile(ui: &mut Ui, p: &theme::Palette, wall: Option<&widgets::Wallpa
     response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
-/// The user's own picture as a picker choice.
-fn custom_tile(ui: &mut Ui, p: &theme::Palette, file: &str, active: bool) -> bool {
+/// A picture of the user's own as a picker choice.
+fn custom_tile(ui: &mut Ui, p: &theme::Palette, file: &str, name: &str, active: bool) -> bool {
     let (rect, response) = ui.allocate_exact_size(egui::vec2(64.0, 132.0), egui::Sense::click());
     let preview = egui::Rect::from_min_size(rect.min, egui::vec2(64.0, 110.0));
     ui.painter().rect_filled(preview, 8.0, p.raised);
@@ -276,7 +299,7 @@ fn custom_tile(ui: &mut Ui, p: &theme::Palette, file: &str, active: bool) -> boo
     }
     tile_frame(ui, p, preview, &response, active);
     let label = egui::Rect::from_min_max(egui::pos2(rect.left() - 4.0, preview.bottom() + 4.0), egui::pos2(rect.right() + 4.0, rect.bottom()));
-    widgets::paint_text(ui, label, tr("Your picture", "Gambar Anda"), crate::ui::fonts::ui(11.5, if active { Weight::SemiBold } else { Weight::Regular }), if active { p.text } else { p.text_2 }, egui::Align::Center);
+    widgets::paint_text(ui, label, name, crate::ui::fonts::ui(11.5, if active { Weight::SemiBold } else { Weight::Regular }), if active { p.text } else { p.text_2 }, egui::Align::Center);
     response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
 }
 
@@ -320,14 +343,9 @@ fn copy_wallpaper(path: &std::path::Path) -> Result<std::path::PathBuf, String> 
     Ok(out)
 }
 
-/// Deletes a copied wallpaper picture, only ever inside the data folder's
-/// `wallpapers` (never a file the user picked).
-fn forget_custom(file: &str) {
-    let dir = crate::platform::data_dir().join("wallpapers");
-    let path = std::path::Path::new(file);
-    if !file.is_empty() && path.parent() == Some(dir.as_path()) {
-        let _ = std::fs::remove_file(path);
-    }
+/// Deletes a copied wallpaper picture (never a file the user picked).
+pub fn forget_custom(file: &str) {
+    crate::backend::settings::forget_wallpaper(&crate::platform::data_dir(), file);
 }
 
 fn line(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
@@ -389,7 +407,14 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                             ui.label(rich(tr("This template only has a light mode.", "Template ini hanya punya mode terang."), 12.0, Weight::Regular, p.muted));
                         }
                         let dark = ui.ctx().theme() == egui::Theme::Dark;
-                        wallpaper_picker(ui, &p, draft, &mut state.wallpaper_picking, dark);
+                        wallpaper_picker(
+                        ui,
+                        &p,
+                        WallDraft { key: &mut draft.wallpaper, file: &mut draft.wallpaper_file, dim: &mut draft.wallpaper_dim },
+                        &mut state.wallpaper_picking,
+                        dark,
+                        None,
+                    );
                     },
                 );
 
