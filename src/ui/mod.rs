@@ -10,10 +10,13 @@ mod icons;
 mod lists;
 mod mention;
 mod markup;
+mod movie_view;
 mod pdf;
+mod photo_view;
 pub mod privacy;
 mod qr;
 mod screens;
+mod seen;
 mod stickers;
 mod theme;
 mod time;
@@ -115,6 +118,8 @@ pub struct State {
     /// Group members by `session|group` (from the backend), and the groups
     /// whose members were already asked for this run.
     pub members_now: std::sync::Arc<std::collections::HashMap<String, Vec<backend::Member>>>,
+    /// Groups' details for the contact panel (#91), keyed like `members_now`.
+    pub groups_now: std::sync::Arc<std::collections::HashMap<String, backend::GroupInfo>>,
     pub members_asked: std::collections::HashMap<(String, String), std::time::Instant>,
     /// `@Name` picked in the composer with the member's JID, the chat they
     /// belong to (`session|chat`), the highlighted picker row, the `@` of a
@@ -132,6 +137,11 @@ pub struct State {
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
     pub pdf_view: Option<pdf::Viewer>,
+    /// Chat video open in the in-app viewer (#84).
+    pub video_view: Option<movie_view::Viewer>,
+    /// Profile photo open in the pop-up viewer (#92), and the full-size ones fetched.
+    pub photo_view: Option<photo_view::Viewer>,
+    pub full_avatars: std::sync::Arc<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
     /// "Teruskan ke…" dialog for a message of the open chat.
     pub forward: Option<forward::Dialog>,
     /// "Delete message?" asked for a message of the open chat (#72).
@@ -261,6 +271,8 @@ pub struct App {
     pairing_id: Option<String>,
     /// The chat last reported to the notifier as on screen.
     viewing: Option<(String, String)>,
+    /// Marks the chat on screen read as messages arrive in it.
+    seen: seen::Watch,
     /// The unread count last shown on the taskbar icon and the title.
     shown_unread: Option<u32>,
     /// Numbers open in windows of their own (issue #28).
@@ -332,6 +344,7 @@ impl App {
             // Dev aid: WARUST_PAIR=<session id> opens its pairing screen.
             pairing_id: std::env::var("WARUST_PAIR").ok(),
             viewing: None,
+            seen: seen::Watch::default(),
             lock: privacy::Lock::default(),
             windows: Vec::new(),
             shown_unread: None,
@@ -729,6 +742,8 @@ impl App {
                     };
                 });
                 pdf::show(ui.ctx(), &mut w.state.pdf_view);
+                movie_view::show(ui.ctx(), &mut w.state.video_view);
+                photo_view::show(ui.ctx(), &mut w.state.photo_view, &w.state.full_avatars);
                 if locked {
                     lock_cover(ui.ctx());
                 }
@@ -1017,12 +1032,14 @@ impl eframe::App for App {
         let snapshot = self.backend.snapshot();
         self.sessions = snapshot.sessions;
         self.avatars = snapshot.avatars;
+        self.state.full_avatars = snapshot.full_avatars;
         self.downloads = snapshot.downloads;
         self.settings = snapshot.settings;
         self.state.settings = self.settings.clone();
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
         self.state.members_now = snapshot.members;
+        self.state.groups_now = snapshot.groups;
         self.state.call_now = snapshot.call;
         if self.state.typing_now.values().any(backend::Typing::fresh) {
             // So a stale "mengetik…" disappears even when nothing else repaints.
@@ -1252,6 +1269,8 @@ impl eframe::App for App {
         self.rename_dialog(ui.ctx());
         self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
+        movie_view::show(ui.ctx(), &mut self.state.video_view);
+        photo_view::show(ui.ctx(), &mut self.state.photo_view, &self.state.full_avatars);
         // "Sedang mengetik" for the chat on screen while its reply is typed.
         let open_chat = if self.screen == Screen::Inbox {
             self.state.inbox_session.clone().zip(self.state.chat_selected.clone())
@@ -1273,7 +1292,9 @@ impl eframe::App for App {
         }
         let in_window = self.number_windows(ui.ctx());
         // Unread messages on the taskbar/Dock icon and in the window title.
-        let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).map(|c| c.unread).sum();
+        // Muted chats keep their own count but not the icon's, as on the phone.
+        let now = time::now();
+        let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).filter(|c| !c.is_muted(now)).map(|c| c.unread).sum();
         if self.shown_unread != Some(unread) {
             crate::platform::set_unread_badge(unread);
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(crate::platform::window_title(unread)));
@@ -1286,6 +1307,16 @@ impl eframe::App for App {
         } else {
             in_window
         };
+        // A message that arrives in the chat in front of the user is read.
+        // Behind the lock cover nothing is in front of them.
+        let read = viewing.as_ref().filter(|_| !self.lock.locked);
+        let open = read.and_then(|(session, jid)| self.sessions.iter().find(|s| &s.id == session)?.book.chats.iter().find(|c| &c.jid == jid));
+        let newest = open.and_then(|c| c.messages.iter().rev().find(|m| !m.from_me)).map(|m| m.id.as_str());
+        if self.seen.check(read.filter(|_| open.is_some()), newest, open.map_or(0, |c| c.unread))
+            && let Some((session, jid)) = read
+        {
+            self.backend.send(Command::Seen { id: session.clone(), chat: jid.clone() });
+        }
         if viewing != self.viewing {
             self.backend.set_viewing(viewing.clone());
             self.viewing = viewing;

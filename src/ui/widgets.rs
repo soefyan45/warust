@@ -35,7 +35,10 @@ pub fn row(
     right(&mut right_ui);
     let used = right_ui.min_rect().width();
     let left_rect = Rect::from_min_max(rect.min, pos2((rect.right() - used - 12.0).max(rect.left()), rect.bottom()));
-    left(&mut child(ui, left_rect, Layout::left_to_right(Align::Center)));
+    // What does not fit on the left is cut there, never drawn over the right.
+    let mut left_ui = child(ui, left_rect, Layout::left_to_right(Align::Center));
+    left_ui.set_clip_rect(left_rect.intersect(ui.clip_rect()));
+    left(&mut left_ui);
     rect
 }
 
@@ -77,6 +80,29 @@ pub fn logo(ui: &Ui, rect: Rect, bubble: Color32, mark: Color32) {
     for point in w {
         painter.circle_filled(point, width / 2.0, mark);
     }
+}
+
+/// The texture of the latest video frame in `latest`, uploaded again only
+/// when a new frame arrived; kept in egui's memory under `key`.
+pub fn frame_texture(ctx: &egui::Context, key: &str, latest: &crate::backend::video::Latest) -> Option<egui::TextureHandle> {
+    let picture = latest.lock().ok()?.clone()?;
+    let id = egui::Id::NULL.with(("frame_texture", key));
+    let cached: Option<(egui::TextureHandle, u64)> = ctx.data(|d| d.get_temp(id));
+    if let Some((handle, generation)) = &cached {
+        if *generation == picture.generation {
+            return Some(handle.clone());
+        }
+    }
+    let image = egui::ColorImage::from_rgba_unmultiplied([picture.width, picture.height], &picture.rgba);
+    let handle = match cached {
+        Some((mut handle, _)) => {
+            handle.set(image, egui::TextureOptions::LINEAR);
+            handle
+        }
+        None => ctx.load_texture(key, image, egui::TextureOptions::LINEAR),
+    };
+    ctx.data_mut(|d| d.insert_temp(id, (handle.clone(), picture.generation)));
+    Some(handle)
 }
 
 /// Paints one line of text inside `rect`, cut with an ellipsis when too wide.
@@ -374,11 +400,6 @@ pub fn search(ui: &mut Ui, text: &mut String, hint: &str, width: f32, kbd: bool)
         });
 }
 
-/// Rounded square with initials, like the chat and contact avatars.
-pub fn avatar(ui: &mut Ui, initials: &str, picture: Option<&Path>, size: f32, filled: bool) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    paint_avatar(ui, rect, initials, picture, filled);
-}
 
 /// The profile picture when cached, else the initials tile.
 pub fn paint_avatar(ui: &Ui, rect: Rect, initials: &str, picture: Option<&Path>, filled: bool) {

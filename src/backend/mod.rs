@@ -6,6 +6,7 @@
 mod api;
 pub mod call;
 pub mod video;
+pub mod movie;
 mod avatars;
 mod media;
 mod notify;
@@ -28,7 +29,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use registry::Registry;
 use session::{Body, Running};
 pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
-pub use registry::{Device, DeviceKind, NAME_MAX, clean_name};
+pub use registry::{DEFAULT_DEVICE_NAME, Device, DeviceKind, NAME_MAX, clean_name};
 pub use session::mask_phone;
 pub use settings::Settings;
 pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost, short_jid};
@@ -116,6 +117,8 @@ pub struct Shared {
     pub sessions: Vec<SessionView>,
     /// Profile pictures by normalized JID: a cached file, or `None` for no picture.
     pub avatars: Arc<HashMap<String, Option<PathBuf>>>,
+    /// Full-size profile pictures asked for the photo viewer (#92), by JID.
+    pub full_avatars: Arc<HashMap<String, Option<PathBuf>>>,
     /// Downloads by message id: `None` while running, else why it failed.
     /// Finished downloads leave the map and show as the message's file.
     pub downloads: Arc<HashMap<String, Option<String>>>,
@@ -134,6 +137,8 @@ pub struct Shared {
     pub typing: Arc<HashMap<String, Typing>>,
     /// Group members by `session|group` (normalized JID), from `Command::GroupMembers`.
     pub members: Arc<HashMap<String, Vec<Member>>>,
+    /// A group's details for the contact panel (#91), by the same key.
+    pub groups: Arc<HashMap<String, GroupInfo>>,
     /// The voice call ringing or in progress (#39).
     pub call: Option<call::CallView>,
 }
@@ -146,6 +151,32 @@ pub struct Member {
     pub jid: String,
     /// Phone-number JID when known: for `Book::name_of` and display.
     pub phone: Option<String>,
+}
+
+/// What the contact panel shows about a group (#91).
+#[derive(Clone, Debug, Default)]
+pub struct GroupInfo {
+    pub description: Option<String>,
+    /// Who created it (phone-number JID when known) and when (Unix seconds).
+    pub creator: Option<String>,
+    pub created: Option<i64>,
+    /// Everyone in it, this number included (`me`), owners and admins first.
+    pub members: Vec<GroupMember>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupMember {
+    /// Phone-number JID when known, else the group's own address for them.
+    pub jid: String,
+    pub role: MemberRole,
+    pub me: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemberRole {
+    Owner,
+    Admin,
+    Member,
 }
 
 /// A contact typing (or recording a voice note) in a chat.
@@ -254,12 +285,17 @@ pub enum Command {
     MarkUnread { id: String, chat: String },
     /// Archive a chat, or take it out of the archive; synced to the phone.
     Archive { id: String, chat: String, archived: bool },
+    /// Mute a chat until a time (Unix seconds, `i64::MAX` for always), or
+    /// unmute it with `None`; synced with the phone (#87).
+    MuteChat { id: String, chat: String, until: Option<i64> },
     /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
     MarkDone { id: String, chat: String, done: bool },
     /// Ask the phone for messages older than the oldest one we have in `chat`.
     LoadOlder { id: String, chat: String },
     /// Fetch (or load from cache) the profile picture of a chat shown on screen.
     Avatar { id: String, jid: String },
+    /// Fetch (or load from cache) the full-size profile picture, for the viewer.
+    AvatarFull { id: String, jid: String },
     /// Queue a sticker (any picture; converted to 512×512 WebP when needed).
     SendSticker { id: String, chat: String, path: PathBuf },
     /// Queue a voice note recorded in the composer (an Ogg Opus file).
@@ -442,6 +478,13 @@ impl Updater {
         self.ctx.request_repaint();
     }
 
+    pub(crate) fn set_full_avatar(&self, jid: &str, picture: Option<PathBuf>) {
+        if let Ok(mut shared) = self.shared.lock() {
+            Arc::make_mut(&mut shared.full_avatars).insert(jid.to_owned(), picture);
+        }
+        self.ctx.request_repaint();
+    }
+
     pub(crate) fn set_avatar(&self, jid: &str, picture: Option<PathBuf>) {
         if let Ok(mut shared) = self.shared.lock() {
             Arc::make_mut(&mut shared.avatars).insert(jid.to_owned(), picture);
@@ -489,15 +532,16 @@ impl Updater {
         self.ctx.request_repaint();
     }
 
-    /// Stores a group's members for the mention picker.
-    pub(crate) fn set_members(&self, session: &str, group: &str, members: Vec<Member>) {
+    /// Stores a group's members for the mention picker, and its details.
+    pub(crate) fn set_members(&self, session: &str, group: &str, members: Vec<Member>, info: GroupInfo) {
         let key = {
             let book = self.book(session);
             let jid = book.map(|b| b.normalize(group)).unwrap_or_else(|| store::bare(group));
             Typing::key(session, &jid)
         };
         if let Ok(mut shared) = self.shared.lock() {
-            Arc::make_mut(&mut shared.members).insert(key, members);
+            Arc::make_mut(&mut shared.members).insert(key.clone(), members);
+            Arc::make_mut(&mut shared.groups).insert(key, info);
         }
         self.ctx.request_repaint();
     }
@@ -881,6 +925,15 @@ async fn run(
                     r.request_avatar(jid);
                 }
             }
+            Command::AvatarFull { id, jid } => {
+                if let Some(r) = running.get(&id) {
+                    let (client, state) = (r.client(), state.clone());
+                    tokio::spawn(async move {
+                        let picture = avatars::full(&client, &jid).await;
+                        state.set_full_avatar(&jid, picture);
+                    });
+                }
+            }
             Command::WatchPresence { id, chat } => {
                 if let Some(r) = running.get(&id) {
                     r.watch_presence(&id, &chat);
@@ -984,6 +1037,14 @@ async fn run(
                 }
                 if let Some(r) = running.get(&id) {
                     r.set_archived(&id, &chat, archived);
+                }
+            }
+            Command::MuteChat { id, chat, until } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::mute_record(&chat, until)]);
+                }
+                if let Some(r) = running.get(&id) {
+                    r.set_muted(&id, &chat, until);
                 }
             }
             Command::MarkDone { id, chat, done } => {

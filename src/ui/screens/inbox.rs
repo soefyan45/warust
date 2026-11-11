@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::backend::store::PinLength;
-use crate::backend::{Book, Chat, ChatMsg, Command, Delivery, MAX_FILE_BYTES, Media, SessionView, Status};
+use crate::backend::{Book, Chat, ChatMsg, Command, Delivery, MAX_FILE_BYTES, Media, SessionView, Status, movie};
 
 /// Profile pictures by JID, as the backend shares them.
 type Avatars = HashMap<String, Option<PathBuf>>;
@@ -51,6 +51,7 @@ pub fn show(
 ) -> Vec<Command> {
     let p = theme::palette(ui.ctx());
     let mut commands = Vec::new();
+    open_photo(ui.ctx(), state, sessions, &mut commands);
     if state.inbox_scope.as_ref().is_some_and(|id| !sessions.iter().any(|s| &s.id == id)) {
         state.inbox_scope = None;
     }
@@ -120,16 +121,64 @@ pub fn show(
         return commands;
     };
 
-    // The contact panel only when the conversation keeps room to breathe.
-    if state.contact_panel && ui.available_width() >= 980.0 {
-        Panel::right(panel_id(state, "contact"))
-            .default_size(300.0)
-            .size_range(260.0..=400.0)
-            .resizable(true)
-            .show_separator_line(!theme::template().top_nav())
-            .frame(theme::pane(ui.ctx(), p.panel, Margin::same(20)))
-            .show(ui, |ui| contact(ui, &p, &book, chat, avatars, &super::webhook_label(state, &session.id)));
+    // The contact panel beside the chat on the right, in a fixed share of the
+    // column cut by hand (an egui side panel here re-sized itself every
+    // frame and spilled past the window); a column too narrow for both shows
+    // the details as a page of their own with a back button. Never a pop-up.
+    let info = state.groups_now.get(&crate::backend::Typing::key(&session.id, &chat.jid)).cloned();
+    let webhook = super::webhook_label(state, &session.id);
+    let mut open_member = None;
+    let mut chat_ui = None;
+    if state.contact_panel {
+        let column = ui.available_rect_before_wrap();
+        let beside = (column.width() * 0.34).clamp(240.0, 360.0);
+        // The chat's header and composer need their room; below it, a page.
+        let page = column.width() - beside - PANEL_GAP < CHAT_MIN;
+        let width = if page { column.width() } else { beside };
+        let panel_rect = Rect::from_min_max(pos2(column.right() - width, column.top()), column.max);
+        let mut panel_ui = ui.new_child(egui::UiBuilder::new().max_rect(panel_rect).layout(Layout::top_down(Align::Min)));
+        panel_ui.set_clip_rect(panel_rect.intersect(ui.clip_rect()));
+        let mut close = false;
+        open_member = theme::pane(ui.ctx(), p.panel, Margin::same(18))
+            .show(&mut panel_ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                if page {
+                    ui.horizontal(|ui| {
+                        close = widgets::icon_button(ui, "chevron-left", 32.0, false).on_hover_text(tr("Back to the chat", "Kembali ke chat")).clicked();
+                        let label = if chat.is_group() { tr("Group info", "Info grup") } else { tr("Contact info", "Info kontak") };
+                        ui.label(rich(label, 14.0, Weight::SemiBold, p.text));
+                    });
+                    ui.add_space(8.0);
+                }
+                contact_panel(ui, &p, &book, chat, avatars, &webhook, info.as_ref())
+            })
+            .inner;
+        if close {
+            state.contact_panel = false;
+        }
+        if !page {
+            let rest = Rect::from_min_max(column.min, pos2(panel_rect.left() - PANEL_GAP, column.bottom()));
+            chat_ui = Some(ui.new_child(egui::UiBuilder::new().max_rect(rest).layout(*ui.layout())));
+        }
+        ui.allocate_rect(column, Sense::hover());
+        if page {
+            if let Some(jid) = open_member {
+                let existing = book.chats.iter().find(|c| c.jid == jid);
+                open_chat(state, &session.id, &jid, existing);
+                state.contact_panel = false;
+            }
+            return commands;
+        }
     }
+    if let Some(jid) = open_member {
+        let existing = book.chats.iter().find(|c| c.jid == jid);
+        open_chat(state, &session.id, &jid, existing);
+        state.contact_panel = false;
+    }
+    let ui: &mut Ui = match chat_ui.as_mut() {
+        Some(chat_ui) => chat_ui,
+        None => ui,
+    };
     // Header, messages and composer: one card in Forest.
     theme::pane(ui.ctx(), p.bg, Margin::ZERO).show(ui, |ui| {
     ui.set_min_size(ui.available_size());
@@ -141,11 +190,25 @@ pub fn show(
         .frame(Frame::NONE.fill(surface).corner_radius(theme::top_corners()).inner_margin(Margin { left: 24, right: 16, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let call_on = state.call_now.is_some();
+            let mut info_clicked = false;
+            // Short of room, the right side gets smaller so the name stays readable.
+            let narrow = ui.available_width() < 860.0;
             widgets::row(
                 ui,
                 52.0,
                 |ui| {
-                    ui.label(rich(&super::chat_title(&book, chat), 14.0, Weight::SemiBold, p.text));
+                    let hint = if chat.is_group() { tr("Group info", "Info grup") } else { tr("Contact info", "Info kontak") };
+                    // The name gives way ("…") so the number chip after it still shows.
+                    let room = (ui.available_width() - if several { 200.0 } else { 40.0 }).max(80.0);
+                    let name = ui
+                        .allocate_ui(vec2(room, 24.0), |ui| ui.add(egui::Label::new(rich(&super::chat_title(&book, chat), 14.0, Weight::SemiBold, p.text)).truncate().sense(Sense::click())))
+                        .inner;
+                    if name.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
+                        info_clicked = true;
+                    }
+                    if chat.is_muted(time::now()) {
+                        icons::show(ui, "bell-off", 14.0, p.muted);
+                    }
                     if several {
                         // Which number the chat came in on, and so replies from.
                         ui.label(rich(tr("to", "masuk ke"), 12.0, Weight::Regular, p.muted));
@@ -177,16 +240,19 @@ pub fn show(
                     // A group only while a mention waits: marking it done clears the `@`.
                     if !chat.is_group() || chat.mention_pending() || chat.is_done() {
                         ui.add_space(4.0);
-                        if let Some(done) = done_button(ui, chat) {
+                        if let Some(done) = done_button(ui, chat, narrow) {
                             commands.push(Command::MarkDone { id: session.id.clone(), chat: chat.jid.clone(), done });
                         }
-                        if chat.needs_reply() {
+                        if chat.needs_reply() && !narrow {
                             ui.add_space(4.0);
                             reply_badge(ui, &p);
                         }
                     }
                 },
             );
+            if info_clicked {
+                state.contact_panel = true;
+            }
         });
     Panel::bottom(panel_id(state, "composer"))
         .resizable(false)
@@ -379,7 +445,7 @@ fn call_buttons(ui: &mut Ui, p: &Palette, call_on: bool, session: &SessionView, 
     }
 }
 
-fn done_button(ui: &mut Ui, chat: &Chat) -> Option<bool> {
+fn done_button(ui: &mut Ui, chat: &Chat, narrow: bool) -> Option<bool> {
     let done = chat.is_done();
     let (icon, label, hint) = if done {
         ("check", tr("Done", "Selesai"), tr("Mark as needing a reply again", "Tandai perlu balas lagi"))
@@ -390,6 +456,10 @@ fn done_button(ui: &mut Ui, chat: &Chat) -> Option<bool> {
             tr("Move to the Done tab until a new message arrives", "Pindahkan ke tab Selesai sampai ada pesan baru"),
         )
     };
+    // A narrow header keeps only the check, the label moves to the hint.
+    if narrow {
+        return widgets::icon_button(ui, icon, 32.0, done).on_hover_text(format!("{label}: {hint}")).clicked().then_some(!done);
+    }
     let kind = if done { Kind::Primary } else { Kind::Secondary };
     widgets::button(ui, Some(icon), label, kind).on_hover_text(hint).clicked().then_some(!done)
 }
@@ -697,8 +767,28 @@ fn chat_menu(row: &egui::Response, session: &SessionView, chat: &Chat, commands:
         } else if ui.button(tr("Mark as unread", "Tandai belum dibaca")).clicked() {
             commands.push(Command::MarkUnread { id: id.clone(), chat: jid.clone() });
         }
+        mute_menu(ui, &id, &jid, chat, commands);
         if ui.button(if chat.archived { tr("Unarchive", "Keluarkan dari arsip") } else { tr("Archive", "Arsipkan") }).clicked() {
             commands.push(Command::Archive { id, chat: jid, archived: !chat.archived });
+        }
+    });
+}
+
+/// "Unmute", or "Mute notifications" for 8 hours, a week or always, as on
+/// the phone; synced with it (#87).
+fn mute_menu(ui: &mut Ui, id: &str, jid: &str, chat: &Chat, commands: &mut Vec<Command>) {
+    let now = time::now();
+    if chat.is_muted(now) {
+        if ui.button(tr("Unmute", "Bunyikan lagi")).clicked() {
+            commands.push(Command::MuteChat { id: id.to_owned(), chat: jid.to_owned(), until: None });
+        }
+        return;
+    }
+    ui.menu_button(tr("Mute notifications", "Bisukan notifikasi"), |ui| {
+        for (label, until) in [(tr("8 hours", "8 jam"), now + 8 * 3600), (tr("1 week", "1 minggu"), now + 7 * 24 * 3600), (tr("Always", "Selalu"), i64::MAX)] {
+            if ui.button(label).clicked() {
+                commands.push(Command::MuteChat { id: id.to_owned(), chat: jid.to_owned(), until: Some(until) });
+            }
         }
     });
 }
@@ -918,6 +1008,7 @@ fn chat_row(
     let tile = Rect::from_min_size(pos2(row.left() + 12.0, row.top() + 12.0), vec2(32.0, 32.0));
     let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(title) };
     widgets::paint_avatar(ui, tile, &initials, picture, selected);
+    photo_target(ui, tile, Some(session), &chat.jid, title, picture);
 
     let left = tile.right() + 12.0;
     let right = row.right() - 12.0;
@@ -933,9 +1024,16 @@ fn chat_row(
     let name = Rect::from_min_max(top.min, pos2(right - time_w - 8.0, top.bottom()));
     widgets::paint_text(ui, name, title, fonts::ui(14.0, Weight::SemiBold), p.text, Align::Min);
     let at = chat.mention_pending();
-    let reserve = if chat.unread > 0 { 30.0 } else { 0.0 } + if at { 26.0 } else { 0.0 };
+    let badges = if chat.unread > 0 { 30.0 } else { 0.0 } + if at { 26.0 } else { 0.0 };
+    // Muted here or on the phone: a struck bell before the badges (#87).
+    let muted = chat.is_muted(time::now());
+    let reserve = badges + if muted { 22.0 } else { 0.0 };
     let preview_rect = Rect::from_min_max(bottom.min, pos2(right - reserve, bottom.bottom()));
     paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing, resp.hovered());
+    if muted {
+        let bell = Rect::from_min_size(pos2(right - badges - 18.0, bottom.center().y - 8.0), vec2(16.0, 16.0));
+        icons::paint(ui, bell, "bell-off", 15.0, p.muted);
+    }
     if at {
         // "@": a mention is waiting; sits before the unread count.
         let x = right - if chat.unread > 0 { 26.0 + 18.0 } else { 18.0 };
@@ -1122,6 +1220,8 @@ enum MediaClick {
     OpenPdf(PathBuf, String),
     /// "Call back" on a call's line: a video call (true) or a voice call.
     Call(bool),
+    /// A downloaded video and its title, for the in-app player (#84).
+    PlayVideo(PathBuf, String),
 }
 
 const PREVIEW_HEIGHT: f32 = 140.0;
@@ -1711,6 +1811,9 @@ fn paint_media(
     }
     match (&media.file, shown) {
         (Some(_), MediaBox::Document { pdf: Some(file), .. }) => Some(MediaClick::OpenPdf(file.clone(), media_title(media))),
+        (Some(file), _) if media.kind == "video" && movie::available() && media.seconds.is_none_or(|s| s as f32 <= movie::MAX_SECONDS) => {
+            Some(MediaClick::PlayVideo(file.clone(), media_title(media)))
+        }
         (Some(file), _) => {
             open_file(file);
             None
@@ -1847,6 +1950,7 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
     match event {
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
+        MsgEvent::Media(MediaClick::PlayVideo(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
         MsgEvent::Media(MediaClick::Call(video)) => {
             if state.call_now.is_none() && !chat.is_group() {
                 commands.push(Command::PlaceCall { id: session.id.clone(), chat: chat.jid.clone(), video });
@@ -3234,11 +3338,14 @@ fn composer(
 ) -> Option<Outgoing> {
     let connected = session.status == Status::Connected;
     let id = ui.make_persistent_id("composer_text");
-    // Taken even while a voice note hides the text box, so the focus does not
-    // jump there later.
-    let opened = std::mem::take(&mut state.focus_composer);
+    let opened = take_open_focus(ui, state);
     match voice_note(ui, p, state, session, chat, compact) {
-        Err(()) => return None,
+        Err(()) => {
+            // A voice note hides the text box: drop the request, so the focus
+            // does not jump there later.
+            state.focus_composer = false;
+            return None;
+        }
         Ok(Some(voice)) => return Some(voice),
         Ok(None) => {}
     }
@@ -3512,6 +3619,22 @@ fn wire_text(group: bool, message: &str, picks: &[(String, String)]) -> (String,
     }
 }
 
+/// Whether the text box takes the keyboard this frame because its chat was
+/// just opened. egui drops the focus of a box when a click lands elsewhere,
+/// and the click on the chat's row is such a click when the list and the text
+/// box share a frame: the request then waits for the frame after it.
+fn take_open_focus(ui: &Ui, state: &mut State) -> bool {
+    if !state.focus_composer {
+        return false;
+    }
+    if ui.input(|i| i.pointer.any_down() || i.pointer.any_click()) {
+        ui.ctx().request_repaint();
+        return false;
+    }
+    state.focus_composer = false;
+    true
+}
+
 /// Shift+Enter (or Alt+Enter) inside a list: starts the next item, or ends the
 /// list on an empty one, in place of the text box's plain new line. With a
 /// selection the text box handles the key itself.
@@ -3669,6 +3792,120 @@ fn mention_popup(ui: &mut Ui, p: &Palette, state: &mut State, input: &mut Mentio
     }
 }
 
+/// The narrowest the chat may get with the panel beside it: its header
+/// (name, number chip, call buttons, Done) and composer need this much.
+const CHAT_MIN: f32 = 640.0;
+/// Space between the chat and the panel beside it.
+const PANEL_GAP: f32 = 12.0;
+
+/// Makes a profile picture at `rect` open the photo viewer (#92) when
+/// clicked; one without a picture stays as it is. `session` is the number
+/// to ask WhatsApp through, else any connected one.
+fn photo_target(ui: &Ui, rect: Rect, session: Option<&str>, jid: &str, title: &str, picture: Option<&Path>) {
+    let Some(picture) = picture.filter(|_| !crate::ui::privacy::hide_names()) else { return };
+    let response = ui.interact(rect, ui.scope_id().with(("photo", jid, rect.min.x as i32, rect.min.y as i32)), Sense::click());
+    if response.on_hover_cursor(CursorIcon::ZoomIn).on_hover_text(tr("View photo", "Lihat foto")).clicked() {
+        let ask = (session.map(str::to_owned), jid.to_owned(), title.to_owned(), picture.to_path_buf());
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("photo_ask"), ask));
+    }
+}
+
+/// Opens the photo a picture asked for, and asks WhatsApp for its full size.
+fn open_photo(ctx: &egui::Context, state: &mut State, sessions: &[SessionView], commands: &mut Vec<Command>) {
+    let ask: Option<(Option<String>, String, String, PathBuf)> = ctx.data_mut(|d| d.remove_temp(egui::Id::unique("photo_ask")));
+    let Some((session, jid, title, preview)) = ask else { return };
+    let session = session.or_else(|| sessions.iter().find(|s| s.status == Status::Connected).map(|s| s.id.clone()));
+    if let Some(id) = session.filter(|_| !state.full_avatars.contains_key(&jid)) {
+        commands.push(Command::AvatarFull { id, jid: jid.clone() });
+    }
+    state.photo_view = Some(crate::ui::photo_view::Viewer { jid, title, preview: Some(preview) });
+}
+
+/// The contact panel's content, scrolling: the contact, or a group with its
+/// members (#91). Returns the member whose chat was asked for.
+fn contact_panel(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars, webhook: &str, info: Option<&crate::backend::GroupInfo>) -> Option<String> {
+    let mut open = None;
+    ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+        contact(ui, p, book, chat, avatars, webhook);
+        if chat.is_group() {
+            ui.add_space(20.0);
+            open = group_details(ui, p, book, chat, avatars, info);
+        }
+    });
+    open
+}
+
+/// A group's description, who made it and when, and its members with owners
+/// and admins marked; a member's row opens their chat.
+fn group_details(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars, info: Option<&crate::backend::GroupInfo>) -> Option<String> {
+    let mut open = None;
+    let Some(info) = info else {
+        ui.label(rich(tr("Loading members…", "Memuat anggota…"), 12.0, Weight::Regular, p.muted));
+        return None;
+    };
+    ui.spacing_mut().item_spacing.y = 10.0;
+    if let Some(description) = &info.description {
+        widgets::section_label(ui, tr("Description", "Deskripsi"));
+        ui.add(egui::Label::new(rich(description, 13.0, Weight::Regular, p.text_2)).wrap());
+    }
+    let creator = info.creator.as_deref().map(|jid| book.name_of(jid).map(str::to_owned).unwrap_or_else(|| super::mask_phone(jid)));
+    let made = match (creator, info.created) {
+        (Some(who), Some(at)) => Some(crate::trf!("Created by {who}, {}", "Dibuat oleh {who}, {}", time::day_label(at))),
+        (None, Some(at)) => Some(crate::trf!("Created {}", "Dibuat {}", time::day_label(at))),
+        (Some(who), None) => Some(crate::trf!("Created by {who}", "Dibuat oleh {who}")),
+        (None, None) => None,
+    };
+    if let Some(made) = made {
+        ui.label(rich(&made, 12.0, Weight::Regular, p.muted));
+    }
+    let count = info.members.len();
+    widgets::section_label(ui, &if count == 1 { tr("1 member", "1 anggota").to_owned() } else { crate::trf!("{count} members", "{count} anggota") });
+    let search_id = ui.make_persistent_id(("group_member_search", &chat.jid));
+    let mut search: String = ui.data(|d| d.get_temp(search_id)).unwrap_or_default();
+    if count > 8 {
+        widgets::search(ui, &mut search, tr("Search members", "Cari anggota"), ui.available_width(), false);
+        ui.data_mut(|d| d.insert_temp(search_id, search.clone()));
+    }
+    let query = search.trim().to_lowercase();
+    ui.spacing_mut().item_spacing.y = 2.0;
+    for member in &info.members {
+        let name = if member.me { tr("You", "Anda").to_owned() } else { book.name_of(&member.jid).map(str::to_owned).unwrap_or_else(|| super::mask_phone(&member.jid)) };
+        let number = super::mask_phone(&member.jid);
+        if !query.is_empty() && !name.to_lowercase().contains(&query) && !member.jid.contains(&query) {
+            continue;
+        }
+        let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 46.0), if member.me { Sense::hover() } else { Sense::click() });
+        if response.hovered() && !member.me {
+            ui.painter().rect_filled(row, R_MD, p.raised);
+        }
+        let face = Rect::from_min_size(pos2(row.left() + 4.0, row.center().y - 16.0), vec2(32.0, 32.0));
+        let picture = avatars.get(&member.jid).and_then(|p| p.as_deref());
+        paint_member_face(ui, face, &super::initials(&name), picture, member_color(&member.jid, is_dark(p.bg)));
+        photo_target(ui, face, None, &member.jid, &name, picture);
+        let badge = match member.role {
+            crate::backend::MemberRole::Owner => Some(tr("Owner", "Pemilik")),
+            crate::backend::MemberRole::Admin => Some(tr("Admin", "Admin")),
+            crate::backend::MemberRole::Member => None,
+        };
+        let badge_w = badge.map(|b| ui.painter().layout_no_wrap(b.to_owned(), fonts::ui(11.0, Weight::SemiBold), p.accent_text).size().x + 16.0).unwrap_or(0.0);
+        let text_left = face.right() + 10.0;
+        let text_right = row.right() - badge_w - 8.0;
+        widgets::paint_text(ui, Rect::from_min_max(pos2(text_left, row.top() + 6.0), pos2(text_right, row.center().y)), &name, fonts::ui(13.5, Weight::SemiBold), p.text, Align::Min);
+        if !member.me && name != number {
+            widgets::paint_text(ui, Rect::from_min_max(pos2(text_left, row.center().y + 1.0), pos2(text_right, row.bottom() - 4.0)), &number, fonts::mono(11.5), p.muted, Align::Min);
+        }
+        if let Some(badge) = badge {
+            let pill = Rect::from_min_size(pos2(row.right() - badge_w - 4.0, row.center().y - 10.0), vec2(badge_w, 20.0));
+            ui.painter().rect_filled(pill, 10.0, p.accent_soft);
+            widgets::paint_text(ui, pill, badge, fonts::ui(11.0, Weight::SemiBold), p.accent_text, Align::Center);
+        }
+        if !member.me && response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Open chat", "Buka chat")).clicked() {
+            open = Some(member.jid.clone());
+        }
+    }
+    open
+}
+
 fn contact(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars, webhook: &str) {
     ui.spacing_mut().item_spacing.y = 20.0;
     let title = super::chat_title(book, chat);
@@ -3676,7 +3913,9 @@ fn contact(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars
         ui.spacing_mut().item_spacing.y = 10.0;
         let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(&title) };
         let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
-        widgets::avatar(ui, &initials, picture, 48.0, false);
+        let (face, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
+        widgets::paint_avatar(ui, face, &initials, picture, false);
+        photo_target(ui, face, None, &chat.jid, &title, picture);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.label(rich(&title, 16.0, Weight::SemiBold, p.text));
@@ -3738,6 +3977,8 @@ pub fn compact(
     downloads: &Downloads,
     auto_stickers: bool,
 ) -> Vec<Command> {
+    let mut photo_commands = Vec::new();
+    open_photo(ui.ctx(), state, sessions, &mut photo_commands);
     if state.inbox_scope.as_ref().is_some_and(|id| !sessions.iter().any(|s| &s.id == id)) {
         state.inbox_scope = None;
     }
@@ -3755,13 +3996,15 @@ pub fn compact(
         .as_ref()
         .and_then(|id| sessions.iter().find(|s| &s.id == id))
         .and_then(|s| state.chat_selected.as_ref().and_then(|jid| s.book.chats.iter().find(|c| &c.jid == jid)).map(|c| (s, c)));
-    match open {
+    let mut commands = match open {
         Some((session, chat)) => compact_chat(ui, state, session, chat, sessions.len() > 1, avatars, downloads, auto_stickers),
         None => {
             state.chat_selected = None;
             compact_list(ui, state, sessions, avatars)
         }
-    }
+    };
+    commands.extend(photo_commands);
+    commands
 }
 
 const M_ROW: f32 = 72.0;
@@ -3948,6 +4191,7 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     let tile = Rect::from_min_size(pos2(row.left() + PAD, row.top() + 14.0), vec2(44.0, 44.0));
     let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(title) };
     phone::avatar(ui, tile, &initials, picture, chat.unread > 0);
+    photo_target(ui, tile, Some(session), &chat.jid, title, picture);
     let left = tile.right() + 16.0;
     let right = row.right() - PAD;
     let when = ui.painter().layout_no_wrap(time::short(chat.last_ts()), fonts::ui(12.0, Weight::Regular), p.muted);
@@ -3957,9 +4201,15 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     widgets::paint_text(ui, name, title, fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
     let at = chat.mention_pending();
     let unread_w = if chat.unread > 9 { 28.0 } else { 20.0 };
-    let reserve = if chat.unread > 0 { unread_w + 12.0 } else { 0.0 } + if at { 28.0 } else { 0.0 };
+    let badges = if chat.unread > 0 { unread_w + 12.0 } else { 0.0 } + if at { 28.0 } else { 0.0 };
+    let muted = chat.is_muted(time::now());
+    let reserve = badges + if muted { 24.0 } else { 0.0 };
     let line = Rect::from_min_max(pos2(left, row.top() + 35.0), pos2(right - reserve, row.top() + 56.0));
     paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing, resp.hovered());
+    if muted {
+        let bell = Rect::from_min_size(pos2(right - badges - 20.0, line.center().y - 9.0), vec2(18.0, 18.0));
+        icons::paint(ui, bell, "bell-off", 17.0, p.muted);
+    }
     if at {
         let x = right - if chat.unread > 0 { unread_w + 6.0 + 20.0 } else { 20.0 };
         let badge = Rect::from_min_size(pos2(x, line.center().y - 10.0), vec2(20.0, 20.0));
@@ -4010,18 +4260,29 @@ fn compact_chat(
             let bar = ui.max_rect().expand2(vec2(8.0, 0.0));
             ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, p.border));
             let call_on = state.call_now.is_some();
+            let mut info_clicked = false;
             widgets::row(
                 ui,
                 64.0,
                 |ui| {
                     if widgets::icon_button(ui, "chevron-left", 36.0, false).on_hover_text(tr("Back", "Kembali")).clicked() {
-                        state.chat_selected = None;
+                        // From the details page back to the chat, else to the list.
+                        if state.contact_panel {
+                            state.contact_panel = false;
+                        } else {
+                            state.chat_selected = None;
+                        }
                     }
                     let (tile, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
                     let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(&title) };
-                    phone::avatar(ui, tile, &initials, avatars.get(&chat.jid).and_then(|p| p.as_deref()), true);
+                    let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
+                    phone::avatar(ui, tile, &initials, picture, true);
+                    photo_target(ui, tile, Some(&session.id), &chat.jid, &title, picture);
                     ui.add_space(4.0);
-                    let (text, _) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::hover());
+                    let (text, title_click) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+                    if title_click.clicked() {
+                        info_clicked = true;
+                    }
                     let top = Rect::from_min_max(text.min, pos2(text.right(), text.top() + 22.0));
                     widgets::paint_text(ui, top, &title, fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
                     let bottom = Rect::from_min_max(pos2(text.left(), text.top() + 23.0), text.max);
@@ -4048,6 +4309,7 @@ fn compact_chat(
                         if ui.button(tr("Copy number", "Salin nomor")).clicked() {
                             ui.ctx().copy_text(chat.jid.split('@').next().unwrap_or_default().to_owned());
                         }
+                        mute_menu(ui, &session.id, &chat.jid, chat, &mut commands);
                         if !chat.is_group() || chat.mention_pending() || chat.is_done() {
                             let done = chat.is_done();
                             if ui.button(if done { tr("Mark needs reply", "Tandai perlu balas") } else { tr("Mark done", "Tandai selesai") }).clicked() {
@@ -4057,7 +4319,30 @@ fn compact_chat(
                     });
                 },
             );
+            if info_clicked {
+                state.contact_panel = true;
+            }
         });
+    // The contact or group details as a page of their own in place of the
+    // chat, like the phone (#91); back returns to the chat.
+    if state.contact_panel {
+        let info = state.groups_now.get(&crate::backend::Typing::key(&session.id, &chat.jid)).cloned();
+        let webhook = super::webhook_label(state, &session.id);
+        let back = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        let open = CentralPanel::default()
+            .frame(Frame::NONE.fill(p.panel).inner_margin(Margin::symmetric(16, 12)))
+            .show(ui, |ui| contact_panel(ui, &p, book, chat, avatars, &webhook, info.as_ref()))
+            .inner;
+        if back {
+            state.contact_panel = false;
+        }
+        if let Some(jid) = open {
+            let existing = book.chats.iter().find(|c| c.jid == jid);
+            open_chat(state, &session.id, &jid, existing);
+            state.contact_panel = false;
+        }
+        return commands;
+    }
     Panel::bottom(panel_id(state, "m_composer"))
         .resizable(false)
         .show_separator_line(false)
@@ -4213,7 +4498,7 @@ mod typing_tests {
     fn contact_typing_label() {
         use crate::backend::{Book, Chat, Typing};
         use std::time::{Duration, Instant};
-        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new() };
+        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new(), muted_until: None };
         let book = Book::default();
         let mut state = State::default();
         assert_eq!(typing_label(&state, "s1", &book, &chat), None);
@@ -4320,6 +4605,58 @@ mod preview_tests {
         assert!(preview_veiled(true, false));
         assert!(!preview_veiled(true, true), "the cursor is on the row");
         assert!(!preview_veiled(false, false), "anti-peek is off");
+    }
+}
+
+#[cfg(test)]
+mod open_focus_tests {
+    use super::*;
+
+    /// One frame with a text box that takes the focus a just-opened chat asks
+    /// for; whether the box has the keyboard after it.
+    fn frame(ctx: &egui::Context, state: &mut State, events: Vec<egui::Event>) -> bool {
+        let id = egui::Id::unique("box");
+        let mut text = String::new();
+        let input = egui::RawInput { events, ..Default::default() };
+        ctx.run_ui(input, |ui| {
+            if take_open_focus(ui, state) {
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            ui.add(egui::TextEdit::singleline(&mut text).id(id));
+        })
+        .textures_delta
+        .clear();
+        ctx.memory(|m| m.has_focus(id))
+    }
+
+    /// A click far from the text box, as on a row of the chat list.
+    fn click_elsewhere() -> Vec<egui::Event> {
+        let pos = pos2(600.0, 400.0);
+        let button = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
+    #[test]
+    fn the_click_that_opens_a_chat_does_not_cost_the_focus() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        frame(&ctx, &mut state, Vec::new());
+        // The wide layout: the row is clicked and the text box drawn in one
+        // frame. egui drops the focus of a box clicked away from, so the
+        // request waits for the next frame.
+        state.focus_composer = true;
+        frame(&ctx, &mut state, click_elsewhere());
+        assert!(frame(&ctx, &mut state, Vec::new()), "the text box has the keyboard after the click");
+        assert!(!state.focus_composer);
+    }
+
+    #[test]
+    fn without_a_click_the_focus_comes_at_once() {
+        // The phone layout and a clicked notification: no click this frame.
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.focus_composer = true;
+        assert!(frame(&ctx, &mut state, Vec::new()));
     }
 }
 
