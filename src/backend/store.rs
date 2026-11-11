@@ -358,6 +358,9 @@ pub struct Book {
     /// whether those were read in full once like `mutes_synced`.
     status_muted: HashSet<String>,
     pub status_mutes_synced: bool,
+    /// The phone's saved contacts were read in full once (#115), like
+    /// `mutes_synced`.
+    pub contacts_synced: bool,
     /// Messages deleted for me: history repeating them does not bring them back.
     hidden: HashSet<String>,
 }
@@ -514,6 +517,12 @@ impl Book {
             Some("name") => {
                 if let (Some(chat), Some(name)) = (text("chat"), text("name")) {
                     self.names.insert(self.normalize(&chat), name);
+                }
+            }
+            // A contact no longer saved on the phone (#115): its push name shows again.
+            Some("unname") => {
+                if let Some(chat) = text("chat") {
+                    self.names.remove(&self.normalize(&chat));
                 }
             }
             Some("push") => {
@@ -686,6 +695,7 @@ impl Book {
             }
             Some("mutesync") => self.mutes_synced = true,
             Some("smutesync") => self.status_mutes_synced = true,
+            Some("csync") => self.contacts_synced = true,
             Some("smute") => {
                 if let Some(jid) = text("jid") {
                     let jid = self.normalize(&jid);
@@ -916,6 +926,16 @@ pub fn status_record(id: &str, status: &Delivery) -> Value {
 
 pub fn name_record(chat: &str, name: &str) -> Value {
     json!({ "t": "name", "chat": chat, "name": name })
+}
+
+/// `chat` is no longer a saved contact on the phone (#115).
+pub fn unname_record(chat: &str) -> Value {
+    json!({ "t": "unname", "chat": chat })
+}
+
+/// The phone's saved contacts were read in full (#115).
+pub fn contacts_synced_record() -> Value {
+    json!({ "t": "csync" })
 }
 
 pub fn push_record(jid: &str, name: &str) -> Value {
@@ -1218,6 +1238,25 @@ mod tests {
         assert_eq!(b.chats.len(), 1);
         assert_eq!(b.name_of("9@s.whatsapp.net"), Some("Budi Kantor"));
         assert_eq!(b.name_of("9:2@s.whatsapp.net"), Some("Budi Kantor"));
+    }
+
+    #[test]
+    fn saved_names_win_over_push_names_until_removed() {
+        let b = book(&[
+            push_record("9@s.whatsapp.net", "Ud4 Ibrahim"),
+            msg_record("9@s.whatsapp.net", "m", false, "9@s.whatsapp.net", "hai", 1, &Delivery::Received, false),
+            lid_record("77@lid", "9@s.whatsapp.net"),
+            name_record("77@lid", "Ibrahim Kantor"),
+            contacts_synced_record(),
+        ]);
+        assert_eq!(b.name_of("9@s.whatsapp.net"), Some("Ibrahim Kantor"));
+        assert!(b.contacts_synced);
+        let b = book(&[
+            push_record("9@s.whatsapp.net", "Ud4 Ibrahim"),
+            name_record("9@s.whatsapp.net", "Ibrahim Kantor"),
+            unname_record("9@s.whatsapp.net"),
+        ]);
+        assert_eq!(b.name_of("9@s.whatsapp.net"), Some("Ud4 Ibrahim"));
     }
 
     #[test]

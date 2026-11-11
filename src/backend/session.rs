@@ -767,6 +767,39 @@ fn sync_mutes_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client:
     });
 }
 
+/// Reads the phone's saved contacts once (#115), like the mutes: a number
+/// linked before warust read them never got the names saved long ago;
+/// replaying their collection brings each back as a `ContactUpdate`.
+fn sync_contacts_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: Arc<Client>) {
+    if state.book(id).is_none_or(|book| book.contacts_synced) {
+        return;
+    }
+    let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
+    tokio::spawn(async move {
+        match client.resync_app_state_collection(whatsapp_rust::WAPatchName::CriticalUnblockLow).await {
+            Ok(_) => state.record(&id, &chats, &[store::contacts_synced_record()]),
+            Err(e) => log::warn!("session {id}: reading contacts from the phone failed: {e}"),
+        }
+    });
+}
+
+/// A contact saved on the phone (#115): the LID ↔ number pair it carries
+/// first, then its name under every JID it goes by, so the chat finds it
+/// whichever one it uses.
+fn contact_records(jid: &str, action: &wa::sync_action_value::ContactAction) -> Vec<Value> {
+    let name = [&action.full_name, &action.first_name].into_iter().flatten().map(|n| n.trim()).find(|n| !n.is_empty());
+    let mut records = Vec::new();
+    if let (Some(lid), Some(pn)) = (&action.lid_jid, &action.pn_jid) {
+        records.push(store::lid_record(lid, pn));
+    }
+    if let Some(name) = name {
+        for jid in std::iter::once(jid).chain(action.pn_jid.as_deref()).chain(action.lid_jid.as_deref()) {
+            records.push(store::name_record(jid, name));
+        }
+    }
+    records
+}
+
 /// The id of the message a "delete for everyone" takes back.
 fn revoked(message: &wa::Message) -> Option<String> {
     use wa::message::protocol_message::Type;
@@ -991,6 +1024,7 @@ async fn on_event(
         Event::Connected(_) => {
             fetch_group_names(state, id, chats, client.clone());
             sync_mutes_once(state, id, chats, client.clone());
+            sync_contacts_once(state, id, chats, client.clone());
             let phone = client.pn().map(|jid| mask_phone(&jid.to_string()));
             let own_number = client.pn().map(|jid| store::bare(&jid.to_string()).split('@').next().unwrap_or_default().to_owned());
             let own_lid = client.lid().map(|jid| user_part(&jid.to_string()).to_owned());
@@ -1072,6 +1106,13 @@ async fn on_event(
                 _ => i64::MAX,
             });
             state.record(id, chats, &[store::mute_record(&update.jid.to_string(), until)]);
+        }
+        // Saved, renamed or deleted in the phone's address book (#115).
+        Event::ContactUpdate(update) => {
+            state.record(id, chats, &contact_records(&update.jid.to_string(), &update.action));
+        }
+        Event::ContactRemoved(update) => {
+            state.record(id, chats, &[store::unname_record(&update.jid.to_string())]);
         }
         // A contact's status updates muted or unmuted on the phone (#101).
         Event::UserStatusMuteUpdate(update) => {
