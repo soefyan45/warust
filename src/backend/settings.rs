@@ -72,6 +72,24 @@ impl Webhook {
 }
 
 /// Desktop notifications for incoming messages.
+/// Looking for new releases (#93).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    /// Check GitHub on start and once a day.
+    pub auto_check: bool,
+    /// Download, check and install a new release by itself, then restart.
+    pub auto_install: bool,
+    /// A version the user put off with "Later": no banner for it.
+    pub skipped: String,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self { auto_check: true, auto_install: true, skipped: String::new() }
+    }
+}
+
 /// Anti-peek mode (#57): keeps chats unreadable to people behind the user.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -180,9 +198,33 @@ pub struct Settings {
     pub wallpaper_file: String,
     /// How much a custom picture is dimmed toward the chat colour, 0 to 80 %.
     pub wallpaper_dim: u8,
+    /// A number's own chat wallpaper, by session id (#60). A number not in
+    /// here uses the app's.
+    pub number_wallpapers: HashMap<String, NumberWallpaper>,
     pub privacy: Privacy,
     /// Forest top bar: the navigation shows only its icons (#102).
     pub nav_icons_only: bool,
+    pub updates: Updates,
+}
+
+/// A number's chat wallpaper: the same choices as the app's `wallpaper`,
+/// `wallpaper_file` and `wallpaper_dim`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NumberWallpaper {
+    pub key: String,
+    pub file: String,
+    pub dim: u8,
+}
+
+/// Deletes a copied wallpaper picture, only ever inside the data folder's
+/// `wallpapers` (never a file the user picked).
+pub fn forget_wallpaper(data_dir: &Path, file: &str) {
+    let dir = data_dir.join("wallpapers");
+    let path = Path::new(file);
+    if !file.is_empty() && path.parent() == Some(dir.as_path()) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 impl Default for Settings {
@@ -203,8 +245,10 @@ impl Default for Settings {
             wallpaper: "auto".to_owned(),
             wallpaper_file: String::new(),
             wallpaper_dim: 30,
+            number_wallpapers: HashMap::new(),
             privacy: Privacy::default(),
             nav_icons_only: false,
+            updates: Updates::default(),
         }
     }
 }

@@ -92,6 +92,21 @@ pub enum VoiceStep {
     Failed(String, std::time::Instant),
 }
 
+/// The "Chat wallpaper" dialog of a number (#60): which number, and its
+/// choice as edited (key `app` = the app's wallpaper).
+pub struct NumberWallpaperEdit {
+    pub id: String,
+    pub name: String,
+    pub wall: backend::settings::NumberWallpaper,
+}
+
+impl NumberWallpaperEdit {
+    pub fn new(settings: &backend::Settings, session: &SessionView) -> Self {
+        let wall = settings.number_wallpapers.get(&session.id).cloned().unwrap_or_else(|| backend::settings::NumberWallpaper { key: "app".to_owned(), file: String::new(), dim: 30 });
+        Self { id: session.id.clone(), name: session.name.clone(), wall }
+    }
+}
+
 /// UI state that survives between frames.
 #[derive(Default)]
 pub struct State {
@@ -163,6 +178,8 @@ pub struct State {
     /// The voice call from the backend (#39), and whether the phone layout
     /// shows it as a banner.
     pub call_now: Option<backend::call::CallView>,
+    /// The latest release check (#93), for the banner and Settings.
+    pub update: backend::update::UpdateState,
     pub call_minimized: bool,
     /// The call's video pictures as textures (#55).
     pub call_textures: call::Textures,
@@ -188,6 +205,8 @@ pub struct State {
     pub confirm_remove: Option<String>,
     /// "Ganti nama" dialog: the number and the name being typed.
     pub rename: Option<(String, String)>,
+    /// "Chat wallpaper" dialog of a number (#60).
+    pub number_wallpaper: Option<NumberWallpaperEdit>,
     /// "Tautkan ulang" waiting for a yes: it deletes the number's keys.
     pub confirm_relink: Option<String>,
     /// The saved settings, for screens that show them (webhook per number).
@@ -234,6 +253,9 @@ pub struct State {
     pub status_comment: String,
     pub status_shown: Option<(String, std::time::Instant)>,
     pub status_paused: bool,
+    /// The Status list's filter (#101): 0 all (the default), 1 not muted,
+    /// 2 muted only.
+    pub status_filter: usize,
     /// A screen asked to open this chat (session id, JID) in the Inbox.
     pub open_chat_requested: Option<(String, String)>,
     /// Unread messages of the chat that was just opened, captured before `Seen` clears them.
@@ -275,6 +297,8 @@ pub struct App {
     seen: seen::Watch,
     /// The unread count last shown on the taskbar icon and the title.
     shown_unread: Option<u32>,
+    /// A ready update was asked to install (once per download, #93).
+    update_asked: bool,
     /// Numbers open in windows of their own (issue #28).
     windows: Vec<NumberWindow>,
 }
@@ -348,6 +372,7 @@ impl App {
             lock: privacy::Lock::default(),
             windows: Vec::new(),
             shown_unread: None,
+            update_asked: false,
             state: State {
                 contact_panel: true,
                 // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
@@ -512,6 +537,83 @@ impl App {
             });
     }
 
+    /// The update bar under the top bar (#93): a new release to download
+    /// (What's new, Download, Later), or, installing by itself, its download,
+    /// "installs when idle" and the install. Once nothing is going on (no
+    /// call, empty queues, no recording, nothing typed) a ready update
+    /// installs, and the window closes for warust to start again.
+    fn update_banner(&mut self, ui: &mut Ui) {
+        use backend::update::UpdateState;
+        let update = self.state.update.clone();
+        if !matches!(update, UpdateState::Ready(_)) {
+            self.update_asked = false;
+        }
+        let (text, release, buttons) = match &update {
+            UpdateState::Restarting => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            UpdateState::Available(r) if self.settings.updates.skipped != r.version => (
+                crate::trf!("warust {} is available (you have {})", "warust {} sudah tersedia (terpasang {})", r.version, backend::update::current()),
+                r.clone(),
+                true,
+            ),
+            UpdateState::Downloading(r) => (crate::trf!("Downloading warust {}…", "Mengunduh warust {}…", r.version), r.clone(), false),
+            UpdateState::Installing(r) => (crate::trf!("Installing warust {}; warust restarts by itself", "Memasang warust {}; warust akan mulai ulang sendiri", r.version), r.clone(), false),
+            UpdateState::Ready(r) => {
+                let idle = self.state.call_now.is_none()
+                    && self.sessions.iter().all(|s| s.queue == 0)
+                    && self.state.voice.is_none()
+                    && self.state.composer.trim().is_empty();
+                if idle && !self.update_asked {
+                    self.update_asked = true;
+                    self.backend.send(Command::InstallUpdate);
+                }
+                // Looks again for an idle moment even when nothing repaints.
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
+                (crate::trf!("warust {} is ready and installs once warust is idle", "warust {} siap dan dipasang saat warust tidak dipakai", r.version), r.clone(), false)
+            }
+            _ => return,
+        };
+        let p = theme::palette(ui.ctx());
+        let mut later = false;
+        Panel::top("update_banner")
+            .exact_size(44.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::NONE.fill(p.accent_soft).inner_margin(Margin::symmetric(16, 0)))
+            .show(ui, |ui| {
+                widgets::row(
+                    ui,
+                    44.0,
+                    |ui| {
+                        icons::show(ui, if buttons { "download" } else { "loader-circle" }, 16.0, p.accent_text);
+                        ui.add_space(4.0);
+                        ui.add(egui::Label::new(rich(&text, 13.0, Weight::SemiBold, p.accent_text)).truncate());
+                    },
+                    |ui| {
+                        if !buttons {
+                            return;
+                        }
+                        if widgets::button(ui, None, tr("Later", "Nanti"), Kind::Secondary).clicked() {
+                            later = true;
+                        }
+                        if widgets::button(ui, None, tr("What's new", "Apa yang baru"), Kind::Secondary).clicked() {
+                            crate::platform::open_url(&release.page);
+                        }
+                        if widgets::button(ui, Some("download"), tr("Download", "Unduh"), Kind::Primary).clicked() {
+                            crate::platform::open_url(&release.download);
+                        }
+                    },
+                );
+            });
+        if later {
+            let mut settings = (*self.settings).clone();
+            settings.updates.skipped = release.version.clone();
+            self.backend.send(Command::SaveSettings(settings));
+        }
+    }
+
     /// Forest: brand, pill navigation, API state and the window buttons in one
     /// bar, which is also the title bar.
     fn topnav(&mut self, ui: &mut Ui) {
@@ -609,6 +711,15 @@ impl App {
     }
 }
 
+/// "Lock when idle" choices in minutes; 0 is never.
+const LOCK_MINUTES: [u32; 5] = [0, 1, 2, 5, 10];
+
+/// The choice shown for a stored idle time: its own, or 2 minutes (the
+/// default) for a value that is none of the choices.
+fn lock_choice(minutes: u32) -> usize {
+    LOCK_MINUTES.iter().position(|m| *m == minutes).unwrap_or(2)
+}
+
 impl App {
     /// Saved, so the next start opens in the same theme.
     /// Changes the anti-peek options and saves them at once.
@@ -641,8 +752,10 @@ impl App {
         icons::paint(ui, egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(12.0, 12.0)), "chevron-down", 12.0, fg);
         let response = response.on_hover_text(tr("Anti-peek mode (Ctrl+Shift+P)", "Mode anti-intip (Ctrl+Shift+P)")).on_hover_cursor(CursorIcon::PointingHand);
         let mut privacy = self.settings.privacy.clone();
-        egui::Popup::menu(&response).show(|ui| {
-            ui.set_width(330.0);
+        // A menu closes on any click inside it; this one holds settings, so it
+        // stays open until a click outside or Esc.
+        egui::Popup::menu(&response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_width(350.0);
             ui.spacing_mut().item_spacing.y = 8.0;
             ui.label(rich(tr("Anti-peek mode", "Mode anti-intip"), 14.0, Weight::SemiBold, p.text));
             ui.add(egui::Label::new(rich(
@@ -654,18 +767,18 @@ impl App {
             widgets::toggle(ui, &mut privacy.enabled, tr("On (Ctrl+Shift+P)", "Aktif (Ctrl+Shift+P)"));
             ui.separator();
             widgets::toggle(ui, &mut privacy.blur_chat, tr("Blur chat content: clear while the cursor is on a message", "Buramkan isi chat: terbaca saat kursor di atas pesan"));
-            widgets::toggle(ui, &mut privacy.blur_previews, tr("Blur chat list previews and notification text", "Buramkan pratinjau daftar chat dan isi notifikasi"));
+            widgets::toggle(ui, &mut privacy.blur_previews, tr("Blur chat list previews (clear while the cursor is on the chat) and notification text", "Buramkan pratinjau daftar chat (terbaca saat kursor di chat itu) dan isi notifikasi"));
             widgets::toggle(ui, &mut privacy.hide_names, tr("Hide names and numbers, for presentations and recordings", "Sembunyikan nama & nomor, untuk presentasi atau rekaman"));
-            ui.horizontal(|ui| {
-                ui.label(rich(tr("Lock when idle", "Kunci otomatis saat ditinggal"), 13.0, Weight::Regular, p.text));
-                let options: [(u32, &str); 5] = [(0, tr("Never", "Tidak")), (1, "1 min"), (2, "2 min"), (5, "5 min"), (10, "10 min")];
-                let shown = options.iter().find(|(m, _)| *m == privacy.lock_minutes).map(|(_, l)| *l).unwrap_or("2 min");
-                egui::ComboBox::from_id_salt("privacy_lock").selected_text(shown).show_ui(ui, |ui| {
-                    for (minutes, label) in options {
-                        ui.selectable_value(&mut privacy.lock_minutes, minutes, label);
-                    }
-                });
-            });
+            // The choices sit in the popup itself: a drop-down would be a
+            // popup inside this one, and a click on it counts as outside.
+            ui.label(rich(tr("Lock when idle", "Kunci otomatis saat ditinggal"), 13.0, Weight::Regular, p.text));
+            let labels = [tr("Never", "Tidak"), "1 min", "2 min", "5 min", "10 min"];
+            let shown = lock_choice(privacy.lock_minutes);
+            let mut choice = shown;
+            widgets::tabs(ui, &labels, &mut choice);
+            if choice != shown {
+                privacy.lock_minutes = LOCK_MINUTES[choice];
+            }
         });
         if privacy != self.settings.privacy {
             self.set_privacy(|p| *p = privacy);
@@ -847,6 +960,67 @@ impl App {
             }
         }
         self.state.rename = if close { None } else { Some((id, draft)) };
+    }
+
+    /// A number's own chat wallpaper (#60): the Settings picker, plus
+    /// "Same as the app".
+    fn number_wallpaper_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut edit) = self.state.number_wallpaper.take() else {
+            return;
+        };
+        let p = theme::palette(ctx);
+        let dark = ctx.theme() == egui::Theme::Dark;
+        let (mut close, mut save) = (false, false);
+        let modal = egui::Modal::new(egui::Id::unique("number_wallpaper"))
+            .frame(Frame::NONE.fill(p.panel).stroke(Stroke::new(1.0, p.border_strong)).corner_radius(theme::R_LG).inner_margin(Margin::same(24)))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 80.0).clamp(300.0, 640.0));
+                ui.spacing_mut().item_spacing.y = 12.0;
+                ui.label(rich(&crate::trf!("Chat wallpaper · {}", "Wallpaper chat · {}", edit.name), 16.0, Weight::SemiBold, p.text));
+                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 220.0).max(200.0)).show(ui, |ui| {
+                    let wall = screens::settings::WallDraft { key: &mut edit.wall.key, file: &mut edit.wall.file, dim: &mut edit.wall.dim };
+                    screens::settings::wallpaper_picker(ui, &p, wall, &mut self.state.wallpaper_picking, dark, Some(&self.settings));
+                });
+                widgets::row(
+                    ui,
+                    32.0,
+                    |_| {},
+                    |ui| {
+                        save = widgets::button(ui, Some("check"), tr("Save", "Simpan"), Kind::Primary).clicked();
+                        if widgets::button(ui, None, tr("Cancel", "Batal"), Kind::Secondary).clicked() {
+                            close = true;
+                        }
+                    },
+                );
+            });
+        if modal.should_close() {
+            close = true;
+        }
+        if save {
+            let mut settings = (*self.settings).clone();
+            let saved = settings.number_wallpapers.get(&edit.id).map(|w| w.file.clone()).unwrap_or_default();
+            if edit.wall.key == "app" {
+                // Nothing of its own left: its picture goes too.
+                settings.number_wallpapers.remove(&edit.id);
+                screens::settings::forget_custom(&edit.wall.file);
+            } else {
+                settings.number_wallpapers.insert(edit.id.clone(), edit.wall.clone());
+            }
+            if saved != edit.wall.file {
+                screens::settings::forget_custom(&saved);
+            }
+            self.backend.send(Command::SaveSettings(settings));
+            close = true;
+        } else if close {
+            // A picture chosen and then not saved is not kept.
+            let saved = self.settings.number_wallpapers.get(&edit.id).map(|w| w.file.as_str()).unwrap_or_default();
+            if edit.wall.file != saved {
+                screens::settings::forget_custom(&edit.wall.file);
+            }
+        }
+        if !close {
+            self.state.number_wallpaper = Some(edit);
+        }
     }
 
     fn relink(&mut self, id: String) {
@@ -1072,6 +1246,7 @@ impl eframe::App for App {
         self.state.members_now = snapshot.members;
         self.state.groups_now = snapshot.groups;
         self.state.call_now = snapshot.call;
+        self.state.update = snapshot.update;
         if self.state.typing_now.values().any(backend::Typing::fresh) {
             // So a stale "mengetik…" disappears even when nothing else repaints.
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
@@ -1083,7 +1258,7 @@ impl eframe::App for App {
         if ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::P))) {
             self.set_privacy(|p| p.enabled = !p.enabled);
         }
-        widgets::set_wallpaper(&self.settings.wallpaper, &self.settings.wallpaper_file, self.settings.wallpaper_dim);
+        widgets::set_wallpapers(&self.settings);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.
@@ -1155,6 +1330,7 @@ impl eframe::App for App {
             self.sidebar(ui);
             self.topbar(ui);
         }
+        self.update_banner(ui);
         // Heights of compact::title_bar, topnav and the sidebar/topbar row.
         let bar = if compact { 40.0 } else if theme::template().top_nav() { 72.0 } else { 52.0 };
         // In full screen the title bar lives in AppKit's own toolbar window.
@@ -1278,6 +1454,11 @@ impl eframe::App for App {
                 let name = self.sessions.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_default();
                 self.state.rename = Some((id, name));
             }
+            Some(screens::nomor::Action::Wallpaper(id)) => {
+                if let Some(session) = self.sessions.iter().find(|s| s.id == id) {
+                    self.state.number_wallpaper = Some(NumberWallpaperEdit::new(&self.settings, session));
+                }
+            }
             None => {}
         }
         if let (Some(id), Some(a)) = (self.pairing_id.clone(), pairing_action) {
@@ -1298,6 +1479,7 @@ impl eframe::App for App {
         }
         self.confirm_remove(ui.ctx());
         self.rename_dialog(ui.ctx());
+        self.number_wallpaper_dialog(ui.ctx());
         self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
         movie_view::show(ui.ctx(), &mut self.state.video_view);
@@ -1368,5 +1550,19 @@ impl eframe::App for App {
             lock_cover(ui.ctx());
         }
         window::edges(ui);
+    }
+}
+
+#[cfg(test)]
+mod lock_choice_tests {
+    use super::*;
+
+    #[test]
+    fn each_idle_time_has_its_choice() {
+        for (choice, minutes) in LOCK_MINUTES.iter().enumerate() {
+            assert_eq!(lock_choice(*minutes), choice);
+        }
+        // A value from an edited settings file shows as the default.
+        assert_eq!(LOCK_MINUTES[lock_choice(3)], 2);
     }
 }

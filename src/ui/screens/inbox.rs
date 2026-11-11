@@ -273,7 +273,7 @@ pub fn show(
     CentralPanel::default()
         .frame(Frame::NONE)
         .show(ui, |ui| {
-            widgets::wallpaper(ui, ui.max_rect());
+            widgets::wallpaper(ui, ui.max_rect(), &session.id);
             Frame::NONE.inner_margin(Margin { left: 32, right: 24, top: 0, bottom: 8 }).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 if several {
@@ -932,19 +932,19 @@ fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count
 fn privacy_banner(ui: &mut Ui, p: &Palette) {
     ui.add_space(8.0);
     Frame::NONE.fill(p.accent_soft).corner_radius(R_MD).inner_margin(Margin::symmetric(12, 7)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            icons::show(ui, "shield", 14.0, p.accent_text);
-            ui.label(rich(
-                tr("Messages are blurred. Move the cursor over a message to read it.", "Isi pesan diburamkan. Arahkan kursor ke pesan untuk membacanya."),
-                12.5,
-                Weight::Medium,
-                p.accent_text,
-            ));
-            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+        widgets::row(
+            ui,
+            18.0,
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                icons::show(ui, "shield", 14.0, p.accent_text);
+                let text = tr("Messages are blurred. Move the cursor over a message to read it.", "Isi pesan diburamkan. Arahkan kursor ke pesan untuk membacanya.");
+                ui.add(egui::Label::new(rich(text, 12.5, Weight::Medium, p.accent_text)).truncate());
+            },
+            |ui| {
                 ui.label(rich_mono("Ctrl+Shift+P", 11.0, p.text_2));
-            });
-        });
+            },
+        );
     });
 }
 
@@ -966,7 +966,9 @@ fn bound_banner(ui: &mut Ui, p: &Palette, session: &SessionView) {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     icons::show(ui, "lock", 12.0, p.accent_text);
-                    ui.label(rich(&text, 12.0, Weight::Regular, p.accent_text));
+                    // One line that ends in "…" when short of room: a wider
+                    // banner pushes the whole conversation past the column (#105).
+                    ui.add(egui::Label::new(rich(&text, 12.0, Weight::Regular, p.accent_text)).truncate());
                 });
             });
     });
@@ -1029,7 +1031,7 @@ fn chat_row(
     let muted = chat.is_muted(time::now());
     let reserve = badges + if muted { 22.0 } else { 0.0 };
     let preview_rect = Rect::from_min_max(bottom.min, pos2(right - reserve, bottom.bottom()));
-    paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing);
+    paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 18.0, bottom.center().y - 8.0), vec2(16.0, 16.0));
         icons::paint(ui, bell, "bell-off", 15.0, p.muted);
@@ -1132,11 +1134,17 @@ fn tick(p: &Palette, status: &Delivery, grey: Color32, dark: bool) -> Option<(&'
     }
 }
 
+/// Anti-peek frosts a row's preview unless the cursor is on that row.
+fn preview_veiled(blur: bool, hovered: bool) -> bool {
+    blur && !hovered
+}
+
 /// The last message in a chat row; ours start with their tick, like WhatsApp.
 #[allow(clippy::too_many_arguments)]
-fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, size: f32, color: Color32, typing: Option<&str>) {
-    // Anti-peek: a bar of the same width for every chat, so nothing is read off it.
-    if crate::ui::privacy::blur_previews() {
+fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, size: f32, color: Color32, typing: Option<&str>, hovered: bool) {
+    // Anti-peek: a bar of the same width for every chat, so nothing is read
+    // off it. Like a bubble, it reads while the cursor is on its row.
+    if preview_veiled(crate::ui::privacy::blur_previews(), hovered) {
         crate::ui::privacy::frost_line(&ui.painter().with_clip_rect(rect), rect, 0.72, color.gamma_multiply(0.35));
         return;
     }
@@ -1214,8 +1222,8 @@ enum MediaClick {
     OpenPdf(PathBuf, String),
     /// "Call back" on a call's line: a video call (true) or a voice call.
     Call(bool),
-    /// A downloaded video and its title, for the in-app player (#84).
-    PlayVideo(PathBuf, String),
+    /// A downloaded file and its title, for the in-app preview (#84, #86).
+    Preview(PathBuf, String),
 }
 
 const PREVIEW_HEIGHT: f32 = 140.0;
@@ -1805,13 +1813,13 @@ fn paint_media(
     }
     match (&media.file, shown) {
         (Some(_), MediaBox::Document { pdf: Some(file), .. }) => Some(MediaClick::OpenPdf(file.clone(), media_title(media))),
-        (Some(file), _) if media.kind == "video" && movie::available() && media.seconds.is_none_or(|s| s as f32 <= movie::MAX_SECONDS) => {
-            Some(MediaClick::PlayVideo(file.clone(), media_title(media)))
-        }
-        (Some(file), _) => {
+        // Every other file opens in the preview; a long video goes to the
+        // system player, as its sound would not fit in memory.
+        (Some(file), _) if media.kind == "video" && media.seconds.is_some_and(|s| s as f32 > movie::MAX_SECONDS) => {
             open_file(file);
             None
         }
+        (Some(file), _) => Some(MediaClick::Preview(file.clone(), media_title(media))),
         (None, _) => Some(MediaClick::Download(m.id.clone())),
     }
 }
@@ -1916,6 +1924,30 @@ fn delete_dialog(ctx: &egui::Context, state: &mut State, commands: &mut Vec<Comm
     }
 }
 
+/// A round ⋯ just outside a bubble (left of ours, right of theirs), shown
+/// while the pointer is on the bubble or its menu is open; its response
+/// anchors the message menu (#3).
+fn more_button(ui: &Ui, p: &Palette, bubble: Rect, m: &ChatMsg) -> Option<egui::Response> {
+    let id = ui.scope_id().with(("msg_more", &m.id));
+    let open = egui::Popup::is_id_open(ui.ctx(), id.with("popup"));
+    let side = if m.from_me { -1.0 } else { 1.0 };
+    let center = pos2(if m.from_me { bubble.left() - 18.0 } else { bubble.right() + 18.0 }, bubble.top() + 16.0);
+    let button = Rect::from_center_size(center, vec2(28.0, 28.0));
+    // The hover zone reaches the button, so moving onto it keeps it there.
+    let zone = Rect::from_min_max(
+        pos2(bubble.left().min(bubble.left() + side * 36.0), bubble.top()),
+        pos2(bubble.right().max(bubble.right() + side * 36.0), bubble.bottom()),
+    );
+    if !open && !ui.rect_contains_pointer(zone) {
+        return None;
+    }
+    let response = ui.interact(button, id, Sense::click());
+    let fill = if response.hovered() || open { p.raised } else { p.panel };
+    ui.painter().circle(center, 14.0, fill, Stroke::new(1.0, p.border));
+    icons::paint(ui, button, "ellipsis", 15.0, p.text_2);
+    Some(response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Message actions", "Aksi pesan")))
+}
+
 /// Room under a failed bubble for its "Not sent · Retry" line.
 const FAILED_FOOT: f32 = 22.0;
 
@@ -1944,7 +1976,7 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
     match event {
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
-        MsgEvent::Media(MediaClick::PlayVideo(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
+        MsgEvent::Media(MediaClick::Preview(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
         MsgEvent::Media(MediaClick::Call(video)) => {
             if state.call_now.is_none() && !chat.is_group() {
                 commands.push(Command::PlaceCall { id: session.id.clone(), chat: chat.jid.clone(), video });
@@ -1953,8 +1985,11 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         // Handled inline where the menu is shown.
         MsgEvent::Menu(MsgAction::Copy, _) => {}
         MsgEvent::Menu(MsgAction::Forward, msg_id) => {
-            if let Some(m) = chat.messages.iter().find(|m| m.id == msg_id).filter(|m| m.forwardable()) {
-                state.forward = Some(forward::Dialog::new(session.id.clone(), m.text.clone()));
+            let ready = |m: &&ChatMsg| m.forwardable() || m.forwardable_media() == Some(true);
+            if let Some(m) = chat.messages.iter().find(|m| m.id == msg_id).filter(ready) {
+                // The dialog previews the caption, else the file's name.
+                let preview = Some(caption(m)).filter(|c| !c.is_empty()).or_else(|| m.media.as_ref().map(media_title)).unwrap_or_default();
+                state.forward = Some(forward::Dialog::new(session.id.clone(), preview, m.id.clone()));
             }
         }
         MsgEvent::Menu(MsgAction::Reply, msg_id) => {
@@ -2115,8 +2150,16 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
         action = Some(MsgAction::Reply);
     }
     // Text only for now; media forwarding is stage 2.
-    if m.forwardable() && ui.button(tr("Forward", "Teruskan")).clicked() {
-        action = Some(MsgAction::Forward);
+    // Text, or a file once it is downloaded (#6 stage 2).
+    match m.forwardable_media() {
+        Some(ready) => {
+            let item = ui.add_enabled(ready, egui::Button::new(tr("Forward", "Teruskan")));
+            if item.on_disabled_hover_text(tr("Download the file first", "Unduh file-nya dulu")).clicked() {
+                action = Some(MsgAction::Forward);
+            }
+        }
+        None if m.forwardable() && ui.button(tr("Forward", "Teruskan")).clicked() => action = Some(MsgAction::Forward),
+        None => {}
     }
     // Media without a caption has nothing to copy.
     if !caption(m).is_empty() && ui.button(tr("Copy", "Salin")).clicked() {
@@ -2393,6 +2436,14 @@ fn messages(
                         // A deleted message has nothing left to reply to, copy, forward or pin.
                         if !m.deleted {
                             bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                            // The same menu from a ⋯ beside the bubble, for a plain click (#3).
+                            if let Some(picked) = more_button(ui, &p, rect, m).and_then(|btn| {
+                                let mut picked = None;
+                                egui::Popup::menu(&btn).show(|ui| picked = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                                picked
+                            }) {
+                                action = Some(picked);
+                            }
                         }
                         if jump.as_deref() == Some(m.id.as_str()) {
                             ui.scroll_to_rect(rect, Some(Align::Center));
@@ -4199,7 +4250,7 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     let muted = chat.is_muted(time::now());
     let reserve = badges + if muted { 24.0 } else { 0.0 };
     let line = Rect::from_min_max(pos2(left, row.top() + 35.0), pos2(right - reserve, row.top() + 56.0));
-    paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing);
+    paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 20.0, line.center().y - 9.0), vec2(18.0, 18.0));
         icons::paint(ui, bell, "bell-off", 17.0, p.muted);
@@ -4370,7 +4421,7 @@ fn compact_chat(
             }
         });
     CentralPanel::default().frame(Frame::NONE).show(ui, |ui| {
-        widgets::wallpaper(ui, ui.max_rect());
+        widgets::wallpaper(ui, ui.max_rect(), &session.id);
         Frame::NONE.inner_margin(Margin { left: 12, right: 12, top: 0, bottom: 6 }).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
             if older_bar(ui, &p, state, session, chat) {
@@ -4587,6 +4638,18 @@ mod open_chat_tests {
         open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
         assert!(state.focus_composer);
         assert_eq!(state.chat_selected.as_deref(), Some("628111@s.whatsapp.net"));
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn a_frosted_preview_reads_under_the_cursor() {
+        assert!(preview_veiled(true, false));
+        assert!(!preview_veiled(true, true), "the cursor is on the row");
+        assert!(!preview_veiled(false, false), "anti-peek is off");
     }
 }
 

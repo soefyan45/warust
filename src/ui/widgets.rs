@@ -504,12 +504,20 @@ pub const WALLPAPERS: [Wallpaper; 6] = [
     Wallpaper { key: "botanical", name: ("Botanical", "Botani"), background: Color32::from_rgb(0xE9, 0xF0, 0xE6), uri: "bytes://wallpaper/botanical.webp", bytes: include_bytes!("../../assets/wallpaper/botanical.webp") },
 ];
 
-/// The chosen background, set from the settings every frame.
+/// A chosen background: a wallpaper key, the custom picture, its dimming.
 #[derive(Clone, Default, PartialEq)]
-struct Chosen {
+struct Choice {
     key: String,
     file: String,
     dim: u8,
+}
+
+/// The app's background and each number's own (#60), set from the settings
+/// every frame.
+#[derive(Clone, Default, PartialEq)]
+struct Chosen {
+    app: Choice,
+    numbers: std::collections::HashMap<String, Choice>,
 }
 
 fn chosen() -> &'static Mutex<Chosen> {
@@ -517,11 +525,14 @@ fn chosen() -> &'static Mutex<Chosen> {
     CHOSEN.get_or_init(Default::default)
 }
 
-/// Takes the wallpaper choice from the settings (cheap; called every frame).
-pub fn set_wallpaper(key: &str, file: &str, dim: u8) {
+/// Takes the wallpaper choices from the settings (cheap; called every frame).
+pub fn set_wallpapers(settings: &crate::backend::Settings) {
+    let app = Choice { key: settings.wallpaper.clone(), file: settings.wallpaper_file.clone(), dim: settings.wallpaper_dim };
+    let numbers = settings.number_wallpapers.iter().map(|(id, w)| (id.clone(), Choice { key: w.key.clone(), file: w.file.clone(), dim: w.dim })).collect();
+    let next = Chosen { app, numbers };
     if let Ok(mut current) = chosen().lock() {
-        if current.key != key || current.file != file || current.dim != dim {
-            *current = Chosen { key: key.to_owned(), file: file.to_owned(), dim };
+        if *current != next {
+            *current = next;
         }
     }
 }
@@ -537,14 +548,15 @@ pub fn auto_wallpaper(dark: bool) -> &'static Wallpaper {
     WALLPAPERS.iter().find(|w| w.key == key).unwrap_or(&WALLPAPERS[0])
 }
 
-/// The chat background behind an open chat: the wallpaper chosen in
-/// Settings (#56). Designed wallpapers repeat every 390 px so the doodles keep
-/// their size; a custom picture covers the thread, dimmed as chosen.
-pub fn wallpaper(ui: &Ui, rect: Rect) {
+/// The chat background behind an open chat of number `session`: its own
+/// wallpaper (#60), else the one chosen in Settings (#56). Designed
+/// wallpapers repeat every 390 px so the doodles keep their size; a custom
+/// picture covers the thread, dimmed as chosen.
+pub fn wallpaper(ui: &Ui, rect: Rect, session: &str) {
     let p = theme::palette(ui.ctx());
     let painter = ui.painter().with_clip_rect(rect.intersect(ui.clip_rect()));
     painter.rect_filled(rect, 0.0, p.chat_bg);
-    let choice = chosen().lock().map(|c| c.clone()).unwrap_or_default();
+    let choice = chosen().lock().map(|c| c.numbers.get(session).unwrap_or(&c.app).clone()).unwrap_or_default();
     let dark = ui.ctx().theme() == egui::Theme::Dark;
     match choice.key.as_str() {
         "none" => {}

@@ -26,11 +26,12 @@ fn poster_title(book: &Book, poster: &Option<String>) -> String {
     }
 }
 
-/// Posters with an update not yet seen (own updates do not count).
+/// Posters with an update not yet seen (own updates and muted posters do
+/// not count).
 pub fn unseen_posters(book: &Book) -> usize {
     book.status_feed(time::now())
         .iter()
-        .filter(|(poster, posts)| poster.is_some() && posts.iter().any(|p| !p.seen))
+        .filter(|(poster, posts)| poster.as_deref().is_some_and(|jid| !book.status_muted(jid)) && posts.iter().any(|p| !p.seen))
         .count()
 }
 
@@ -120,8 +121,9 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
             let retry = matches!(downloads.get(&post.id), Some(Some(_)));
             if response.clicked() {
                 match &media.file {
+                    // The status's photo (or a video without ffmpeg) opens in the preview (#86).
                     Some(file) => {
-                        crate::platform::open(file);
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("status_preview"), file.clone()));
                     }
                     None if media.downloadable() => commands.push(Command::Download { id: session.to_owned(), msg_id: post.id.clone() }),
                     None => {}
@@ -164,6 +166,11 @@ struct Entry<'a> {
 impl<'a> Entry<'a> {
     fn unseen(&self) -> bool {
         self.posts.iter().any(|s| !s.seen)
+    }
+
+    /// The poster's status updates are muted, here or on the phone (#101).
+    fn muted(&self) -> bool {
+        self.session.book.status_muted(&self.poster)
     }
 
     fn last_ts(&self) -> i64 {
@@ -294,7 +301,7 @@ pub fn page(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatars: &
     let frame = theme::pane(ui.ctx(), stage(ui.ctx()), Margin::ZERO).fill(stage(ui.ctx()));
     CentralPanel::default().frame(frame).show(ui, |ui| match current {
         Some(i) => {
-            let next = all.iter().skip(i + 1).find(|e| e.unseen());
+            let next = all.iter().skip(i + 1).find(|e| e.unseen() && e.muted() == all[i].muted());
             commands.extend(stage_view(ui, &p, state, &all[i], next, downloads, false));
         }
         None => {
@@ -316,7 +323,7 @@ pub fn compact(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatars
     dev_open(state, &all);
     match all.iter().position(|e| is_open(state, e)) {
         Some(i) => {
-            let next = all.iter().skip(i + 1).find(|e| e.unseen());
+            let next = all.iter().skip(i + 1).find(|e| e.unseen() && e.muted() == all[i].muted());
             let rect = ui.max_rect();
             ui.painter().rect_filled(rect, 0.0, stage(ui.ctx()));
             stage_view(ui, &p, state, &all[i], next, downloads, true)
@@ -354,7 +361,23 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
     }
     widgets::search(ui, &mut state.status_search, tr("Search name or number", "Cari nama atau nomor"), ui.available_width(), false);
     ui.add_space(8.0);
-    let list = entries(sessions, state.status_scope.as_deref(), &state.status_search);
+    let mut list = entries(sessions, state.status_scope.as_deref(), &state.status_search);
+    // All by default; muted contacts can be left out, or shown alone (#101).
+    let muted_count = list.iter().filter(|e| e.muted()).count();
+    let labels = [
+        crate::trf!("All · {}", "Semua · {}", list.len()),
+        crate::trf!("Not muted · {}", "Tidak dibisukan · {}", list.len() - muted_count),
+        crate::trf!("Muted · {muted_count}", "Dibisukan · {muted_count}"),
+    ];
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    state.status_filter = state.status_filter.min(2);
+    widgets::tabs(ui, &labels, &mut state.status_filter);
+    ui.add_space(4.0);
+    match state.status_filter {
+        1 => list.retain(|e| !e.muted()),
+        2 => list.retain(|e| e.muted()),
+        _ => {}
+    }
     let footer = if phone { 0.0 } else { 28.0 };
     let several = sessions.len() > 1;
     let height = ui.available_height() - footer;
@@ -382,7 +405,9 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
                     commands.push(Command::Avatar { id: e.session.id.clone(), jid: e.poster.clone() });
                 }
                 let picture = avatars.get(&e.poster).and_then(|p| p.as_deref());
-                if poster_row(ui, p, e, picture, is_open(state, e), several).clicked() {
+                let row = poster_row(ui, p, e, picture, is_open(state, e), several);
+                status_mute_menu(&row, e, &mut commands);
+                if row.clicked() {
                     open(state, e);
                 }
             }
@@ -399,6 +424,16 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
     commands
 }
 
+/// Right-click on a poster: mute or unmute their status updates (#101).
+fn status_mute_menu(row: &egui::Response, e: &Entry, commands: &mut Vec<Command>) {
+    row.context_menu(|ui| {
+        let muted = e.muted();
+        if ui.button(if muted { tr("Unmute status updates", "Bunyikan lagi status") } else { tr("Mute status updates", "Bisukan status") }).clicked() {
+            commands.push(Command::MuteStatus { id: e.session.id.clone(), jid: e.poster.clone(), muted: !muted });
+        }
+    });
+}
+
 fn poster_row(ui: &mut Ui, p: &Palette, e: &Entry, picture: Option<&Path>, selected: bool, several: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), POSTER_ROW), Sense::click());
     if selected {
@@ -409,8 +444,9 @@ fn poster_row(ui: &mut Ui, p: &Palette, e: &Entry, picture: Option<&Path>, selec
     let title = e.title();
     let tile = Rect::from_center_size(pos2(rect.left() + 34.0, rect.center().y), vec2(42.0, 42.0));
     crate::ui::compact::avatar(ui, tile, &super::initials(&title), picture, true);
-    // Ring: coloured while something is unseen, like the phone's status ring.
-    let (ring, width) = if e.unseen() { (if forest() { p.primary } else { p.green }, 2.0) } else { (p.border_strong, 1.5) };
+    // Ring: coloured while something is unseen, like the phone's status ring;
+    // a muted poster's stays grey.
+    let (ring, width) = if e.unseen() && !e.muted() { (if forest() { p.primary } else { p.green }, 2.0) } else { (p.border_strong, 1.5) };
     ui.painter().circle_stroke(tile.center(), 24.5, Stroke::new(width, ring));
     let left = tile.right() + 16.0;
     let count = {
@@ -419,7 +455,13 @@ fn poster_row(ui: &mut Ui, p: &Palette, e: &Entry, picture: Option<&Path>, selec
         crate::trf!("{n} {en}", "{n} status")
     };
     let count_w = ui.painter().layout_no_wrap(count.clone(), fonts::ui(12.0, Weight::Regular), p.muted).size().x;
-    let name = Rect::from_min_max(pos2(left, rect.top() + 13.0), pos2(rect.right() - count_w - 20.0, rect.top() + 33.0));
+    // A struck bell before the count marks a muted poster.
+    let bell = if e.muted() { 20.0 } else { 0.0 };
+    if e.muted() {
+        let at = Rect::from_center_size(pos2(rect.right() - count_w - 12.0 - 10.0, rect.top() + 23.0), vec2(14.0, 14.0));
+        icons::paint(ui, at, "bell-off", 13.0, p.muted);
+    }
+    let name = Rect::from_min_max(pos2(left, rect.top() + 13.0), pos2(rect.right() - count_w - 20.0 - bell, rect.top() + 33.0));
     widgets::paint_text(ui, name, &title, fonts::ui(15.0, Weight::SemiBold), p.text, Align::Min);
     widgets::paint_text(ui, Rect::from_min_max(pos2(rect.right() - count_w - 12.0, rect.top() + 13.0), pos2(rect.right() - 12.0, rect.top() + 33.0)), &count, fonts::ui(12.0, Weight::Regular), p.muted, Align::Max);
     let when = ago(e.last_ts());
@@ -576,6 +618,10 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
         if ui.button(crate::trf!("Open chat with {title}", "Buka chat {title}")).clicked() {
             state.open_chat_requested = Some((e.session.id.clone(), e.poster.clone()));
         }
+        let muted = e.muted();
+        if ui.button(if muted { tr("Unmute status updates", "Bunyikan lagi status") } else { tr("Mute status updates", "Bisukan status") }).clicked() {
+            commands.push(Command::MuteStatus { id: e.session.id.clone(), jid: e.poster.clone(), muted: !muted });
+        }
     });
 
     // Bottom: reactions, the comment field and (desktop) the note.
@@ -595,6 +641,10 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     let width = (height * 9.0 / 16.0).max(240.0).min(area.width() - side_room);
     let card = Rect::from_min_size(pos2(area.center().x - width / 2.0, top), vec2(width, height));
     commands.extend(paint_post(ui, p, card, post, &e.session.id, downloads, playing.as_ref()));
+    if let Some(file) = ui.ctx().data_mut(|d| d.remove_temp::<PathBuf>(egui::Id::unique("status_preview"))) {
+        state.status_paused = true;
+        state.video_view = Some(crate::ui::movie_view::Viewer::new(file, e.title()));
+    }
     // A click on a playing video pauses or resumes it, like the pause button.
     if playing.is_some() && ui.interact(card, ui.scope_id().with(("status_movie", &post.id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         state.status_paused = !state.status_paused;

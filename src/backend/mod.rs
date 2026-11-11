@@ -6,6 +6,7 @@
 mod api;
 pub mod call;
 pub mod video;
+pub mod update;
 pub mod movie;
 mod avatars;
 mod media;
@@ -117,6 +118,8 @@ pub struct Shared {
     pub sessions: Vec<SessionView>,
     /// Profile pictures by normalized JID: a cached file, or `None` for no picture.
     pub avatars: Arc<HashMap<String, Option<PathBuf>>>,
+    /// The latest release check (#93).
+    pub update: update::UpdateState,
     /// Full-size profile pictures asked for the photo viewer (#92), by JID.
     pub full_avatars: Arc<HashMap<String, Option<PathBuf>>>,
     /// Downloads by message id: `None` while running, else why it failed.
@@ -151,6 +154,28 @@ pub struct Member {
     pub jid: String,
     /// Phone-number JID when known: for `Book::name_of` and display.
     pub phone: Option<String>,
+}
+
+/// Shows what a check found; a new release that may install by itself is
+/// downloaded and checked first (#93 stage 2), off the async workers.
+fn fetch_update(state: &Updater, found: update::UpdateState) {
+    let update::UpdateState::Available(release) = found else {
+        state.set_update(found);
+        return;
+    };
+    if !(state.settings().updates.auto_install && update::installable()) {
+        state.set_update(update::UpdateState::Available(release));
+        return;
+    }
+    state.set_update(update::UpdateState::Downloading(release.clone()));
+    let state = state.clone();
+    std::thread::spawn(move || match update::download(&release) {
+        Ok(()) => state.set_update(update::UpdateState::Ready(release)),
+        Err(e) => {
+            log::warn!("update {}: {e}", release.version);
+            state.set_update(update::UpdateState::Available(release));
+        }
+    });
 }
 
 /// What the contact panel shows about a group (#91).
@@ -288,6 +313,8 @@ pub enum Command {
     /// Mute a chat until a time (Unix seconds, `i64::MAX` for always), or
     /// unmute it with `None`; synced with the phone (#87).
     MuteChat { id: String, chat: String, until: Option<i64> },
+    /// Mute or unmute a contact's status updates; synced with the phone (#101).
+    MuteStatus { id: String, jid: String, muted: bool },
     /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
     MarkDone { id: String, chat: String, done: bool },
     /// Ask the phone for messages older than the oldest one we have in `chat`.
@@ -312,7 +339,7 @@ pub enum Command {
     /// that saw it; goes to the poster's chat through the paced queue.
     StatusReply { id: String, msg_id: String, text: String },
     /// Queue a forwarded text message to each chat (paced like any send).
-    Forward { id: String, chats: Vec<String>, text: String },
+    Forward { id: String, chats: Vec<String>, msg_id: String },
     /// Queue a message from the REST API under an id chosen by the caller.
     Enqueue { id: String, chat: String, body: session::Body, local_id: String },
     /// Pin a message for everyone (for `length`), or unpin it. `msg_id` is a real
@@ -324,6 +351,10 @@ pub enum Command {
     EditMessage { id: String, chat: String, msg_id: String, text: String },
     /// Save new settings; restarts the API server when its part changed.
     SaveSettings(Settings),
+    /// Look for a new release now ("Check now" in Settings).
+    CheckUpdate,
+    /// Install the downloaded update now (the app is idle) and restart.
+    InstallUpdate,
     /// Send a `webhook.test` event to the global webhook URL.
     TestWebhook,
 }
@@ -352,6 +383,20 @@ impl Backend {
                     .build()
                     .expect("tokio runtime");
                 runtime.spawn(webhook::dispatcher(hook_events, state.clone()));
+    // New releases (#93): on start, then once a day, while the setting is on.
+    // A failed automatic check stays quiet.
+    let watcher = state.clone();
+    runtime.spawn(async move {
+        loop {
+            if watcher.settings().updates.auto_check {
+                let found = tokio::task::spawn_blocking(update::check).await.unwrap_or_default();
+                if !matches!(found, update::UpdateState::Failed(_)) {
+                    fetch_update(&watcher, found);
+                }
+            }
+            tokio::time::sleep(update::EVERY).await;
+        }
+    });
                 runtime.block_on(run(data_dir, state, receiver, api_commands));
             })
             .expect("whatsapp thread");
@@ -481,6 +526,17 @@ impl Updater {
     pub(crate) fn set_full_avatar(&self, jid: &str, picture: Option<PathBuf>) {
         if let Ok(mut shared) = self.shared.lock() {
             Arc::make_mut(&mut shared.full_avatars).insert(jid.to_owned(), picture);
+        }
+        self.ctx.request_repaint();
+    }
+
+    pub(crate) fn update_state(&self) -> update::UpdateState {
+        self.shared.lock().map(|s| s.update.clone()).unwrap_or_default()
+    }
+
+    pub(crate) fn set_update(&self, update: update::UpdateState) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.update = update;
         }
         self.ctx.request_repaint();
     }
@@ -795,6 +851,15 @@ async fn run(
                 stores.remove(&id);
                 let _ = std::fs::remove_file(Store::path(&data_dir, &id));
                 state.remove(&id);
+                // Its own wallpaper and the picture copied for it go too (#60).
+                let mut settings = (*state.settings()).clone();
+                if let Some(wall) = settings.number_wallpapers.remove(&id) {
+                    settings::forget_wallpaper(&data_dir, &wall.file);
+                    settings.save(&data_dir);
+                    if let Ok(mut shared) = state.shared.lock() {
+                        shared.settings = Arc::new(settings);
+                    }
+                }
             }
             Command::Send { id, chat, text, mentions } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => {
@@ -815,14 +880,21 @@ async fn run(
                     _ => log::warn!("reply: session {id} is not running"),
                 }
             }
-            Command::Forward { id, chats, text } => match (running.get(&id), stores.get(&id)) {
-                (Some(r), Some(store)) => {
-                    for chat in chats {
-                        r.enqueue(&id, chat, Body::Forward(text.clone()), &state, store);
+            Command::Forward { id, chats, msg_id } => {
+                let message = state.book(&id).and_then(|book| book.chats.iter().flat_map(|c| &c.messages).find(|m| m.id == msg_id).cloned());
+                match (running.get(&id), stores.get(&id), message) {
+                    (Some(r), Some(store), Some(m)) => {
+                        // Built for each chat: a body goes to one queue.
+                        for chat in chats {
+                            match session::forward_body(&m, &state.data_dir) {
+                                Some(body) => r.enqueue(&id, chat, body, &state, store),
+                                None => log::warn!("forward: message {msg_id} cannot be forwarded"),
+                            }
+                        }
                     }
+                    _ => log::warn!("forward: session {id} is not running, or message {msg_id} is gone"),
                 }
-                _ => log::warn!("forward: session {id} is not running"),
-            },
+            }
             Command::SendFile { id, chat, path, caption } => match (running.get(&id), stores.get(&id)) {
                 (Some(r), Some(store)) => r.enqueue(&id, chat, Body::File { path, caption }, &state, store),
                 _ => log::warn!("send file: session {id} is not running"),
@@ -845,6 +917,27 @@ async fn run(
                 (Some(r), Some(store)) => r.enqueue_as(&id, chat, body, local_id, &state, store),
                 _ => log::warn!("api send: session {id} is not running"),
             },
+            Command::CheckUpdate => {
+                state.set_update(update::UpdateState::Checking);
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || fetch_update(&state, update::check()));
+            }
+            Command::InstallUpdate => {
+                let release = match state.update_state() {
+                    update::UpdateState::Ready(release) => release,
+                    _ => continue,
+                };
+                state.set_update(update::UpdateState::Installing(release.clone()));
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || match update::install() {
+                    Ok(()) => state.set_update(update::UpdateState::Restarting),
+                    Err(e) => {
+                        log::warn!("update {}: install failed: {e}", release.version);
+                        // The banner's Download is still there.
+                        state.set_update(update::UpdateState::Available(release));
+                    }
+                });
+            }
             Command::SaveSettings(settings) => {
                 let old = state.settings();
                 settings.save(&data_dir);
@@ -1037,6 +1130,14 @@ async fn run(
                 }
                 if let Some(r) = running.get(&id) {
                     r.set_archived(&id, &chat, archived);
+                }
+            }
+            Command::MuteStatus { id, jid, muted } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::status_mute_record(&jid, muted)]);
+                }
+                if let Some(r) = running.get(&id) {
+                    r.set_status_muted(&id, &jid, muted);
                 }
             }
             Command::MuteChat { id, chat, until } => {

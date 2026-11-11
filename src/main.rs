@@ -34,11 +34,14 @@ fn main() -> eframe::Result<()> {
         viewport.with_decorations(false)
     };
     let options = eframe::NativeOptions { viewport, ..Default::default() };
-    eframe::run_native(
+    let result = eframe::run_native(
         "warust",
         options,
         Box::new(|cc| Ok(Box::new(ui::App::new(cc)))),
-    )
+    );
+    // An update installed while running starts warust again (#93).
+    backend::update::after_exit();
+    result
 }
 
 /// The app icon from Pego "Logo · Warust" (App icon 128), drawn at 256 px.

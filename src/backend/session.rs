@@ -51,6 +51,9 @@ struct Outgoing {
 
 /// What one queued message carries.
 pub enum Body {
+    /// A file, photo, video, voice note or sticker sent on as forwarded
+    /// (#6 stage 2): the inner body, marked "Forwarded".
+    Forwarded(Box<Body>),
     Text(String),
     /// A photo or document; `caption` may be empty.
     File { path: PathBuf, caption: String },
@@ -323,6 +326,19 @@ impl Running {
         });
     }
 
+    /// Mutes or unmutes a contact's status updates on the phone's app state (#101).
+    pub fn set_status_muted(&self, id: &str, jid: &str, muted: bool) {
+        let Ok(jid) = jid.parse::<Jid>() else {
+            return;
+        };
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            if let Err(e) = client.chat_actions().set_user_status_mute(&jid, muted).await {
+                log::warn!("session {id}: status mute sync failed: {e}");
+            }
+        });
+    }
+
     /// Mutes (until a time, or always) or unmutes a chat on the phone's app state.
     pub fn set_muted(&self, id: &str, chat: &str, until: Option<i64>) {
         let Ok(chat) = chat.parse::<Jid>() else {
@@ -407,25 +423,31 @@ impl Running {
         if matches!(body, Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. }) {
             return log::warn!("session {id}: pins, deletes and edits go through `pin`, `delete` and `edit`, not the message queue");
         }
-        let shown = match &body {
+        let forwarded = matches!(body, Body::Forward(_) | Body::Forwarded(_));
+        // A forwarded file shows (and is described) as the file itself.
+        let shown_body = match &body {
+            Body::Forwarded(inner) => inner.as_ref(),
+            other => other,
+        };
+        let shown = match shown_body {
             Body::Text(text) => text.clone(),
             Body::File { path, caption } => media::label(path, caption),
             Body::Sticker(_) => "[Stiker]".to_owned(),
             Body::Voice(_) => "[Pesan suara]".to_owned(),
             Body::Contact { name, .. } => format!("[Kontak] {name}"),
             Body::StatusReply { text, .. } | Body::Mention { text, .. } | Body::Reply { text, .. } | Body::Forward(text) => text.clone(),
-            Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. } => unreachable!("returned above"),
+            Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. } | Body::Forwarded(_) => String::new(),
         };
-        let media = match &body {
+        let media = match shown_body {
             Body::Text(_) | Body::StatusReply { .. } | Body::Mention { .. } | Body::Reply { .. } | Body::Forward(_) | Body::Contact { .. } => None,
             Body::File { path, .. } => Some(media::describe_sent(path)),
             Body::Sticker(path) => Some(media::describe_sent_sticker(path)),
             Body::Voice(path) => Some(media::describe_sent_voice(path)),
-            Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. } => unreachable!("returned above"),
+            Body::Pin { .. } | Body::Delete { .. } | Body::Edit { .. } | Body::Forwarded(_) => None,
         };
         let record = store::msg_record(&chat, &local_id, true, "", &shown, unix_secs(), &Delivery::Queued, false);
         let mut record = store::with_media(record, media);
-        record = store::with_forwarded(record, matches!(body, Body::Forward(_)));
+        record = store::with_forwarded(record, forwarded);
         if let Body::Mention { mentions, .. } | Body::Reply { mentions, .. } = &body {
             record = store::with_mentions(record, mentions, false);
         }
@@ -538,16 +560,18 @@ fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
         return Some(Body::Text(m.text.clone()));
     };
     let path = media.file.clone().filter(|p| p.is_file())?;
-    if media.kind == "sticker" {
-        return Some(Body::Sticker(path));
-    }
-    if media.kind == "audio" {
-        return Some(Body::Voice(path));
-    }
-    // The text is the label plus the caption ("[Gambar] caption").
-    let label = media::label(&path, "");
-    let caption = m.text.strip_prefix(&label).unwrap_or("").trim().to_owned();
-    Some(Body::File { path, caption })
+    let body = if media.kind == "sticker" {
+        Body::Sticker(path)
+    } else if media.kind == "audio" {
+        Body::Voice(path)
+    } else {
+        // The text is the label plus the caption ("[Gambar] caption").
+        let label = media::label(&path, "");
+        let caption = m.text.strip_prefix(&label).unwrap_or("").trim().to_owned();
+        Body::File { path, caption }
+    };
+    // A forwarded file stays forwarded when it goes out after a restart.
+    Some(if m.forwarded { Body::Forwarded(Box::new(body)) } else { body })
 }
 
 /// Opens the store and connects. Returns `None` when the session cannot run
@@ -729,13 +753,15 @@ fn remove_media_file(state: &Updater, id: &str, msg_id: &str) {
 /// ones already set; replaying the collection that holds them brings each
 /// back as a `MuteUpdate`.
 fn sync_mutes_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: Arc<Client>) {
-    if state.book(id).is_none_or(|book| book.mutes_synced) {
+    // Status mutes (#101) live in the same collection: a number that read
+    // chat mutes before warust knew them reads it once more.
+    if state.book(id).is_none_or(|book| book.mutes_synced && book.status_mutes_synced) {
         return;
     }
     let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
     tokio::spawn(async move {
         match client.resync_app_state_collection(whatsapp_rust::WAPatchName::RegularHigh).await {
-            Ok(_) => state.record(&id, &chats, &[store::mutes_synced_record()]),
+            Ok(_) => state.record(&id, &chats, &[store::mutes_synced_record(), store::status_mutes_synced_record()]),
             Err(e) => log::warn!("session {id}: reading mutes from the phone failed: {e}"),
         }
     });
@@ -1046,6 +1072,10 @@ async fn on_event(
                 _ => i64::MAX,
             });
             state.record(id, chats, &[store::mute_record(&update.jid.to_string(), until)]);
+        }
+        // A contact's status updates muted or unmuted on the phone (#101).
+        Event::UserStatusMuteUpdate(update) => {
+            state.record(id, chats, &[store::status_mute_record(&update.jid.to_string(), update.muted)]);
         }
         Event::ArchiveUpdate(update) => {
             let archived = update.action.archived.unwrap_or(true);
@@ -1402,7 +1432,68 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
             context.forwarding_score = Some(1);
             Ok(wa::Message::text_with_context(text, context))
         }
+        Body::Forwarded(inner) => {
+            let mut message = Box::pin(prepare(client, chat, *inner)).await?;
+            mark_forwarded(&mut message);
+            Ok(message)
+        }
     }
+}
+
+/// Marks the media in `message` as forwarded, like the text forward.
+fn mark_forwarded(message: &mut wa::Message) {
+    macro_rules! forwarded {
+        ($($field:ident),*) => {$(
+            if let Some(media) = message.$field.as_option_mut() {
+                let context = media.context_info.get_or_insert_default();
+                context.is_forwarded = Some(true);
+                context.forwarding_score = Some(1);
+            }
+        )*};
+    }
+    forwarded!(image_message, video_message, document_message, audio_message, sticker_message);
+    if let Some(wrapper) = message.document_with_caption_message.as_option_mut() {
+        if let Some(inner) = wrapper.message.as_option_mut() {
+            mark_forwarded(inner);
+        }
+    }
+}
+
+/// What forwarding message `m` sends (#6): a text again, or its downloaded
+/// file, photo, video, voice note or sticker, marked forwarded. `None` when
+/// it cannot go on: deleted, a call line, or its file not downloaded.
+/// A document goes out under its own name, not the name it was saved as.
+pub fn forward_body(m: &store::ChatMsg, data_dir: &Path) -> Option<Body> {
+    if m.deleted {
+        return None;
+    }
+    let Some(media) = &m.media else {
+        return m.forwardable().then(|| Body::Forward(m.text.clone()));
+    };
+    let path = media.file.clone().filter(|p| p.is_file())?;
+    let inner = match media.kind.as_str() {
+        "call" => return None,
+        "sticker" => Body::Sticker(path),
+        "audio" if media.voice => Body::Voice(path),
+        kind => {
+            // Pictures and videos keep their caption ("[Gambar] caption").
+            let caption = if matches!(kind, "image" | "video") {
+                m.text.split_once(']').map(|(_, rest)| rest.trim().to_owned()).unwrap_or_default()
+            } else {
+                String::new()
+            };
+            let path = match media.name.as_deref().filter(|n| !n.is_empty() && Some(*n) != path.file_name().and_then(|f| f.to_str())) {
+                Some(name) => {
+                    let dir = data_dir.join("forward").join(&m.id);
+                    let named = dir.join(name.replace(['/', '\\'], "_"));
+                    std::fs::create_dir_all(&dir).and_then(|_| std::fs::copy(&path, &named)).map(|_| named).unwrap_or(path)
+                }
+                None => path,
+            };
+            Body::File { path, caption }
+        }
+    };
+    Some(Body::Forwarded(Box::new(inner)))
 }
 
 /// The status as the quote shows it: its text with colours, or the photo's
@@ -1472,6 +1563,37 @@ pub fn mask_phone(jid: &str) -> String {
 mod tests {
     use super::{Body, HISTORY_MENTION_WINDOW, ReplyQuote, history_mentions_me, mask_phone, mentions_me, queued_body, reply_body, vcard};
     use crate::backend::store::{self, Delivery, Quote, Store};
+
+    #[test]
+    fn forwarding_sends_text_again_or_the_downloaded_file() {
+        let dir = std::env::temp_dir().join(format!("warust-forward-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let photo = dir.join("3EB0.jpg");
+        std::fs::write(&photo, b"jpg").unwrap();
+        let chat = "628111000002@s.whatsapp.net";
+        let r = |id: &str, text: &str| store::msg_record(chat, id, false, chat, text, 100, &Delivery::Received, false);
+        let mut downloaded = super::media::describe_sent(&photo);
+        downloaded["k"] = whatsapp_rust::serde_json::json!("image");
+        let mut missing = super::media::describe_sent(&dir.join("gone.jpg"));
+        missing["k"] = whatsapp_rust::serde_json::json!("image");
+        let records = [
+            r("t", "halo"),
+            store::with_media(r("p", "[Gambar] lihat ini"), Some(downloaded)),
+            store::with_media(r("m", "[Gambar]"), Some(missing)),
+        ];
+        let lines: String = records.iter().map(|r| format!("{r}\n")).collect();
+        let path = dir.join("s.jsonl");
+        std::fs::write(&path, lines).unwrap();
+        let (_, book) = Store::open(&path);
+        let message = |id: &str| book.chats.iter().flat_map(|c| &c.messages).find(|m| m.id == id).unwrap().clone();
+        assert!(matches!(super::forward_body(&message("t"), &dir), Some(Body::Forward(t)) if t == "halo"));
+        match super::forward_body(&message("p"), &dir) {
+            Some(Body::Forwarded(inner)) => assert!(matches!(*inner, Body::File { ref caption, .. } if caption == "lihat ini")),
+            _ => panic!("a downloaded photo goes on as a forwarded file"),
+        }
+        assert!(super::forward_body(&message("m"), &dir).is_none(), "not downloaded yet");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_contact_card_is_a_vcard_with_the_whatsapp_id() {
