@@ -156,6 +156,28 @@ pub struct Member {
     pub phone: Option<String>,
 }
 
+/// Shows what a check found; a new release that may install by itself is
+/// downloaded and checked first (#93 stage 2), off the async workers.
+fn fetch_update(state: &Updater, found: update::UpdateState) {
+    let update::UpdateState::Available(release) = found else {
+        state.set_update(found);
+        return;
+    };
+    if !(state.settings().updates.auto_install && update::installable()) {
+        state.set_update(update::UpdateState::Available(release));
+        return;
+    }
+    state.set_update(update::UpdateState::Downloading(release.clone()));
+    let state = state.clone();
+    std::thread::spawn(move || match update::download(&release) {
+        Ok(()) => state.set_update(update::UpdateState::Ready(release)),
+        Err(e) => {
+            log::warn!("update {}: {e}", release.version);
+            state.set_update(update::UpdateState::Available(release));
+        }
+    });
+}
+
 /// What the contact panel shows about a group (#91).
 #[derive(Clone, Debug, Default)]
 pub struct GroupInfo {
@@ -329,6 +351,8 @@ pub enum Command {
     SaveSettings(Settings),
     /// Look for a new release now ("Check now" in Settings).
     CheckUpdate,
+    /// Install the downloaded update now (the app is idle) and restart.
+    InstallUpdate,
     /// Send a `webhook.test` event to the global webhook URL.
     TestWebhook,
 }
@@ -365,7 +389,7 @@ impl Backend {
             if watcher.settings().updates.auto_check {
                 let found = tokio::task::spawn_blocking(update::check).await.unwrap_or_default();
                 if !matches!(found, update::UpdateState::Failed(_)) {
-                    watcher.set_update(found);
+                    fetch_update(&watcher, found);
                 }
             }
             tokio::time::sleep(update::EVERY).await;
@@ -502,6 +526,10 @@ impl Updater {
             Arc::make_mut(&mut shared.full_avatars).insert(jid.to_owned(), picture);
         }
         self.ctx.request_repaint();
+    }
+
+    pub(crate) fn update_state(&self) -> update::UpdateState {
+        self.shared.lock().map(|s| s.update.clone()).unwrap_or_default()
     }
 
     pub(crate) fn set_update(&self, update: update::UpdateState) {
@@ -874,7 +902,23 @@ async fn run(
             Command::CheckUpdate => {
                 state.set_update(update::UpdateState::Checking);
                 let state = state.clone();
-                tokio::task::spawn_blocking(move || state.set_update(update::check()));
+                tokio::task::spawn_blocking(move || fetch_update(&state, update::check()));
+            }
+            Command::InstallUpdate => {
+                let release = match state.update_state() {
+                    update::UpdateState::Ready(release) => release,
+                    _ => continue,
+                };
+                state.set_update(update::UpdateState::Installing(release.clone()));
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || match update::install() {
+                    Ok(()) => state.set_update(update::UpdateState::Restarting),
+                    Err(e) => {
+                        log::warn!("update {}: install failed: {e}", release.version);
+                        // The banner's Download is still there.
+                        state.set_update(update::UpdateState::Available(release));
+                    }
+                });
             }
             Command::SaveSettings(settings) => {
                 let old = state.settings();

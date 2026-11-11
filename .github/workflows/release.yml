@@ -192,6 +192,10 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      # warust checks a downloaded update against this before installing it (#93).
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum -- * > SHA256SUMS && cat SHA256SUMS
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

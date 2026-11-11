@@ -78,13 +78,15 @@ impl Webhook {
 pub struct Updates {
     /// Check GitHub on start and once a day.
     pub auto_check: bool,
+    /// Download, check and install a new release by itself, then restart.
+    pub auto_install: bool,
     /// A version the user put off with "Later": no banner for it.
     pub skipped: String,
 }
 
 impl Default for Updates {
     fn default() -> Self {
-        Self { auto_check: true, skipped: String::new() }
+        Self { auto_check: true, auto_install: true, skipped: String::new() }
     }
 }
 

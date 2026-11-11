@@ -277,6 +277,8 @@ pub struct App {
     seen: seen::Watch,
     /// The unread count last shown on the taskbar icon and the title.
     shown_unread: Option<u32>,
+    /// A ready update was asked to install (once per download, #93).
+    update_asked: bool,
     /// Numbers open in windows of their own (issue #28).
     windows: Vec<NumberWindow>,
 }
@@ -350,6 +352,7 @@ impl App {
             lock: privacy::Lock::default(),
             windows: Vec::new(),
             shown_unread: None,
+            update_asked: false,
             state: State {
                 contact_panel: true,
                 // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
@@ -514,16 +517,45 @@ impl App {
             });
     }
 
-    /// "warust 0.1.6 is available" (#93): a slim bar under the top bar with
-    /// the release notes, the installer for this OS, and "Later" (no banner
-    /// for that version again).
+    /// The update bar under the top bar (#93): a new release to download
+    /// (What's new, Download, Later), or, installing by itself, its download,
+    /// "installs when idle" and the install. Once nothing is going on (no
+    /// call, empty queues, no recording, nothing typed) a ready update
+    /// installs, and the window closes for warust to start again.
     fn update_banner(&mut self, ui: &mut Ui) {
-        let backend::update::UpdateState::Available(release) = &self.state.update else { return };
-        if self.settings.updates.skipped == release.version {
-            return;
+        use backend::update::UpdateState;
+        let update = self.state.update.clone();
+        if !matches!(update, UpdateState::Ready(_)) {
+            self.update_asked = false;
         }
+        let (text, release, buttons) = match &update {
+            UpdateState::Restarting => {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                return;
+            }
+            UpdateState::Available(r) if self.settings.updates.skipped != r.version => (
+                crate::trf!("warust {} is available (you have {})", "warust {} sudah tersedia (terpasang {})", r.version, backend::update::current()),
+                r.clone(),
+                true,
+            ),
+            UpdateState::Downloading(r) => (crate::trf!("Downloading warust {}…", "Mengunduh warust {}…", r.version), r.clone(), false),
+            UpdateState::Installing(r) => (crate::trf!("Installing warust {}; warust restarts by itself", "Memasang warust {}; warust akan mulai ulang sendiri", r.version), r.clone(), false),
+            UpdateState::Ready(r) => {
+                let idle = self.state.call_now.is_none()
+                    && self.sessions.iter().all(|s| s.queue == 0)
+                    && self.state.voice.is_none()
+                    && self.state.composer.trim().is_empty();
+                if idle && !self.update_asked {
+                    self.update_asked = true;
+                    self.backend.send(Command::InstallUpdate);
+                }
+                // Looks again for an idle moment even when nothing repaints.
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
+                (crate::trf!("warust {} is ready and installs once warust is idle", "warust {} siap dan dipasang saat warust tidak dipakai", r.version), r.clone(), false)
+            }
+            _ => return,
+        };
         let p = theme::palette(ui.ctx());
-        let release = release.clone();
         let mut later = false;
         Panel::top("update_banner")
             .exact_size(44.0)
@@ -535,17 +567,14 @@ impl App {
                     ui,
                     44.0,
                     |ui| {
-                        icons::show(ui, "download", 16.0, p.accent_text);
+                        icons::show(ui, if buttons { "download" } else { "loader-circle" }, 16.0, p.accent_text);
                         ui.add_space(4.0);
-                        let text = crate::trf!(
-                            "warust {} is available (you have {})",
-                            "warust {} sudah tersedia (terpasang {})",
-                            release.version,
-                            backend::update::current()
-                        );
                         ui.add(egui::Label::new(rich(&text, 13.0, Weight::SemiBold, p.accent_text)).truncate());
                     },
                     |ui| {
+                        if !buttons {
+                            return;
+                        }
                         if widgets::button(ui, None, tr("Later", "Nanti"), Kind::Secondary).clicked() {
                             later = true;
                         }
