@@ -167,6 +167,9 @@ pub struct Chat {
     pub archived: bool,
     /// Pinned messages, oldest pin first; may include expired ones.
     pub pins: Vec<Pin>,
+    /// Muted until this time (Unix seconds; `i64::MAX` for always), here or
+    /// on the phone: no notification while it lasts (#87).
+    pub muted_until: Option<i64>,
 }
 
 /// How long a pinned message stays pinned (the choices WhatsApp offers).
@@ -226,6 +229,11 @@ pub struct Pin {
 }
 
 impl Chat {
+    /// Whether the chat is muted at `now` (Unix seconds).
+    pub fn is_muted(&self, now: i64) -> bool {
+        self.muted_until.is_some_and(|until| until > now)
+    }
+
     /// Pins that have not lapsed at `now`, oldest pin first (the last is the latest).
     pub fn active_pins(&self, now: i64) -> Vec<&Pin> {
         self.pins.iter().filter(|p| p.expires > now).collect()
@@ -334,6 +342,11 @@ pub struct Book {
     /// Archived chats (normalized JIDs), also those without messages yet, so
     /// an archive record that comes before the history still counts.
     archived: HashSet<String>,
+    /// Muted chats (normalized JIDs) and until when, like `archived`.
+    muted: HashMap<String, i64>,
+    /// The phone's mutes were read in full once (#87): a number linked
+    /// before warust read mutes gets them on its next connection.
+    pub mutes_synced: bool,
     /// Messages deleted for me: history repeating them does not bring them back.
     hidden: HashSet<String>,
 }
@@ -457,6 +470,7 @@ impl Book {
             done_at: None,
             archived: self.archived.contains(jid),
             pins: Vec::new(),
+            muted_until: self.muted.get(jid).copied(),
         });
         self.chats.last_mut().expect("just pushed")
     }
@@ -651,6 +665,21 @@ impl Book {
                     let at = record.get("ts").and_then(Value::as_i64).unwrap_or(0);
                     if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
                         c.done_at = (at > 0).then_some(at);
+                    }
+                }
+            }
+            Some("mutesync") => self.mutes_synced = true,
+            Some("mute") => {
+                // `until` 0 (or missing) unmutes.
+                if let Some(chat) = text("chat") {
+                    let jid = self.normalize(&chat);
+                    let until = record.get("until").and_then(Value::as_i64).filter(|t| *t > 0);
+                    match until {
+                        Some(t) => self.muted.insert(jid.clone(), t),
+                        None => self.muted.remove(&jid),
+                    };
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        c.muted_until = until;
                     }
                 }
             }
@@ -908,6 +937,17 @@ pub fn seen_record(chat: &str) -> Value {
 }
 
 /// Archives a chat, or (with `false`) takes it out of the archive.
+/// The phone's mutes were read in full.
+pub fn mutes_synced_record() -> Value {
+    json!({ "t": "mutesync" })
+}
+
+/// Mutes a chat until `until` (Unix seconds, `i64::MAX` for always), or
+/// unmutes it with `None`.
+pub fn mute_record(chat: &str, until: Option<i64>) -> Value {
+    json!({ "t": "mute", "chat": chat, "until": until.unwrap_or(0) })
+}
+
 pub fn archive_record(chat: &str, archived: bool) -> Value {
     json!({ "t": "archive", "chat": chat, "v": archived })
 }
@@ -1237,6 +1277,28 @@ mod tests {
             status_record("x", &Delivery::Queued),
         ]);
         assert_eq!(b.chats[0].messages[0].status, Delivery::Sent);
+    }
+
+    #[test]
+    fn mutes_come_and_go_and_wait_for_their_chat() {
+        let b = book(&[
+            // Muted before the chat had any message (as the phone's sync does).
+            mute_record("1@s.whatsapp.net", Some(i64::MAX)),
+            msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "hi", 1, &Delivery::Received, false),
+            mute_record("2@s.whatsapp.net", Some(100)),
+            msg_record("2@s.whatsapp.net", "y", false, "2@s.whatsapp.net", "hi", 2, &Delivery::Received, false),
+        ]);
+        let chat = |jid: &str| b.chats.iter().find(|c| c.jid == jid).unwrap();
+        assert!(chat("1@s.whatsapp.net").is_muted(1_000_000));
+        // A mute that ended counts as not muted.
+        assert!(chat("2@s.whatsapp.net").is_muted(50));
+        assert!(!chat("2@s.whatsapp.net").is_muted(200));
+        let b = book(&[
+            msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "hi", 1, &Delivery::Received, false),
+            mute_record("1@s.whatsapp.net", Some(i64::MAX)),
+            mute_record("1@s.whatsapp.net", None),
+        ]);
+        assert!(!b.chats[0].is_muted(0));
     }
 
     #[test]

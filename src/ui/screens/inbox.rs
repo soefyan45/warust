@@ -146,6 +146,9 @@ pub fn show(
                 52.0,
                 |ui| {
                     ui.label(rich(&super::chat_title(&book, chat), 14.0, Weight::SemiBold, p.text));
+                    if chat.is_muted(time::now()) {
+                        icons::show(ui, "bell-off", 14.0, p.muted);
+                    }
                     if several {
                         // Which number the chat came in on, and so replies from.
                         ui.label(rich(tr("to", "masuk ke"), 12.0, Weight::Regular, p.muted));
@@ -697,8 +700,28 @@ fn chat_menu(row: &egui::Response, session: &SessionView, chat: &Chat, commands:
         } else if ui.button(tr("Mark as unread", "Tandai belum dibaca")).clicked() {
             commands.push(Command::MarkUnread { id: id.clone(), chat: jid.clone() });
         }
+        mute_menu(ui, &id, &jid, chat, commands);
         if ui.button(if chat.archived { tr("Unarchive", "Keluarkan dari arsip") } else { tr("Archive", "Arsipkan") }).clicked() {
             commands.push(Command::Archive { id, chat: jid, archived: !chat.archived });
+        }
+    });
+}
+
+/// "Unmute", or "Mute notifications" for 8 hours, a week or always, as on
+/// the phone; synced with it (#87).
+fn mute_menu(ui: &mut Ui, id: &str, jid: &str, chat: &Chat, commands: &mut Vec<Command>) {
+    let now = time::now();
+    if chat.is_muted(now) {
+        if ui.button(tr("Unmute", "Bunyikan lagi")).clicked() {
+            commands.push(Command::MuteChat { id: id.to_owned(), chat: jid.to_owned(), until: None });
+        }
+        return;
+    }
+    ui.menu_button(tr("Mute notifications", "Bisukan notifikasi"), |ui| {
+        for (label, until) in [(tr("8 hours", "8 jam"), now + 8 * 3600), (tr("1 week", "1 minggu"), now + 7 * 24 * 3600), (tr("Always", "Selalu"), i64::MAX)] {
+            if ui.button(label).clicked() {
+                commands.push(Command::MuteChat { id: id.to_owned(), chat: jid.to_owned(), until: Some(until) });
+            }
         }
     });
 }
@@ -933,9 +956,16 @@ fn chat_row(
     let name = Rect::from_min_max(top.min, pos2(right - time_w - 8.0, top.bottom()));
     widgets::paint_text(ui, name, title, fonts::ui(14.0, Weight::SemiBold), p.text, Align::Min);
     let at = chat.mention_pending();
-    let reserve = if chat.unread > 0 { 30.0 } else { 0.0 } + if at { 26.0 } else { 0.0 };
+    let badges = if chat.unread > 0 { 30.0 } else { 0.0 } + if at { 26.0 } else { 0.0 };
+    // Muted here or on the phone: a struck bell before the badges (#87).
+    let muted = chat.is_muted(time::now());
+    let reserve = badges + if muted { 22.0 } else { 0.0 };
     let preview_rect = Rect::from_min_max(bottom.min, pos2(right - reserve, bottom.bottom()));
     paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing);
+    if muted {
+        let bell = Rect::from_min_size(pos2(right - badges - 18.0, bottom.center().y - 8.0), vec2(16.0, 16.0));
+        icons::paint(ui, bell, "bell-off", 15.0, p.muted);
+    }
     if at {
         // "@": a mention is waiting; sits before the unread count.
         let x = right - if chat.unread > 0 { 26.0 + 18.0 } else { 18.0 };
@@ -3957,9 +3987,15 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     widgets::paint_text(ui, name, title, fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
     let at = chat.mention_pending();
     let unread_w = if chat.unread > 9 { 28.0 } else { 20.0 };
-    let reserve = if chat.unread > 0 { unread_w + 12.0 } else { 0.0 } + if at { 28.0 } else { 0.0 };
+    let badges = if chat.unread > 0 { unread_w + 12.0 } else { 0.0 } + if at { 28.0 } else { 0.0 };
+    let muted = chat.is_muted(time::now());
+    let reserve = badges + if muted { 24.0 } else { 0.0 };
     let line = Rect::from_min_max(pos2(left, row.top() + 35.0), pos2(right - reserve, row.top() + 56.0));
     paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing);
+    if muted {
+        let bell = Rect::from_min_size(pos2(right - badges - 20.0, line.center().y - 9.0), vec2(18.0, 18.0));
+        icons::paint(ui, bell, "bell-off", 17.0, p.muted);
+    }
     if at {
         let x = right - if chat.unread > 0 { unread_w + 6.0 + 20.0 } else { 20.0 };
         let badge = Rect::from_min_size(pos2(x, line.center().y - 10.0), vec2(20.0, 20.0));
@@ -4048,6 +4084,7 @@ fn compact_chat(
                         if ui.button(tr("Copy number", "Salin nomor")).clicked() {
                             ui.ctx().copy_text(chat.jid.split('@').next().unwrap_or_default().to_owned());
                         }
+                        mute_menu(ui, &session.id, &chat.jid, chat, &mut commands);
                         if !chat.is_group() || chat.mention_pending() || chat.is_done() {
                             let done = chat.is_done();
                             if ui.button(if done { tr("Mark needs reply", "Tandai perlu balas") } else { tr("Mark done", "Tandai selesai") }).clicked() {
@@ -4213,7 +4250,7 @@ mod typing_tests {
     fn contact_typing_label() {
         use crate::backend::{Book, Chat, Typing};
         use std::time::{Duration, Instant};
-        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new() };
+        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new(), muted_until: None };
         let book = Book::default();
         let mut state = State::default();
         assert_eq!(typing_label(&state, "s1", &book, &chat), None);

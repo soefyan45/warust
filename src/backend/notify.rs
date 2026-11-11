@@ -130,6 +130,11 @@ pub(crate) fn incoming(state: &Updater, session: &str, book: &Book, chat: &str, 
         return;
     }
     let jid = book.normalize(chat);
+    // Muted here or on the phone (#87): it stays quiet until the mute ends.
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    if book.chats.iter().any(|c| c.jid == jid && c.is_muted(now)) {
+        return;
+    }
     // The chat is already on screen in a focused window.
     if state.viewing().is_some_and(|(s, c)| s == session && c == jid) {
         return;

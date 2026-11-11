@@ -306,6 +306,25 @@ impl Running {
         });
     }
 
+    /// Mutes (until a time, or always) or unmutes a chat on the phone's app state.
+    pub fn set_muted(&self, id: &str, chat: &str, until: Option<i64>) {
+        let Ok(chat) = chat.parse::<Jid>() else {
+            return;
+        };
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            let actions = client.chat_actions();
+            let result = match until {
+                None => actions.unmute_chat(&chat).await,
+                Some(i64::MAX) => actions.mute_chat(&chat).await,
+                Some(until) => actions.mute_chat_until(&chat, until.saturating_mul(1000)).await,
+            };
+            if let Err(e) = result {
+                log::warn!("session {id}: mute sync failed: {e}");
+            }
+        });
+    }
+
     /// Archives or unarchives a chat on the phone's app state.
     pub fn set_archived(&self, id: &str, chat: &str, archived: bool) {
         let Ok(chat) = chat.parse::<Jid>() else {
@@ -688,6 +707,23 @@ fn remove_media_file(state: &Updater, id: &str, msg_id: &str) {
     }
 }
 
+/// Reads every chat's mute from the phone once (#87). The phone only sends
+/// changes, and a number linked before warust read mutes never got the
+/// ones already set; replaying the collection that holds them brings each
+/// back as a `MuteUpdate`.
+fn sync_mutes_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: Arc<Client>) {
+    if state.book(id).is_none_or(|book| book.mutes_synced) {
+        return;
+    }
+    let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
+    tokio::spawn(async move {
+        match client.resync_app_state_collection(whatsapp_rust::WAPatchName::RegularHigh).await {
+            Ok(_) => state.record(&id, &chats, &[store::mutes_synced_record()]),
+            Err(e) => log::warn!("session {id}: reading mutes from the phone failed: {e}"),
+        }
+    });
+}
+
 /// The id of the message a "delete for everyone" takes back.
 fn revoked(message: &wa::Message) -> Option<String> {
     use wa::message::protocol_message::Type;
@@ -911,6 +947,7 @@ async fn on_event(
         }),
         Event::Connected(_) => {
             fetch_group_names(state, id, chats, client.clone());
+            sync_mutes_once(state, id, chats, client.clone());
             let phone = client.pn().map(|jid| mask_phone(&jid.to_string()));
             let own_number = client.pn().map(|jid| store::bare(&jid.to_string()).split('@').next().unwrap_or_default().to_owned());
             let own_lid = client.lid().map(|jid| user_part(&jid.to_string()).to_owned());
@@ -983,6 +1020,15 @@ async fn on_event(
             for m in &receipt.message_ids {
                 state.emit(id, "message.status", json!({ "id": m.to_string(), "status": status.code() }));
             }
+        }
+        // Muted or unmuted on the phone (#87): `-1` (or no end) is always,
+        // else the end in milliseconds.
+        Event::MuteUpdate(update) => {
+            let until = update.action.muted.unwrap_or(true).then(|| match update.action.mute_end_timestamp {
+                Some(end) if end > 0 => end / 1000,
+                _ => i64::MAX,
+            });
+            state.record(id, chats, &[store::mute_record(&update.jid.to_string(), until)]);
         }
         Event::ArchiveUpdate(update) => {
             let archived = update.action.archived.unwrap_or(true);
