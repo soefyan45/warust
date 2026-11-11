@@ -323,6 +323,19 @@ impl Running {
         });
     }
 
+    /// Mutes or unmutes a contact's status updates on the phone's app state (#101).
+    pub fn set_status_muted(&self, id: &str, jid: &str, muted: bool) {
+        let Ok(jid) = jid.parse::<Jid>() else {
+            return;
+        };
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            if let Err(e) = client.chat_actions().set_user_status_mute(&jid, muted).await {
+                log::warn!("session {id}: status mute sync failed: {e}");
+            }
+        });
+    }
+
     /// Mutes (until a time, or always) or unmutes a chat on the phone's app state.
     pub fn set_muted(&self, id: &str, chat: &str, until: Option<i64>) {
         let Ok(chat) = chat.parse::<Jid>() else {
@@ -729,13 +742,15 @@ fn remove_media_file(state: &Updater, id: &str, msg_id: &str) {
 /// ones already set; replaying the collection that holds them brings each
 /// back as a `MuteUpdate`.
 fn sync_mutes_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: Arc<Client>) {
-    if state.book(id).is_none_or(|book| book.mutes_synced) {
+    // Status mutes (#101) live in the same collection: a number that read
+    // chat mutes before warust knew them reads it once more.
+    if state.book(id).is_none_or(|book| book.mutes_synced && book.status_mutes_synced) {
         return;
     }
     let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
     tokio::spawn(async move {
         match client.resync_app_state_collection(whatsapp_rust::WAPatchName::RegularHigh).await {
-            Ok(_) => state.record(&id, &chats, &[store::mutes_synced_record()]),
+            Ok(_) => state.record(&id, &chats, &[store::mutes_synced_record(), store::status_mutes_synced_record()]),
             Err(e) => log::warn!("session {id}: reading mutes from the phone failed: {e}"),
         }
     });
@@ -1046,6 +1061,10 @@ async fn on_event(
                 _ => i64::MAX,
             });
             state.record(id, chats, &[store::mute_record(&update.jid.to_string(), until)]);
+        }
+        // A contact's status updates muted or unmuted on the phone (#101).
+        Event::UserStatusMuteUpdate(update) => {
+            state.record(id, chats, &[store::status_mute_record(&update.jid.to_string(), update.muted)]);
         }
         Event::ArchiveUpdate(update) => {
             let archived = update.action.archived.unwrap_or(true);

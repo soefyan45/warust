@@ -288,6 +288,8 @@ pub enum Command {
     /// Mute a chat until a time (Unix seconds, `i64::MAX` for always), or
     /// unmute it with `None`; synced with the phone (#87).
     MuteChat { id: String, chat: String, until: Option<i64> },
+    /// Mute or unmute a contact's status updates; synced with the phone (#101).
+    MuteStatus { id: String, jid: String, muted: bool },
     /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
     MarkDone { id: String, chat: String, done: bool },
     /// Ask the phone for messages older than the oldest one we have in `chat`.
@@ -1037,6 +1039,14 @@ async fn run(
                 }
                 if let Some(r) = running.get(&id) {
                     r.set_archived(&id, &chat, archived);
+                }
+            }
+            Command::MuteStatus { id, jid, muted } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::status_mute_record(&jid, muted)]);
+                }
+                if let Some(r) = running.get(&id) {
+                    r.set_status_muted(&id, &jid, muted);
                 }
             }
             Command::MuteChat { id, chat, until } => {

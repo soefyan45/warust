@@ -234,6 +234,9 @@ pub struct State {
     pub status_comment: String,
     pub status_shown: Option<(String, std::time::Instant)>,
     pub status_paused: bool,
+    /// The Status list's filter (#101): 0 all (the default), 1 not muted,
+    /// 2 muted only.
+    pub status_filter: usize,
     /// A screen asked to open this chat (session id, JID) in the Inbox.
     pub open_chat_requested: Option<(String, String)>,
     /// Unread messages of the chat that was just opened, captured before `Seen` clears them.
