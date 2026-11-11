@@ -184,6 +184,7 @@ pub fn show(
     ui.set_min_size(ui.available_size());
     let surface = theme::pane_bg(ui.ctx());
     let typing_now = typing_label(state, &session.id, &book, chat);
+    let presence_now = presence_label(state, &session.id, chat);
     Panel::top(panel_id(state, "conversation_header"))
         .exact_size(52.0)
         .resizable(false)
@@ -220,6 +221,8 @@ pub fn show(
                     }
                     if let Some(typing) = &typing_now {
                         ui.label(rich(typing, 12.0, Weight::Medium, typing_color(&p)));
+                    } else if let Some((presence, online)) = &presence_now {
+                        ui.label(rich(presence, 12.0, Weight::Regular, if *online { typing_color(&p) } else { p.muted }));
                     }
                     // "In call · 04:12" while a call with this contact runs (#39).
                     let in_call = state.call_now.as_ref().filter(|c| c.session == session.id && c.peer == chat.jid);
@@ -406,6 +409,20 @@ fn typing_label(state: &State, session: &str, book: &Book, chat: &Chat) -> Optio
         Some(who) => format!("{} {what}", super::sender_label(book, who)),
         None => what.to_owned(),
     })
+}
+
+/// "online" or "last seen …" for a private chat's header; nothing for a
+/// group, or when WhatsApp has told us nothing (not asked yet, or the contact
+/// hides it). The flag says whether it is "online", for the colour.
+fn presence_label(state: &State, session: &str, chat: &Chat) -> Option<(String, bool)> {
+    if chat.is_group() {
+        return None;
+    }
+    let presence = state.presence_now.get(&crate::backend::Typing::key(session, &chat.jid))?;
+    if presence.online {
+        return Some(("online".to_owned(), true));
+    }
+    presence.last_seen.map(|at| (time::last_seen(at), false))
 }
 
 /// Green, like WhatsApp's "mengetik…".
@@ -4303,6 +4320,7 @@ fn compact_chat(
     let book = &session.book;
     let title = super::chat_title(book, chat);
     let typing_now = typing_label(state, &session.id, book, chat);
+    let presence_now = presence_label(state, &session.id, chat);
     Panel::top(panel_id(state, "m_chat_header"))
         .exact_size(64.0)
         .resizable(false)
@@ -4345,6 +4363,8 @@ fn compact_chat(
                         widgets::paint_text(ui, label, &crate::trf!("Chat to {}", "Chat masuk ke {}", super::devices::chip_label(session)), fonts::ui(12.0, Weight::Medium), color, Align::Min);
                     } else if let Some(typing) = &typing_now {
                         widgets::paint_text(ui, bottom, typing, fonts::ui(12.0, Weight::Medium), typing_color(&p), Align::Min);
+                    } else if let Some((presence, online)) = &presence_now {
+                        widgets::paint_text(ui, bottom, presence, fonts::ui(12.0, Weight::Regular), if *online { typing_color(&p) } else { p.muted }, Align::Min);
                     } else {
                         widgets::paint_text(ui, bottom, &super::chat_subtitle(chat), fonts::mono(12.0), p.muted, Align::Min);
                     }
@@ -4544,6 +4564,29 @@ mod typing_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn contact_presence_label() {
+        use crate::backend::{Chat, Presence, Typing};
+        let mut chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new(), muted_until: None };
+        let mut state = State::default();
+        assert_eq!(presence_label(&state, "s1", &chat), None, "nothing known");
+        let key = Typing::key("s1", &chat.jid);
+        let with = |presence| std::sync::Arc::new(std::collections::HashMap::from([(key.clone(), presence)]));
+        state.presence_now = with(Presence { online: true, last_seen: None });
+        assert_eq!(presence_label(&state, "s1", &chat), Some(("online".to_owned(), true)));
+        assert_eq!(presence_label(&state, "s2", &chat), None, "another number's chat");
+        state.presence_now = with(Presence { online: false, last_seen: None });
+        assert_eq!(presence_label(&state, "s1", &chat), None, "offline and last seen hidden");
+        let now = time::now();
+        state.presence_now = with(Presence { online: false, last_seen: Some(now) });
+        let (label, online) = presence_label(&state, "s1", &chat).unwrap();
+        assert!(!online);
+        assert_eq!(label, format!("last seen today at {}", time::clock(now)));
+        chat.jid = "1203630@g.us".to_owned();
+        state.presence_now = std::sync::Arc::new(std::collections::HashMap::from([(Typing::key("s1", &chat.jid), Presence { online: true, last_seen: None })]));
+        assert_eq!(presence_label(&state, "s1", &chat), None, "a group");
     }
 
     #[test]

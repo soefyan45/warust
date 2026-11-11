@@ -139,6 +139,10 @@ pub struct Shared {
     pub open_chat: Option<(String, String)>,
     /// Contacts typing now, by `session|chat` (normalized JID).
     pub typing: Arc<HashMap<String, Typing>>,
+    /// Contacts' online state, by the same key (private chats only).
+    pub presence: Arc<HashMap<String, Presence>>,
+    /// A warust window is in front (and not locked): the numbers are "online".
+    pub active: bool,
     /// Group members by `session|group` (normalized JID), from `Command::GroupMembers`.
     pub members: Arc<HashMap<String, Vec<Member>>>,
     /// A group's details for the contact panel (#91), by the same key.
@@ -203,6 +207,20 @@ pub enum MemberRole {
     Owner,
     Admin,
     Member,
+}
+
+/// A contact's availability, as WhatsApp reports it for a chat we watch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Presence {
+    pub online: bool,
+    /// Unix seconds, when the contact shares it.
+    pub last_seen: Option<i64>,
+}
+
+/// Whether the numbers announce "online": the setting allows it and a window
+/// is in front.
+pub fn online_wanted(share: bool, active: bool) -> bool {
+    share && active
 }
 
 /// A contact typing (or recording a voice note) in a chat.
@@ -288,6 +306,9 @@ pub enum Command {
     WatchPresence { id: String, chat: String },
     /// Show (or stop showing) "sedang mengetik" in the chat on the contact's side.
     Typing { id: String, chat: String, typing: bool },
+    /// A warust window came to the front (or the last one left it): the
+    /// numbers go online (or offline), if the settings share it.
+    Active { active: bool },
     /// Show (or stop showing) "recording audio" on the contact's side while a
     /// voice note is recorded for this chat.
     RecordingAudio { id: String, chat: String, on: bool },
@@ -569,6 +590,42 @@ impl Updater {
         shared.sessions.iter().find(|s| s.id == id)?.own_number.clone()
     }
 
+    /// Whether the numbers should be "online" now.
+    pub(crate) fn online_wanted(&self) -> bool {
+        self.shared.lock().map(|s| online_wanted(s.settings.share_online, s.active)).unwrap_or(false)
+    }
+
+    /// Records a contact's online state in a chat.
+    pub(crate) fn set_presence(&self, session: &str, chat: &str, presence: Presence) {
+        if let Ok(mut shared) = self.shared.lock() {
+            let key = Typing::key(session, chat);
+            if shared.presence.get(&key) == Some(&presence) {
+                return;
+            }
+            Arc::make_mut(&mut shared.presence).insert(key, presence);
+        }
+        self.ctx.request_repaint();
+    }
+
+    /// Forgets the online states of one number (`Some`) or of all: WhatsApp
+    /// stops telling us while we are disconnected or offline ourselves.
+    pub(crate) fn clear_presence(&self, session: Option<&str>) {
+        if let Ok(mut shared) = self.shared.lock() {
+            if shared.presence.is_empty() {
+                return;
+            }
+            let map = Arc::make_mut(&mut shared.presence);
+            match session {
+                Some(id) => {
+                    let prefix = Typing::key(id, "");
+                    map.retain(|key, _| !key.starts_with(&prefix));
+                }
+                None => map.clear(),
+            }
+        }
+        self.ctx.request_repaint();
+    }
+
     /// Records (or, with `None`, clears) a contact typing in a chat.
     pub(crate) fn set_typing(&self, session: &str, chat: &str, typing: Option<Typing>) {
         if let Ok(mut shared) = self.shared.lock() {
@@ -695,6 +752,18 @@ fn unread_incoming(book: &Book, chat: &str) -> Vec<(String, String)> {
         .collect();
     ids.reverse();
     ids
+}
+
+/// Tells every running number to be online or offline, as the settings and
+/// the windows now ask. Going offline also drops what we knew of contacts.
+fn announce_online(state: &Updater, running: &HashMap<String, Running>) {
+    let online = state.online_wanted();
+    for (id, r) in running {
+        r.set_online(id, online);
+    }
+    if !online {
+        state.clear_presence(None);
+    }
 }
 
 /// How often a number locked by another process is tried again.
@@ -952,8 +1021,12 @@ async fn run(
                 let old = state.settings();
                 settings.save(&data_dir);
                 let api_changed = old.api != settings.api;
+                let online_changed = old.share_online != settings.share_online;
                 if let Ok(mut shared) = state.shared.lock() {
                     shared.settings = Arc::new(settings);
+                }
+                if online_changed {
+                    announce_online(&state, &running);
                 }
                 if api_changed {
                     if let Some(server) = api_server.take() {
@@ -1059,6 +1132,12 @@ async fn run(
                     if let Some(r) = running.get(&id) {
                         r.recording_state(&id, &chat, on);
                     }
+                }
+            }
+            Command::Active { active } => {
+                let changed = state.shared.lock().map(|mut s| std::mem::replace(&mut s.active, active) != active).unwrap_or(false);
+                if changed {
+                    announce_online(&state, &running);
                 }
             }
             Command::Typing { id, chat, typing } => {
