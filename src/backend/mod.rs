@@ -135,6 +135,8 @@ pub struct Shared {
     pub typing: Arc<HashMap<String, Typing>>,
     /// Group members by `session|group` (normalized JID), from `Command::GroupMembers`.
     pub members: Arc<HashMap<String, Vec<Member>>>,
+    /// A group's details for the contact panel (#91), by the same key.
+    pub groups: Arc<HashMap<String, GroupInfo>>,
     /// The voice call ringing or in progress (#39).
     pub call: Option<call::CallView>,
 }
@@ -147,6 +149,32 @@ pub struct Member {
     pub jid: String,
     /// Phone-number JID when known: for `Book::name_of` and display.
     pub phone: Option<String>,
+}
+
+/// What the contact panel shows about a group (#91).
+#[derive(Clone, Debug, Default)]
+pub struct GroupInfo {
+    pub description: Option<String>,
+    /// Who created it (phone-number JID when known) and when (Unix seconds).
+    pub creator: Option<String>,
+    pub created: Option<i64>,
+    /// Everyone in it, this number included (`me`), owners and admins first.
+    pub members: Vec<GroupMember>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GroupMember {
+    /// Phone-number JID when known, else the group's own address for them.
+    pub jid: String,
+    pub role: MemberRole,
+    pub me: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum MemberRole {
+    Owner,
+    Admin,
+    Member,
 }
 
 /// A contact typing (or recording a voice note) in a chat.
@@ -493,15 +521,16 @@ impl Updater {
         self.ctx.request_repaint();
     }
 
-    /// Stores a group's members for the mention picker.
-    pub(crate) fn set_members(&self, session: &str, group: &str, members: Vec<Member>) {
+    /// Stores a group's members for the mention picker, and its details.
+    pub(crate) fn set_members(&self, session: &str, group: &str, members: Vec<Member>, info: GroupInfo) {
         let key = {
             let book = self.book(session);
             let jid = book.map(|b| b.normalize(group)).unwrap_or_else(|| store::bare(group));
             Typing::key(session, &jid)
         };
         if let Ok(mut shared) = self.shared.lock() {
-            Arc::make_mut(&mut shared.members).insert(key, members);
+            Arc::make_mut(&mut shared.members).insert(key.clone(), members);
+            Arc::make_mut(&mut shared.groups).insert(key, info);
         }
         self.ctx.request_repaint();
     }
