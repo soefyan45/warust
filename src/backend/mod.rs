@@ -29,7 +29,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use registry::Registry;
 use session::{Body, Running};
 pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
-pub use registry::{Device, DeviceKind, NAME_MAX, clean_name};
+pub use registry::{DEFAULT_DEVICE_NAME, Device, DeviceKind, NAME_MAX, clean_name};
 pub use session::mask_phone;
 pub use settings::Settings;
 pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost, short_jid};
