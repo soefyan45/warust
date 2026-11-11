@@ -505,8 +505,8 @@ impl App {
                         if toggle.clicked() {
                             self.toggle_theme(dark);
                         }
-                        self.privacy_pill(ui);
-                        self.topbar_actions(ui);
+                        self.privacy_pill(ui, false);
+                        self.topbar_actions(ui, false);
                     });
                 });
             });
@@ -522,12 +522,19 @@ impl App {
             .frame(Frame::NONE.fill(p.bg).inner_margin(Margin { left: 32, right: 10, top: 0, bottom: 0 }))
             .show(ui, |ui| {
                 window::drag_area(ui, ui.max_rect().expand2(egui::vec2(32.0, 0.0)), "topnav");
+                // Short of room, the buttons on the right shrink to icons (and
+                // then the wordmark goes) so they never run into the navigation.
+                let room = ui.available_width();
+                let compact = room < TOPNAV_FULL;
+                let tight = room < TOPNAV_TIGHT;
                 ui.horizontal_centered(|ui| {
                     // Past the macOS window buttons (the bar's margin is 32).
                     ui.add_space((window::buttons_inset(ui.ctx()) - 32.0).max(0.0));
                     let (logo, _) = ui.allocate_exact_size(egui::vec2(40.0, 40.0), egui::Sense::hover());
                     widgets::logo(ui, logo, p.primary, p.accent);
-                    ui.label(rich("warust", 17.0, Weight::SemiBold, p.text));
+                    if !tight {
+                        ui.label(rich("warust", 17.0, Weight::SemiBold, p.text));
+                    }
                     ui.add_space(14.0);
                     let items = [
                         (Screen::Ringkasan, tr("Overview", "Ringkasan")),
@@ -552,23 +559,25 @@ impl App {
                         if settings.clicked() {
                             self.screen = Screen::Settings;
                         }
-                        api_pill(ui, &p, &self.api);
-                        self.privacy_pill(ui);
-                        self.topbar_actions(ui);
+                        api_pill(ui, &p, &self.api, compact);
+                        self.privacy_pill(ui, compact);
+                        self.topbar_actions(ui, compact);
                     });
                 });
             });
     }
 
     /// Right-to-left: the first button added ends up rightmost.
-    fn topbar_actions(&mut self, ui: &mut Ui) {
+    /// The page's own buttons at the right of the bar; `compact` keeps only
+    /// their icons, with the label as a hint.
+    fn topbar_actions(&mut self, ui: &mut Ui, compact: bool) {
         let p = theme::palette(ui.ctx());
         match self.screen {
             Screen::Nomor => {
-                if widgets::button(ui, Some("plus"), tr("Add number", "Tambah nomor"), Kind::Primary).clicked() {
+                if action_button(ui, "plus", tr("Add number", "Tambah nomor"), Kind::Primary, compact).clicked() {
                     self.add_number();
                 }
-                if widgets::button(ui, Some("book-open"), tr("API docs", "Dokumentasi API"), Kind::Secondary).clicked() {
+                if action_button(ui, "book-open", tr("API docs", "Dokumentasi API"), Kind::Secondary, compact).clicked() {
                     self.screen = Screen::Integrations;
                     self.state.integrations_tab = 0;
                 }
@@ -580,7 +589,7 @@ impl App {
             }
             Screen::Ringkasan | Screen::Inbox | Screen::Status | Screen::Integrations | Screen::Settings | Screen::More => {}
             Screen::Log => {
-                if widgets::button(ui, Some("download"), tr("Export CSV", "Ekspor CSV"), Kind::Secondary).clicked() {
+                if action_button(ui, "download", tr("Export CSV", "Ekspor CSV"), Kind::Secondary, compact).clicked() {
                     let note = match screens::log::export_csv(&self.sessions) {
                         Ok((path, rows)) => crate::trf!("{rows} messages exported to {}", "{rows} pesan diekspor ke {}", path.display()),
                         Err(e) => crate::trf!("Export failed: {e}", "Ekspor gagal: {e}"),
@@ -614,13 +623,14 @@ impl App {
 
     /// "Anti-peek" in the top bar (Pego `v5/Privasi · Mode anti-intip`): a pill
     /// that is forest while on, opening the mode's options.
-    fn privacy_pill(&mut self, ui: &mut Ui) {
+    fn privacy_pill(&mut self, ui: &mut Ui, compact: bool) {
         let p = theme::palette(ui.ctx());
         let on = self.settings.privacy.enabled;
         let label = if on { tr("Anti-peek on", "Anti-intip aktif") } else { tr("Anti-peek", "Anti-intip") };
         let (fill, fg, stroke) = if on { (p.primary, p.on_primary, Stroke::NONE) } else { (p.panel, p.text, Stroke::new(1.0, p.border)) };
-        let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(13.0, Weight::Medium), fg);
-        let size = egui::vec2(galley.size().x + 58.0, 36.0);
+        // Compact: the eye and the chevron only; the label moves to the hint.
+        let galley = ui.painter().layout_no_wrap(if compact { String::new() } else { label.to_owned() }, fonts::ui(13.0, Weight::Medium), fg);
+        let size = egui::vec2(if compact { 56.0 } else { galley.size().x + 58.0 }, 36.0);
         let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
         let hover = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
         ui.painter().rect(rect, 18.0, if on { fill } else { fill.lerp_to_gamma(p.raised, hover) }, stroke, egui::StrokeKind::Inside);
@@ -957,7 +967,21 @@ fn lock_cover(ctx: &egui::Context) {
 }
 
 /// "API berjalan v0.1.0" in a white pill (Forest top bar).
-fn api_pill(ui: &mut Ui, p: &theme::Palette, api: &backend::ApiState) {
+/// The bar's buttons, full or (compact) as an icon with the label as a hint.
+fn action_button(ui: &mut Ui, icon: &str, label: &str, kind: Kind, compact: bool) -> egui::Response {
+    if compact {
+        widgets::icon_button(ui, icon, 36.0, kind == Kind::Primary).on_hover_text(label)
+    } else {
+        widgets::button(ui, Some(icon), label, kind)
+    }
+}
+
+/// Below this bar width the buttons on the right show only their icons;
+/// below the second the wordmark goes too.
+const TOPNAV_FULL: f32 = 1720.0;
+const TOPNAV_TIGHT: f32 = 1380.0;
+
+fn api_pill(ui: &mut Ui, p: &theme::Palette, api: &backend::ApiState, compact: bool) {
     let (color, label) = match api {
         backend::ApiState::Listening(_) => (p.green, tr("API running", "API berjalan")),
         backend::ApiState::Failed(_) => (p.red, tr("API failed", "API gagal")),
@@ -970,13 +994,18 @@ fn api_pill(ui: &mut Ui, p: &theme::Palette, api: &backend::ApiState) {
         .inner_margin(Margin::symmetric(14, 8))
         .show(ui, |ui| {
             let ltr = egui::Layout::left_to_right(egui::Align::Center);
-            let width = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(13.0, Weight::Medium), p.text).size().x;
-            ui.allocate_ui_with_layout(egui::vec2(width + 74.0, 18.0), ltr, |ui| {
+            // Compact: the dot and "API", the state and version in the hint.
+            let shown = if compact { "API" } else { label };
+            let width = ui.painter().layout_no_wrap(shown.to_owned(), fonts::ui(13.0, Weight::Medium), p.text).size().x;
+            let extra = if compact { 18.0 } else { 74.0 };
+            ui.allocate_ui_with_layout(egui::vec2(width + extra, 18.0), ltr, |ui| {
                 ui.spacing_mut().item_spacing.x = 7.0;
                 let (dot, _) = ui.allocate_exact_size(egui::vec2(7.0, 7.0), egui::Sense::hover());
                 ui.painter().circle_filled(dot.center(), 3.5, color);
-                ui.label(rich(label, 13.0, Weight::Medium, p.text));
-                ui.label(rich_mono(concat!("v", env!("CARGO_PKG_VERSION")), 11.0, p.muted));
+                ui.label(rich(shown, 13.0, Weight::Medium, p.text));
+                if !compact {
+                    ui.label(rich_mono(concat!("v", env!("CARGO_PKG_VERSION")), 11.0, p.muted));
+                }
             });
         });
 }
