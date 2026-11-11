@@ -757,6 +757,7 @@ impl App {
             widgets::toggle(ui, &mut privacy.blur_chat, tr("Blur chat content: clear while the cursor is on a message", "Buramkan isi chat: terbaca saat kursor di atas pesan"));
             widgets::toggle(ui, &mut privacy.blur_previews, tr("Blur chat list previews (clear while the cursor is on the chat) and notification text", "Buramkan pratinjau daftar chat (terbaca saat kursor di chat itu) dan isi notifikasi"));
             widgets::toggle(ui, &mut privacy.hide_names, tr("Hide names and numbers, for presentations and recordings", "Sembunyikan nama & nomor, untuk presentasi atau rekaman"));
+            watch_toggle(ui, &p, &mut privacy);
             // The choices sit in the popup itself: a drop-down would be a
             // popup inside this one, and a click on it counts as outside.
             ui.label(rich(tr("Lock when idle", "Kunci otomatis saat ditinggal"), 13.0, Weight::Regular, p.text));
@@ -826,7 +827,7 @@ impl App {
     fn number_windows(&mut self, ctx: &egui::Context) -> Option<(String, String)> {
         let mut closed: Vec<String> = Vec::new();
         let mut focused_chat = None;
-        let locked = self.lock.locked;
+        let (locked, peeked) = (self.lock.locked, self.lock.peeked);
         for w in &mut self.windows {
             let Some(session) = self.sessions.iter().find(|s| s.id == w.id) else {
                 closed.push(w.id.clone());
@@ -858,7 +859,7 @@ impl App {
                 movie_view::show(ui.ctx(), &mut w.state.video_view);
                 photo_view::show(ui.ctx(), &mut w.state.photo_view, &w.state.full_avatars);
                 if locked {
-                    lock_cover(ui.ctx());
+                    lock_cover(ui.ctx(), peeked);
                 }
                 commands.extend(forward::show(ui.ctx(), &mut w.state.forward, &self.sessions));
                 let open = w.state.inbox_session.clone().zip(w.state.chat_selected.clone());
@@ -1110,8 +1111,32 @@ fn confirm(ctx: &egui::Context, salt: &str, title: &str, text: &str, icon: &str,
     answer
 }
 
-/// The anti-peek lock: the whole window frosted, with how to come back.
-fn lock_cover(ctx: &egui::Context) {
+/// "Detect someone behind you" (#57) and what the camera sees. Without
+/// ffmpeg it cannot be turned on.
+fn watch_toggle(ui: &mut Ui, p: &theme::Palette, privacy: &mut backend::settings::Privacy) {
+    let camera = backend::video::ffmpeg().is_some();
+    let label = tr("Detect someone behind you: the camera looks for a second face, on this computer only", "Deteksi orang di belakang Anda: kamera mencari wajah kedua, hanya di komputer ini");
+    ui.add_enabled_ui(camera, |ui| widgets::toggle(ui, &mut privacy.watch_behind, label))
+        .response
+        .on_disabled_hover_text(tr("Needs ffmpeg installed", "Butuh ffmpeg terpasang"));
+    if !privacy.watch_behind() {
+        return;
+    }
+    let (text, color) = match backend::guard::status().0 {
+        backend::guard::Watch::Off | backend::guard::Watch::Starting => (tr("Starting the camera…", "Menyalakan kamera…").to_owned(), p.muted),
+        backend::guard::Watch::Paused => (tr("Paused while a call or photo uses the camera", "Jeda selama panggilan atau foto memakai kamera").to_owned(), p.muted),
+        backend::guard::Watch::Faces(n) => (crate::trf!("Camera on · {n} face(s) seen", "Kamera aktif · {n} wajah terlihat"), p.text_2),
+        backend::guard::Watch::Failed(why) => (why, p.red_text),
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        icons::show(ui, "camera", 13.0, color);
+        ui.add(egui::Label::new(rich(&text, 12.0, Weight::Regular, color)).wrap());
+    });
+}
+
+/// The anti-peek lock: the whole window frosted, with why and how to come back.
+fn lock_cover(ctx: &egui::Context, peeked: bool) {
     let p = theme::palette(ctx);
     let screen = ctx.content_rect();
     egui::Area::new(egui::Id::unique("privacy_lock"))
@@ -1124,7 +1149,8 @@ fn lock_cover(ctx: &egui::Context) {
             ui.painter().rect(card, theme::R_LG, p.panel, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
             icons::paint(ui, egui::Rect::from_center_size(card.center() - egui::vec2(0.0, 36.0), egui::vec2(26.0, 26.0)), "lock", 26.0, p.primary);
             let title = egui::Rect::from_center_size(card.center() + egui::vec2(0.0, 6.0), egui::vec2(300.0, 22.0));
-            widgets::paint_text(ui, title, tr("warust is locked", "warust terkunci"), fonts::ui(16.0, Weight::SemiBold), p.text, egui::Align::Center);
+            let title_text = if peeked { tr("Someone may be looking at your screen", "Ada yang mungkin melihat layar Anda") } else { tr("warust is locked", "warust terkunci") };
+            widgets::paint_text(ui, title, title_text, fonts::ui(16.0, Weight::SemiBold), p.text, egui::Align::Center);
             let hint = egui::Rect::from_center_size(card.center() + egui::vec2(0.0, 34.0), egui::vec2(300.0, 18.0));
             widgets::paint_text(ui, hint, tr("Click or press any key to continue", "Klik atau tekan tombol apa saja untuk lanjut"), fonts::ui(12.5, Weight::Regular), p.muted, egui::Align::Center);
         });
@@ -1515,8 +1541,11 @@ impl eframe::App for App {
         if let Some(wake) = self.lock.update(ui.ctx(), &self.settings.privacy) {
             ui.ctx().request_repaint_after(wake);
         }
+        // Someone else in front of the camera locks too (#57).
+        backend::guard::want(self.settings.privacy.watch_behind(), ui.ctx());
+        self.lock.watch(self.settings.privacy.watch_behind() && backend::guard::status().1);
         if self.lock.locked {
-            lock_cover(ui.ctx());
+            lock_cover(ui.ctx(), self.lock.peeked);
         }
         window::edges(ui);
     }

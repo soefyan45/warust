@@ -68,6 +68,8 @@ pub fn ffmpeg() -> Option<PathBuf> {
 pub struct Camera {
     child: Child,
     running: Arc<AtomicBool>,
+    /// The anti-peek watcher stays off the camera meanwhile (#57).
+    _busy: super::guard::CameraBusy,
 }
 
 impl Drop for Camera {
@@ -79,7 +81,7 @@ impl Drop for Camera {
 }
 
 /// The ffmpeg input for the default camera on this OS.
-fn camera_input() -> Result<Vec<String>, String> {
+pub(crate) fn camera_input() -> Result<Vec<String>, String> {
     let fps = FPS.to_string();
     if cfg!(target_os = "macos") {
         // AVFoundation cameras usually only offer 30 fps; the filter makes it 15.
@@ -105,6 +107,7 @@ fn windows_camera() -> Option<String> {
 /// frames are skipped, while the camera still sets its exposure.
 pub fn snapshot(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
     let path = ffmpeg().ok_or(tr("Taking a photo needs ffmpeg installed", "Mengambil foto butuh ffmpeg terpasang"))?;
+    let _busy = super::guard::CameraBusy::take();
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
     let out = dir.join(format!("camera-{stamp}.jpg"));
@@ -135,6 +138,7 @@ pub fn open_camera(preview: Latest, repaint: Arc<dyn Fn() + Send + Sync>) -> Res
          [look]scale={pw}:{ph},hflip,format=rgba[you]"
     );
     let gop = (FPS * 2).to_string();
+    let busy = super::guard::CameraBusy::take();
     let mut command = crate::platform::command(path);
     command
         .args(["-hide_banner", "-loglevel", "quiet", "-nostats", "-nostdin"])
@@ -192,7 +196,7 @@ pub fn open_camera(preview: Latest, repaint: Arc<dyn Fn() + Send + Sync>) -> Res
             .map_err(|e| e.to_string())?;
     }
     read_pictures(stderr, PREVIEW, preview, running.clone(), repaint);
-    Ok((Camera { child, running }, frames))
+    Ok((Camera { child, running, _busy: busy }, frames))
 }
 
 /// Reads fixed-size RGBA frames from `pipe` into `latest`.

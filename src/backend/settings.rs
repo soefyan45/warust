@@ -103,11 +103,13 @@ pub struct Privacy {
     pub hide_names: bool,
     /// Lock after this many idle minutes (0: never).
     pub lock_minutes: u32,
+    /// Lock when the camera sees a second face (#57). Off unless chosen.
+    pub watch_behind: bool,
 }
 
 impl Default for Privacy {
     fn default() -> Self {
-        Self { enabled: false, blur_chat: true, blur_previews: true, hide_names: false, lock_minutes: 2 }
+        Self { enabled: false, blur_chat: true, blur_previews: true, hide_names: false, lock_minutes: 2, watch_behind: false }
     }
 }
 
@@ -120,6 +122,9 @@ impl Privacy {
     }
     pub fn hide_names(&self) -> bool {
         self.enabled && self.hide_names
+    }
+    pub fn watch_behind(&self) -> bool {
+        self.enabled && self.watch_behind
     }
 }
 

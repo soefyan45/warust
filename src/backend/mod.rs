@@ -5,6 +5,7 @@
 
 mod api;
 pub mod call;
+pub mod guard;
 pub mod video;
 pub mod update;
 pub mod movie;

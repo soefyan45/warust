@@ -66,6 +66,10 @@ pub fn frost_line(painter: &Painter, rect: Rect, fraction: f32, color: Color32) 
 pub struct Lock {
     last_input: Option<Instant>,
     pub locked: bool,
+    /// Locked because the camera saw someone else (#57).
+    pub peeked: bool,
+    /// The camera saw someone else last frame.
+    crowded: bool,
 }
 
 impl Lock {
@@ -80,6 +84,7 @@ impl Lock {
             let unlock = ctx.input(|i| i.pointer.any_click() || i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. })));
             if unlock || !privacy.enabled {
                 self.locked = false;
+                self.peeked = false;
                 self.last_input = Some(now);
             }
             return None;
@@ -98,6 +103,16 @@ impl Lock {
         }
         Some(after - idle)
     }
+
+    /// Locks when the camera starts to see someone else. Once dismissed it
+    /// waits for them to leave and come back, so a click is not undone.
+    pub fn watch(&mut self, crowded: bool) {
+        if crowded && !self.crowded && !self.locked {
+            self.locked = true;
+            self.peeked = true;
+        }
+        self.crowded = crowded;
+    }
 }
 
 #[cfg(test)]
@@ -106,9 +121,9 @@ mod tests {
 
     #[test]
     fn options_need_the_mode_on() {
-        let off = Privacy { enabled: false, blur_chat: true, blur_previews: true, hide_names: true, lock_minutes: 2 };
-        assert!(!off.blur_chat() && !off.blur_previews() && !off.hide_names());
+        let off = Privacy { enabled: false, blur_chat: true, blur_previews: true, hide_names: true, lock_minutes: 2, watch_behind: true };
+        assert!(!off.blur_chat() && !off.blur_previews() && !off.hide_names() && !off.watch_behind());
         let on = Privacy { enabled: true, ..off };
-        assert!(on.blur_chat() && on.blur_previews() && on.hide_names());
+        assert!(on.blur_chat() && on.blur_previews() && on.hide_names() && on.watch_behind());
     }
 }
