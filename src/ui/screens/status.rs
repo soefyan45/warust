@@ -120,8 +120,9 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
             let retry = matches!(downloads.get(&post.id), Some(Some(_)));
             if response.clicked() {
                 match &media.file {
+                    // The status's photo (or a video without ffmpeg) opens in the preview (#86).
                     Some(file) => {
-                        crate::platform::open(file);
+                        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("status_preview"), file.clone()));
                     }
                     None if media.downloadable() => commands.push(Command::Download { id: session.to_owned(), msg_id: post.id.clone() }),
                     None => {}
@@ -595,6 +596,10 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     let width = (height * 9.0 / 16.0).max(240.0).min(area.width() - side_room);
     let card = Rect::from_min_size(pos2(area.center().x - width / 2.0, top), vec2(width, height));
     commands.extend(paint_post(ui, p, card, post, &e.session.id, downloads, playing.as_ref()));
+    if let Some(file) = ui.ctx().data_mut(|d| d.remove_temp::<PathBuf>(egui::Id::unique("status_preview"))) {
+        state.status_paused = true;
+        state.video_view = Some(crate::ui::movie_view::Viewer::new(file, e.title()));
+    }
     // A click on a playing video pauses or resumes it, like the pause button.
     if playing.is_some() && ui.interact(card, ui.scope_id().with(("status_movie", &post.id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         state.status_paused = !state.status_paused;
