@@ -115,6 +115,8 @@ pub struct State {
     /// Group members by `session|group` (from the backend), and the groups
     /// whose members were already asked for this run.
     pub members_now: std::sync::Arc<std::collections::HashMap<String, Vec<backend::Member>>>,
+    /// Groups' details for the contact panel (#91), keyed like `members_now`.
+    pub groups_now: std::sync::Arc<std::collections::HashMap<String, backend::GroupInfo>>,
     pub members_asked: std::collections::HashMap<(String, String), std::time::Instant>,
     /// `@Name` picked in the composer with the member's JID, the chat they
     /// belong to (`session|chat`), the highlighted picker row, the `@` of a
@@ -1023,6 +1025,7 @@ impl eframe::App for App {
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
         self.state.members_now = snapshot.members;
+        self.state.groups_now = snapshot.groups;
         self.state.call_now = snapshot.call;
         if self.state.typing_now.values().any(backend::Typing::fresh) {
             // So a stale "mengetik…" disappears even when nothing else repaints.

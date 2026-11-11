@@ -250,11 +250,20 @@ impl Running {
             let own = own_users(&client);
             let book = state.book(&id);
             let mut members = Vec::new();
+            let mut everyone = Vec::new();
             let mut records = Vec::new();
             for p in &meta.participants {
                 let phone = p.phone_number.clone().or_else(|| (!p.jid.is_lid()).then(|| p.jid.clone()));
                 let lid = p.lid.clone().or_else(|| p.jid.is_lid().then(|| p.jid.clone()));
                 let is_own = [Some(&p.jid), phone.as_ref(), lid.as_ref()].into_iter().flatten().any(|j| own.iter().any(|o| o == user_part(&j.to_string())));
+                use whatsapp_rust::wacore::iq::groups::ParticipantType;
+                let role = match p.participant_type {
+                    ParticipantType::SuperAdmin => super::MemberRole::Owner,
+                    ParticipantType::Admin => super::MemberRole::Admin,
+                    _ => super::MemberRole::Member,
+                };
+                let shown = phone.as_ref().map(|j| store::bare(&j.to_string())).unwrap_or_else(|| store::bare(&p.jid.to_string()));
+                everyone.push(super::GroupMember { jid: shown, role, me: is_own });
                 if is_own {
                     continue;
                 }
@@ -269,7 +278,15 @@ impl Running {
                 members.push(super::Member { jid, phone });
             }
             state.record(&id, &store, &records);
-            state.set_members(&id, &group.to_string(), members);
+            // Owners, then admins, then us, then everyone else.
+            everyone.sort_by_key(|m| (m.role, !m.me));
+            let info = super::GroupInfo {
+                description: meta.description.clone().filter(|d| !d.trim().is_empty()),
+                creator: meta.creator_pn.as_ref().or(meta.creator.as_ref()).map(|j| store::bare(&j.to_string())),
+                created: meta.creation_time.map(|t| t as i64),
+                members: everyone,
+            };
+            state.set_members(&id, &group.to_string(), members, info);
         });
     }
 
