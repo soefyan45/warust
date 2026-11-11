@@ -306,6 +306,25 @@ impl Running {
         });
     }
 
+    /// Mutes (until a time, or always) or unmutes a chat on the phone's app state.
+    pub fn set_muted(&self, id: &str, chat: &str, until: Option<i64>) {
+        let Ok(chat) = chat.parse::<Jid>() else {
+            return;
+        };
+        let (client, id) = (self.client.clone(), id.to_owned());
+        tokio::spawn(async move {
+            let actions = client.chat_actions();
+            let result = match until {
+                None => actions.unmute_chat(&chat).await,
+                Some(i64::MAX) => actions.mute_chat(&chat).await,
+                Some(until) => actions.mute_chat_until(&chat, until.saturating_mul(1000)).await,
+            };
+            if let Err(e) = result {
+                log::warn!("session {id}: mute sync failed: {e}");
+            }
+        });
+    }
+
     /// Archives or unarchives a chat on the phone's app state.
     pub fn set_archived(&self, id: &str, chat: &str, archived: bool) {
         let Ok(chat) = chat.parse::<Jid>() else {
@@ -982,6 +1001,15 @@ async fn on_event(
             for m in &receipt.message_ids {
                 state.emit(id, "message.status", json!({ "id": m.to_string(), "status": status.code() }));
             }
+        }
+        // Muted or unmuted on the phone (#87): `-1` (or no end) is always,
+        // else the end in milliseconds.
+        Event::MuteUpdate(update) => {
+            let until = update.action.muted.unwrap_or(true).then(|| match update.action.mute_end_timestamp {
+                Some(end) if end > 0 => end / 1000,
+                _ => i64::MAX,
+            });
+            state.record(id, chats, &[store::mute_record(&update.jid.to_string(), until)]);
         }
         Event::ArchiveUpdate(update) => {
             let archived = update.action.archived.unwrap_or(true);

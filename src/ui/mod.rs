@@ -1273,7 +1273,9 @@ impl eframe::App for App {
         }
         let in_window = self.number_windows(ui.ctx());
         // Unread messages on the taskbar/Dock icon and in the window title.
-        let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).map(|c| c.unread).sum();
+        // Muted chats keep their own count but not the icon's, as on the phone.
+        let now = time::now();
+        let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).filter(|c| !c.is_muted(now)).map(|c| c.unread).sum();
         if self.shown_unread != Some(unread) {
             crate::platform::set_unread_badge(unread);
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(crate::platform::window_title(unread)));

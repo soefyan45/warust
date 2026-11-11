@@ -254,6 +254,9 @@ pub enum Command {
     MarkUnread { id: String, chat: String },
     /// Archive a chat, or take it out of the archive; synced to the phone.
     Archive { id: String, chat: String, archived: bool },
+    /// Mute a chat until a time (Unix seconds, `i64::MAX` for always), or
+    /// unmute it with `None`; synced with the phone (#87).
+    MuteChat { id: String, chat: String, until: Option<i64> },
     /// "Tandai selesai" (or, with `done: false`, back to "Perlu balas").
     MarkDone { id: String, chat: String, done: bool },
     /// Ask the phone for messages older than the oldest one we have in `chat`.
@@ -984,6 +987,14 @@ async fn run(
                 }
                 if let Some(r) = running.get(&id) {
                     r.set_archived(&id, &chat, archived);
+                }
+            }
+            Command::MuteChat { id, chat, until } => {
+                if let Some(store) = stores.get(&id) {
+                    state.record(&id, store, &[store::mute_record(&chat, until)]);
+                }
+                if let Some(r) = running.get(&id) {
+                    r.set_muted(&id, &chat, until);
                 }
             }
             Command::MarkDone { id, chat, done } => {
