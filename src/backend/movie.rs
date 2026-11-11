@@ -37,6 +37,8 @@ pub struct Status {
     pub muted: bool,
     /// The latest frame.
     pub picture: Latest,
+    /// Known to be sound alone (no picture to wait for).
+    pub sound_only: bool,
 }
 
 /// What ffmpeg says about a file.
@@ -263,6 +265,7 @@ fn status_of(c: &Current) -> Status {
         ended,
         muted: player::is_muted(),
         picture: c.picture.clone(),
+        sound_only: c.info.is_some_and(|i| i.width == 0),
     }
 }
 
@@ -313,6 +316,10 @@ fn decode_frames(
     seen: &Mutex<Instant>,
     repaint: &Arc<dyn Fn() + Send + Sync>,
 ) {
+    // Nothing to draw for sound alone.
+    if info.width == 0 {
+        return;
+    }
     let Some(ffmpeg) = ffmpeg() else { return };
     let (w, h) = fit(info.width, info.height);
     let filter = format!("fps={FPS},scale={w}:{h},format=rgba");
@@ -419,19 +426,25 @@ fn parse_probe(text: &str) -> Option<Info> {
             Some(h * 3600.0 + m * 60.0 + s)
         })
         .unwrap_or(0.0);
-    let video = text.lines().find(|l| l.contains("Video:"))?;
-    let (width, height) = video.split([' ', ',']).find_map(|token| {
-        let (a, b) = token.split_once('x')?;
-        let (w, h) = (a.parse::<u32>().ok()?, b.parse::<u32>().ok()?);
-        (w >= 16 && h >= 16).then_some((w, h))
-    })?;
+    let audio = text.lines().any(|l| l.contains("Audio:"));
+    let size = text.lines().find(|l| l.contains("Video:")).and_then(|video| {
+        video.split([' ', ',']).find_map(|token| {
+            let (a, b) = token.split_once('x')?;
+            let (w, h) = (a.parse::<u32>().ok()?, b.parse::<u32>().ok()?);
+            (w >= 16 && h >= 16).then_some((w, h))
+        })
+    });
+    // Sound alone (an mp3, a voice memo) plays too, without a picture (#86).
+    let Some((width, height)) = size else {
+        return audio.then_some(Info { duration, width: 0, height: 0, audio });
+    };
     let turned = text.lines().map(str::trim).any(|l| {
         let quarter = |v: &str| v.trim_start_matches('-').starts_with("90") || v.trim_start_matches('-').starts_with("270");
         (l.starts_with("rotate") && l.split(':').nth(1).is_some_and(|v| quarter(v.trim())))
             || l.split("rotation of ").nth(1).is_some_and(quarter)
     });
     let (width, height) = if turned { (height, width) } else { (width, height) };
-    Some(Info { duration, width, height, audio: text.lines().any(|l| l.contains("Audio:")) })
+    Some(Info { duration, width, height, audio })
 }
 
 /// The decoded size: the video's shape, its longest side at most `MAX_SIDE`,
@@ -465,6 +478,10 @@ mod tests {
         assert_eq!((info.width, info.height), (1280, 720));
         assert!(!info.audio);
         assert_eq!(parse_probe("no streams here"), None);
+        let mp3 = "  Duration: 00:03:05.00, start: 0.025057, bitrate: 128 kb/s\n  Stream #0:0: Audio: mp3, 44100 Hz, stereo, fltp, 128 kb/s";
+        let info = parse_probe(mp3).unwrap();
+        assert_eq!((info.width, info.height, info.audio), (0, 0, true));
+        assert!((info.duration - 185.0).abs() < 0.01);
     }
 
     #[test]
