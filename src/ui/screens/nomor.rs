@@ -13,15 +13,22 @@ use crate::ui::theme::{self, Palette, R_LG};
 use crate::ui::widgets::{self, Kind, rich};
 use crate::ui::{State, icons};
 
+/// Number, status, the three counts (same width, right-aligned), last
+/// active, menu.
 const ROW_COLS: [Option<f32>; 7] = [
     Some(260.0),
     Some(170.0),
-    Some(90.0),
-    Some(120.0),
-    Some(70.0),
+    Some(84.0),
+    Some(84.0),
+    Some(84.0),
     None,
     Some(28.0),
 ];
+
+/// "Last active" keeps its distance from the counts before it.
+fn last_active(col: Rect) -> Rect {
+    Rect::from_min_max(pos2(col.left() + 28.0, col.top()), col.max)
+}
 
 pub enum Action {
     Add,
@@ -328,8 +335,9 @@ fn table(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) 
     let cols = widgets::columns(head.shrink2(vec2(12.0, 0.0)), &ROW_COLS, 16.0);
     let titles = [tr("Number", "Nomor"), "Status", tr("Sent", "Terkirim"), tr("Incoming", "Pesan masuk"), tr("Queued", "Antrean"), tr("Last active", "Terakhir aktif"), ""];
     for (i, (col, title)) in cols.iter().zip(titles).enumerate() {
-        let align = if matches!(i, 2 | 4) { Align::Max } else { Align::Min };
-        widgets::paint_text(ui, *col, title, fonts::ui(12.0, Weight::Medium), p.muted, align);
+        let align = if matches!(i, 2..=4) { Align::Max } else { Align::Min };
+        let col = if i == 5 { last_active(*col) } else { *col };
+        widgets::paint_text(ui, col, title, fonts::ui(12.0, Weight::Medium), p.muted, align);
     }
 
     let query = state.nomor_search.trim().to_lowercase();
@@ -376,9 +384,9 @@ fn table(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) 
                 .on_hover_text(detail);
         }
         widgets::paint_text(ui, cols[2], &session.sent_today().to_string(), fonts::mono(13.0), p.text, Align::Max);
-        widgets::paint_text(ui, cols[3], &session.incoming_today().to_string(), fonts::mono(13.0), p.text, Align::Min);
+        widgets::paint_text(ui, cols[3], &session.incoming_today().to_string(), fonts::mono(13.0), p.text, Align::Max);
         widgets::paint_text(ui, cols[4], &session.queue.to_string(), fonts::mono(13.0), p.text, Align::Max);
-        widgets::paint_text(ui, cols[5], &ago(session.last_activity), fonts::ui(13.0, Weight::Regular), p.muted, Align::Min);
+        widgets::paint_text(ui, last_active(cols[5]), &ago(session.last_activity), fonts::ui(13.0, Weight::Regular), p.muted, Align::Min);
 
         // Row menu.
         let menu = ui

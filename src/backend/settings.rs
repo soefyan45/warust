@@ -207,6 +207,8 @@ pub struct Settings {
     /// here uses the app's.
     pub number_wallpapers: HashMap<String, NumberWallpaper>,
     pub privacy: Privacy,
+    /// Forest top bar: the navigation shows only its icons (#102).
+    pub nav_icons_only: bool,
     pub updates: Updates,
 }
 
@@ -250,6 +252,7 @@ impl Default for Settings {
             wallpaper_dim: 30,
             number_wallpapers: HashMap::new(),
             privacy: Privacy::default(),
+            nav_icons_only: false,
             updates: Updates::default(),
         }
     }
