@@ -42,6 +42,8 @@ struct Shared {
     playing: AtomicBool,
     /// The message being loaded, so its bubble can show it is starting.
     loading: Mutex<Option<String>>,
+    /// A video's sound turned off (#84); voice notes always play aloud.
+    muted: AtomicBool,
 }
 
 enum Command {
@@ -138,6 +140,33 @@ pub fn forget(id: &str) {
     }
 }
 
+/// Turns the sound of the loaded track off or on (a video's mute button).
+pub fn set_muted(muted: bool) {
+    player().shared.muted.store(muted, Ordering::Relaxed);
+}
+
+pub fn is_muted() -> bool {
+    player().shared.muted.load(Ordering::Relaxed)
+}
+
+/// Pauses or resumes track `id` if it is the one loaded.
+pub fn set_playing(id: &str, playing: bool) {
+    let shared = &player().shared;
+    if shared.track.lock().is_ok_and(|t| t.as_ref().is_some_and(|t| t.id == id)) {
+        shared.playing.store(playing, Ordering::Relaxed);
+    }
+}
+
+/// Moves track `id`, if loaded, to `seconds` on its own clock.
+pub fn seek_seconds(id: &str, seconds: f32) {
+    let shared = &player().shared;
+    let Ok(track) = shared.track.lock() else { return };
+    if let Some(track) = track.as_ref().filter(|t| t.id == id) {
+        let at = (f64::from(seconds.max(0.0)) * f64::from(RATE) / f64::from(track.speed)).min(track.buffer.len() as f64);
+        shared.position.store(at.to_bits(), Ordering::Relaxed);
+    }
+}
+
 /// The next speed after the current one (1× → 1.5× → 2× → 1×).
 pub fn next_speed(speed: f32) -> f32 {
     let at = SPEEDS.iter().position(|s| (s - speed).abs() < 0.01).unwrap_or(0);
@@ -157,6 +186,7 @@ fn run(shared: Arc<Shared>, commands: mpsc::Receiver<Command>) {
         match command {
             Command::Play { id, path, from } => {
                 shared.playing.store(false, Ordering::Relaxed);
+                shared.muted.store(false, Ordering::Relaxed);
                 if let Ok(mut loading) = shared.loading.lock() {
                     *loading = Some(id.clone());
                 }
@@ -265,8 +295,9 @@ where
                 return;
             };
             let mut at = f64::from_bits(shared.position.load(Ordering::Relaxed));
+            let gain = if shared.muted.load(Ordering::Relaxed) { 0.0 } else { 1.0 };
             for frame in out.chunks_mut(channels) {
-                let sample = sample_at(&buffer, at);
+                let sample = sample_at(&buffer, at) * gain;
                 frame.fill(T::from_sample_(sample));
                 if at < buffer.len() as f64 {
                     at += step;
