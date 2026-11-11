@@ -11,6 +11,7 @@ mod lists;
 mod mention;
 mod markup;
 mod pdf;
+mod photo_view;
 pub mod privacy;
 mod qr;
 mod screens;
@@ -134,6 +135,9 @@ pub struct State {
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
     pub pdf_view: Option<pdf::Viewer>,
+    /// Profile photo open in the pop-up viewer (#92), and the full-size ones fetched.
+    pub photo_view: Option<photo_view::Viewer>,
+    pub full_avatars: std::sync::Arc<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
     /// "Teruskan ke…" dialog for a message of the open chat.
     pub forward: Option<forward::Dialog>,
     /// "Delete message?" asked for a message of the open chat (#72).
@@ -731,6 +735,7 @@ impl App {
                     };
                 });
                 pdf::show(ui.ctx(), &mut w.state.pdf_view);
+                photo_view::show(ui.ctx(), &mut w.state.photo_view, &w.state.full_avatars);
                 if locked {
                     lock_cover(ui.ctx());
                 }
@@ -1019,6 +1024,7 @@ impl eframe::App for App {
         let snapshot = self.backend.snapshot();
         self.sessions = snapshot.sessions;
         self.avatars = snapshot.avatars;
+        self.state.full_avatars = snapshot.full_avatars;
         self.downloads = snapshot.downloads;
         self.settings = snapshot.settings;
         self.state.settings = self.settings.clone();
@@ -1255,6 +1261,7 @@ impl eframe::App for App {
         self.rename_dialog(ui.ctx());
         self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
+        photo_view::show(ui.ctx(), &mut self.state.photo_view, &self.state.full_avatars);
         // "Sedang mengetik" for the chat on screen while its reply is typed.
         let open_chat = if self.screen == Screen::Inbox {
             self.state.inbox_session.clone().zip(self.state.chat_selected.clone())

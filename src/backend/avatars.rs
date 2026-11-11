@@ -66,7 +66,7 @@ pub async fn worker(
             state.set_avatar(&jid, found);
             continue;
         }
-        let picture = fetch(&client, &jid).await;
+        let picture = fetch(&client, &jid, ProfilePictureType::Preview).await;
         let stem = file_stem(&jid);
         let path = match picture {
             Some(bytes) => {
@@ -84,14 +84,32 @@ pub async fn worker(
     }
 }
 
-async fn fetch(client: &Arc<Client>, jid: &str) -> Option<Vec<u8>> {
+/// The full-size picture of `jid` (#92), from the cache when fresh, else
+/// from WhatsApp; `None` when it has none.
+pub async fn full(client: &Arc<Client>, jid: &str) -> Option<PathBuf> {
+    let dir = dir(crate::platform::data_dir());
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join(format!("{}-full.jpg", file_stem(jid)));
+    let fresh = fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .is_some_and(|age| age < FRESH);
+    if fresh {
+        return Some(path);
+    }
+    let bytes = fetch(client, jid, ProfilePictureType::Full).await?;
+    fs::write(&path, bytes).ok().map(|_| path)
+}
+
+async fn fetch(client: &Arc<Client>, jid: &str, kind: ProfilePictureType) -> Option<Vec<u8>> {
     let parsed: Jid = jid.parse().ok()?;
     let target = if jid.ends_with("@g.us") {
         ProfilePictureTarget::Group(&parsed)
     } else {
         ProfilePictureTarget::Contact(&parsed)
     };
-    let request = ProfilePictureRequest::new(target, ProfilePictureType::Preview);
+    let request = ProfilePictureRequest::new(target, kind);
     match client.pictures().lookup(request).await {
         Ok(ProfilePictureLookup::Found(picture)) => {
             let response = client.http_client().execute(HttpRequest::get(picture.url)).await.ok()?;

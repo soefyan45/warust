@@ -116,6 +116,8 @@ pub struct Shared {
     pub sessions: Vec<SessionView>,
     /// Profile pictures by normalized JID: a cached file, or `None` for no picture.
     pub avatars: Arc<HashMap<String, Option<PathBuf>>>,
+    /// Full-size profile pictures asked for the photo viewer (#92), by JID.
+    pub full_avatars: Arc<HashMap<String, Option<PathBuf>>>,
     /// Downloads by message id: `None` while running, else why it failed.
     /// Finished downloads leave the map and show as the message's file.
     pub downloads: Arc<HashMap<String, Option<String>>>,
@@ -291,6 +293,8 @@ pub enum Command {
     LoadOlder { id: String, chat: String },
     /// Fetch (or load from cache) the profile picture of a chat shown on screen.
     Avatar { id: String, jid: String },
+    /// Fetch (or load from cache) the full-size profile picture, for the viewer.
+    AvatarFull { id: String, jid: String },
     /// Queue a sticker (any picture; converted to 512×512 WebP when needed).
     SendSticker { id: String, chat: String, path: PathBuf },
     /// Queue a voice note recorded in the composer (an Ogg Opus file).
@@ -469,6 +473,13 @@ impl Updater {
     fn set_api(&self, api: ApiState) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.api = api;
+        }
+        self.ctx.request_repaint();
+    }
+
+    pub(crate) fn set_full_avatar(&self, jid: &str, picture: Option<PathBuf>) {
+        if let Ok(mut shared) = self.shared.lock() {
+            Arc::make_mut(&mut shared.full_avatars).insert(jid.to_owned(), picture);
         }
         self.ctx.request_repaint();
     }
@@ -911,6 +922,15 @@ async fn run(
             Command::Avatar { id, jid } => {
                 if let Some(r) = running.get(&id) {
                     r.request_avatar(jid);
+                }
+            }
+            Command::AvatarFull { id, jid } => {
+                if let Some(r) = running.get(&id) {
+                    let (client, state) = (r.client(), state.clone());
+                    tokio::spawn(async move {
+                        let picture = avatars::full(&client, &jid).await;
+                        state.set_full_avatar(&jid, picture);
+                    });
                 }
             }
             Command::WatchPresence { id, chat } => {
