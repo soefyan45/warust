@@ -92,6 +92,9 @@ pub enum VoiceStep {
     Failed(String, std::time::Instant),
 }
 
+/// A sidebar page: where it goes, its icon, its label, its count or badge.
+type SideItem = (Screen, &'static str, &'static str, Option<String>);
+
 /// The "Chat wallpaper" dialog of a number (#60): which number, and its
 /// choice as edited (key `app` = the app's wallpaper).
 pub struct NumberWallpaperEdit {
@@ -386,6 +389,10 @@ impl App {
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
+        if self.settings.nav_icons_only {
+            self.sidebar_rail(ui);
+            return;
+        }
         let p = theme::palette(ui.ctx());
         Panel::left("sidebar")
             .default_size(232.0)
@@ -427,42 +434,17 @@ impl App {
 
                 widgets::section_label(ui, "Gateway");
                 ui.add_space(4.0);
-                let total = self.sessions.len().to_string();
-                let unread: u32 = self
-                    .sessions
-                    .iter()
-                    .flat_map(|s| s.book.chats.iter())
-                    .map(|c| c.unread)
-                    .sum();
-                let unread = if unread > 0 { unread.to_string() } else { String::new() };
-                let unread = (!unread.is_empty()).then_some(unread.as_str());
-                let unseen: usize = self.sessions.iter().map(|s| screens::status::unseen_posters(&s.book)).sum();
-                let unseen = if unseen > 0 { unseen.to_string() } else { String::new() };
-                let unseen = (!unseen.is_empty()).then_some(unseen.as_str());
-                let items = [
-                    (Screen::Ringkasan, "gauge", tr("Overview", "Ringkasan"), None),
-                    (Screen::Nomor, "smartphone", tr("Numbers", "Nomor"), Some(total.as_str())),
-                    (Screen::Inbox, "inbox", "Inbox", unread),
-                    (Screen::Status, "circle-dashed", "Status", unseen),
-                    (Screen::Log, "scroll-text", tr("Message log", "Log pesan"), None),
-                ];
-                for (screen, icon, label, count) in items {
-                    let selected = self.screen == screen
-                        || (screen == Screen::Nomor && self.screen == Screen::Pairing);
-                    if widgets::nav_item(ui, icon, label, count, selected).clicked() {
+                let (gateway, integrations) = self.side_items();
+                for (screen, icon, label, count) in gateway {
+                    if widgets::nav_item(ui, icon, label, count.as_deref(), self.side_selected(screen)).clicked() {
                         self.screen = screen;
                     }
                 }
                 ui.add_space(20.0);
                 widgets::section_label(ui, tr("Integrations", "Integrasi"));
                 ui.add_space(4.0);
-                let api_on = matches!(self.api, backend::ApiState::Listening(_)).then_some("API");
-                let items = [
-                    (Screen::Integrations, "webhook", "Webhook & API", api_on),
-                    (Screen::Settings, "settings", tr("Settings", "Pengaturan"), None),
-                ];
-                for (screen, icon, label, badge) in items {
-                    if widgets::nav_item(ui, icon, label, badge, self.screen == screen).clicked() {
+                for (screen, icon, label, badge) in integrations {
+                    if widgets::nav_item(ui, icon, label, badge.as_deref(), self.side_selected(screen)).clicked() {
                         self.screen = screen;
                     }
                 }
@@ -476,6 +458,79 @@ impl App {
                     &mut widgets::child(ui, status, egui::Layout::top_down(egui::Align::Min)),
                     &self.sessions,
                 );
+            });
+    }
+
+    /// The sidebar's pages with their counts: Gateway, then Integrations.
+    fn side_items(&self) -> ([SideItem; 5], [SideItem; 2]) {
+        let shown = |n: usize| (n > 0).then(|| n.to_string());
+        let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).map(|c| c.unread).sum();
+        let unseen: usize = self.sessions.iter().map(|s| screens::status::unseen_posters(&s.book)).sum();
+        let api_on = matches!(self.api, backend::ApiState::Listening(_)).then(|| "API".to_owned());
+        (
+            [
+                (Screen::Ringkasan, "gauge", tr("Overview", "Ringkasan"), None),
+                (Screen::Nomor, "smartphone", tr("Numbers", "Nomor"), Some(self.sessions.len().to_string())),
+                (Screen::Inbox, "inbox", "Inbox", shown(unread as usize)),
+                (Screen::Status, "circle-dashed", "Status", shown(unseen)),
+                (Screen::Log, "scroll-text", tr("Message log", "Log pesan"), None),
+            ],
+            [
+                (Screen::Integrations, "webhook", "Webhook & API", api_on),
+                (Screen::Settings, "settings", tr("Settings", "Pengaturan"), None),
+            ],
+        )
+    }
+
+    fn side_selected(&self, screen: Screen) -> bool {
+        self.screen == screen || (screen == Screen::Nomor && self.screen == Screen::Pairing)
+    }
+
+    /// The Classic sidebar as a rail of icons (#102): Settings → Appearance →
+    /// Navigation → Icons only. Labels move to the hints, counts to badges.
+    fn sidebar_rail(&mut self, ui: &mut Ui) {
+        let p = theme::palette(ui.ctx());
+        Panel::left("sidebar_rail")
+            .exact_size(64.0)
+            .resizable(false)
+            .frame(Frame::NONE.fill(p.panel).inner_margin(Margin::symmetric(8, 14)))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 4.0;
+                let panel = ui.max_rect();
+                let title = egui::Rect::from_min_size(panel.min - egui::vec2(8.0, 14.0), egui::vec2(panel.width() + 16.0, 52.0));
+                window::drag_area(ui, title, "sidebar");
+                if window::buttons_inset(ui.ctx()) > 0.0 {
+                    ui.add_space(title.bottom() - panel.top());
+                }
+                let (row, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 32.0), egui::Sense::hover());
+                widgets::logo(ui, egui::Rect::from_center_size(row.center(), egui::Vec2::splat(26.0)), p.primary, p.on_primary);
+                ui.add_space(22.0);
+                let (gateway, integrations) = self.side_items();
+                for (screen, icon, label, count) in gateway {
+                    if widgets::nav_icon(ui, icon, label, count.as_deref(), self.side_selected(screen)).clicked() {
+                        self.screen = screen;
+                    }
+                }
+                ui.add_space(10.0);
+                let (line, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 1.0), egui::Sense::hover());
+                ui.painter().hline(line.x_range().shrink(8.0), line.center().y, Stroke::new(1.0, p.border));
+                ui.add_space(10.0);
+                for (screen, icon, label, badge) in integrations {
+                    if widgets::nav_icon(ui, icon, label, badge.as_deref(), self.side_selected(screen)).clicked() {
+                        self.screen = screen;
+                    }
+                }
+                // The gateway's state as a dot at the bottom, its words in the hint.
+                let connected = self.sessions.iter().filter(|s| s.status == Status::Connected).count();
+                let spot = egui::Rect::from_center_size(egui::pos2(panel.center().x, panel.bottom() - 12.0), egui::vec2(panel.width(), 24.0));
+                let response = ui.interact(spot, ui.scope_id().with("rail_status"), egui::Sense::hover());
+                ui.painter().circle_filled(spot.center(), 4.0, if connected > 0 { p.green } else { p.gray });
+                let api = if matches!(self.api, backend::ApiState::Listening(_)) { tr("REST API running", "REST API berjalan") } else { tr("REST API not active", "REST API belum aktif") };
+                response.on_hover_text(format!(
+                    "{}\n{api}\nv{}",
+                    crate::trf!("{connected} of {} connected", "{connected} dari {} terhubung", self.sessions.len()),
+                    env!("CARGO_PKG_VERSION")
+                ));
             });
     }
 

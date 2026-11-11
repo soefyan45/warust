@@ -207,7 +207,8 @@ pub struct Settings {
     /// here uses the app's.
     pub number_wallpapers: HashMap<String, NumberWallpaper>,
     pub privacy: Privacy,
-    /// Forest top bar: the navigation shows only its icons (#102).
+    /// Navigation shows only its icons (#102): Forest's top pills, or
+    /// Classic's sidebar as a rail.
     pub nav_icons_only: bool,
     pub updates: Updates,
 }
