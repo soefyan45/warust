@@ -120,28 +120,64 @@ pub fn show(
         return commands;
     };
 
-    // The contact panel always beside the chat, on the right, at a width in
-    // proportion to the room there is.
+    // The contact panel beside the chat on the right, in a fixed share of the
+    // column cut by hand (an egui side panel here re-sized itself every
+    // frame and spilled past the window); a column too narrow for both shows
+    // the details as a page of their own with a back button. Never a pop-up.
     let info = state.groups_now.get(&crate::backend::Typing::key(&session.id, &chat.jid)).cloned();
     let webhook = super::webhook_label(state, &session.id);
     let mut open_member = None;
+    let mut chat_ui = None;
     if state.contact_panel {
-        let room = ui.available_width();
-        let width = (room * 0.34).clamp(220.0, 360.0);
-        open_member = Panel::right(panel_id(state, "contact"))
-            .default_size(width)
-            .size_range(200.0..=(room * 0.5).max(220.0))
-            .resizable(true)
-            .show_separator_line(!theme::template().top_nav())
-            .frame(theme::pane(ui.ctx(), p.panel, Margin::same(if room < 760.0 { 14 } else { 20 })))
-            .show(ui, |ui| contact_panel(ui, &p, &book, chat, avatars, &webhook, info.as_ref()))
+        let column = ui.available_rect_before_wrap();
+        let beside = (column.width() * 0.34).clamp(240.0, 360.0);
+        // The chat's header and composer need their room; below it, a page.
+        let page = column.width() - beside - PANEL_GAP < CHAT_MIN;
+        let width = if page { column.width() } else { beside };
+        let panel_rect = Rect::from_min_max(pos2(column.right() - width, column.top()), column.max);
+        let mut panel_ui = ui.new_child(egui::UiBuilder::new().max_rect(panel_rect).layout(Layout::top_down(Align::Min)));
+        panel_ui.set_clip_rect(panel_rect.intersect(ui.clip_rect()));
+        let mut close = false;
+        open_member = theme::pane(ui.ctx(), p.panel, Margin::same(18))
+            .show(&mut panel_ui, |ui| {
+                ui.set_min_size(ui.available_size());
+                if page {
+                    ui.horizontal(|ui| {
+                        close = widgets::icon_button(ui, "chevron-left", 32.0, false).on_hover_text(tr("Back to the chat", "Kembali ke chat")).clicked();
+                        let label = if chat.is_group() { tr("Group info", "Info grup") } else { tr("Contact info", "Info kontak") };
+                        ui.label(rich(label, 14.0, Weight::SemiBold, p.text));
+                    });
+                    ui.add_space(8.0);
+                }
+                contact_panel(ui, &p, &book, chat, avatars, &webhook, info.as_ref())
+            })
             .inner;
+        if close {
+            state.contact_panel = false;
+        }
+        if !page {
+            let rest = Rect::from_min_max(column.min, pos2(panel_rect.left() - PANEL_GAP, column.bottom()));
+            chat_ui = Some(ui.new_child(egui::UiBuilder::new().max_rect(rest).layout(*ui.layout())));
+        }
+        ui.allocate_rect(column, Sense::hover());
+        if page {
+            if let Some(jid) = open_member {
+                let existing = book.chats.iter().find(|c| c.jid == jid);
+                open_chat(state, &session.id, &jid, existing);
+                state.contact_panel = false;
+            }
+            return commands;
+        }
     }
     if let Some(jid) = open_member {
         let existing = book.chats.iter().find(|c| c.jid == jid);
         open_chat(state, &session.id, &jid, existing);
         state.contact_panel = false;
     }
+    let ui: &mut Ui = match chat_ui.as_mut() {
+        Some(chat_ui) => chat_ui,
+        None => ui,
+    };
     // Header, messages and composer: one card in Forest.
     theme::pane(ui.ctx(), p.bg, Margin::ZERO).show(ui, |ui| {
     ui.set_min_size(ui.available_size());
@@ -3712,6 +3748,12 @@ fn mention_popup(ui: &mut Ui, p: &Palette, state: &mut State, input: &mut Mentio
         apply_mention(ui, state, input, row, id);
     }
 }
+
+/// The narrowest the chat may get with the panel beside it: its header
+/// (name, number chip, call buttons, Done) and composer need this much.
+const CHAT_MIN: f32 = 640.0;
+/// Space between the chat and the panel beside it.
+const PANEL_GAP: f32 = 12.0;
 
 /// The contact panel's content, scrolling: the contact, or a group with its
 /// members (#91). Returns the member whose chat was asked for.
