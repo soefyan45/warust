@@ -406,11 +406,10 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                         } else {
                             ui.label(rich(tr("This template only has a light mode.", "Template ini hanya punya mode terang."), 12.0, Weight::Regular, p.muted));
                         }
-                        if Template::from_key(&draft.template).top_nav() {
-                            let mut nav = usize::from(draft.nav_icons_only);
-                            line(ui, tr("Navigation", "Navigasi"), |ui| widgets::tabs(ui, &[tr("Icons and labels", "Ikon dan label"), tr("Icons only", "Ikon saja")], &mut nav));
-                            draft.nav_icons_only = nav == 1;
-                        }
+                        // Forest's top pills, or Classic's sidebar as a rail of icons.
+                        let mut nav = usize::from(draft.nav_icons_only);
+                        line(ui, tr("Navigation", "Navigasi"), |ui| widgets::tabs(ui, &[tr("Icons and labels", "Ikon dan label"), tr("Icons only", "Ikon saja")], &mut nav));
+                        draft.nav_icons_only = nav == 1;
                         let dark = ui.ctx().theme() == egui::Theme::Dark;
                         wallpaper_picker(
                         ui,

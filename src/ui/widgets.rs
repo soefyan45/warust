@@ -225,6 +225,30 @@ pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, count: Option<&str>, selec
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
+/// A page in the Classic sidebar's icon rail (#102): the icon in a square,
+/// the label in the hint, a count as a small badge on its corner.
+pub fn nav_icon(ui: &mut Ui, icon: &str, label: &str, count: Option<&str>, selected: bool) -> Response {
+    let p = theme::palette(ui.ctx());
+    let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+    let tile = Rect::from_center_size(row.center(), Vec2::splat(40.0));
+    if selected || response.hovered() {
+        ui.painter().rect_filled(tile, R_SM, p.raised);
+    }
+    icons::paint(ui, Rect::from_center_size(tile.center(), Vec2::splat(18.0)), icon, 18.0, if selected { p.text } else { p.muted });
+    if let Some(count) = count {
+        let galley = ui.painter().layout_no_wrap(count.to_owned(), fonts::ui(9.5, Weight::SemiBold), p.on_primary);
+        let size = vec2((galley.size().x + 8.0).max(15.0), 15.0);
+        let badge = Rect::from_min_size(pos2(tile.right() - size.x + 2.0, tile.top() - 1.0), size);
+        ui.painter().rect_filled(badge, 7.5, p.primary);
+        ui.painter().galley(badge.center() - galley.size() / 2.0, galley, p.on_primary);
+    }
+    let hint = match count {
+        Some(count) => format!("{label} · {count}"),
+        None => label.to_owned(),
+    };
+    response.on_hover_text(hint).on_hover_cursor(CursorIcon::PointingHand)
+}
+
 /// Underlined tab, like `D/Tab` and `D/Tab/Active`.
 pub fn tab(ui: &mut Ui, label: &str, active: bool) -> Response {
     let p = theme::palette(ui.ctx());
