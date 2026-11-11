@@ -58,6 +58,9 @@ egui_extras = { version = "0.37", default-features = false, features = ["svg", "
 # and encodes photos sent from the composer; webp (adds image-webp) reads and
 # writes stickers.
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+# Anti-peek "someone behind you" (#57): face detection on the device, with
+# its model in assets/face. No rayon: one small frame every half second.
+rustface = { version = "0.1.7", default-features = false }
 # Local REST API (127.0.0.1 only); only the parts in use.
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query"] }
 serde = { version = "1", features = ["derive"] }
@@ -103,6 +106,10 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 # Windows: toasts through WinRT, the same windows crate accesskit already uses.
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation"] }
+
+# The face detector is slow unoptimised; keep it fast in debug runs too.
+[profile.dev.package.rustface]
+opt-level = 3
 
 [profile.release]
 # Smaller downloads: no symbol tables in the shipped binary.
