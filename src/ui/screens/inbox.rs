@@ -1997,6 +1997,8 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
             let author = if m.from_me { tr("You", "Anda").to_owned() } else { super::sender_label(&session.book, &m.sender) };
             let snippet = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
             state.reply = Some(ReplyTarget { session: session.id.clone(), chat: chat.jid.clone(), id: m.id.clone(), author, snippet });
+            // Straight to typing the reply (#59).
+            state.focus_composer = true;
         }
         MsgEvent::Menu(MsgAction::Pin(length), msg_id) => {
             commands.push(Command::Pin { id: session.id.clone(), chat: chat.jid.clone(), msg_id, pinned: true, length });
@@ -2010,6 +2012,7 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
             state.composer = m.text.clone();
             let snippet = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
             state.editing = Some(ReplyTarget { session: session.id.clone(), chat: chat.jid.clone(), id: m.id.clone(), author: String::new(), snippet });
+            state.focus_composer = true;
         }
         MsgEvent::Menu(MsgAction::Delete, msg_id) => {
             let Some(m) = chat.messages.iter().find(|m| m.id == msg_id) else { return };
