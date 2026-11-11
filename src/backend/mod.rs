@@ -28,7 +28,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use registry::Registry;
 use session::{Body, Running};
 pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
-pub use registry::{NAME_MAX, clean_name};
+pub use registry::{Device, DeviceKind, NAME_MAX, clean_name};
 pub use session::mask_phone;
 pub use settings::Settings;
 pub use store::{Book, Chat, ChatMsg, Delivery, Media, StatusPost, short_jid};
@@ -74,11 +74,14 @@ pub struct SessionView {
     pub last_activity: Option<Instant>,
     /// Chats and messages; shared with the UI without copying.
     pub book: Arc<Book>,
+    /// The name and type it pairs under, for the phone's Linked devices list (#82).
+    pub device: registry::Device,
 }
 
 impl SessionView {
     pub(crate) fn new(id: &str, name: &str) -> Self {
         Self {
+            device: registry::Device::default(),
             id: id.to_owned(),
             name: name.to_owned(),
             phone: None,
@@ -195,7 +198,10 @@ impl Status {
 }
 
 pub enum Command {
-    Add { id: String, name: String },
+    Add { id: String, name: String, device: registry::Device },
+    /// The name and type a session not linked yet pairs under; its QR code
+    /// starts over so the phone gets the new ones (#82).
+    SetDevice { id: String, device: registry::Device },
     /// Ask for an 8-character code for this phone number instead of the QR.
     PairCode { id: String, phone: String },
     /// Forget the keys and pair again.
@@ -563,10 +569,11 @@ impl Updater {
 }
 
 /// Opens the session's chat store and shows its saved chats right away.
-fn open_store(data_dir: &std::path::Path, id: &str, name: &str, state: &Updater) -> Arc<Mutex<Store>> {
+fn open_store(data_dir: &std::path::Path, id: &str, name: &str, device: &registry::Device, state: &Updater) -> Arc<Mutex<Store>> {
     let (store, book) = Store::open(&Store::path(data_dir, id));
     let mut view = SessionView::new(id, name);
     view.book = Arc::new(book);
+    view.device = device.clone();
     state.insert(view);
     Arc::new(Mutex::new(store))
 }
@@ -609,7 +616,7 @@ async fn run(
     // the numbers, in order, as linked (or logged out) for screenshots.
     let demo: Vec<String> = std::env::var("WARUST_DEMO").map(|v| v.split(',').map(str::to_owned).collect()).unwrap_or_default();
     for (i, entry) in registry.entries.clone().into_iter().enumerate() {
-        let store = open_store(&data_dir, &entry.id, &entry.name, &state);
+        let store = open_store(&data_dir, &entry.id, &entry.name, &entry.device, &state);
         stores.insert(entry.id.clone(), store.clone());
         if offline {
             if let Some(number) = demo.get(i) {
@@ -651,11 +658,33 @@ async fn run(
             }
         };
         match command {
-            Command::Add { id, name } => {
-                registry.add(&id, &name);
-                let store = open_store(&data_dir, &id, &name, &state);
+            Command::Add { id, name, device } => {
+                registry.add(&id, &name, device.clone());
+                let store = open_store(&data_dir, &id, &name, &device, &state);
                 stores.insert(id.clone(), store.clone());
                 if let Some(r) = session::start(&id, &registry, &state, store).await {
+                    running.insert(id, r);
+                }
+            }
+            Command::SetDevice { id, device } => {
+                if running.get(&id).is_some_and(|r| r.is_linked()) {
+                    log::warn!("set device: session {id} is already linked; link it again to change its name on the phone");
+                    continue;
+                }
+                registry.set_device(&id, device.clone());
+                state.update(&id, |v| v.device = device);
+                // A new QR code, so the phone pairs with the new name.
+                if let Some(r) = running.remove(&id) {
+                    r.stop().await;
+                }
+                state.update(&id, |v| {
+                    v.qr = None;
+                    v.pair_code = None;
+                    v.status = Status::Starting;
+                });
+                if let Some(store) = stores.get(&id).cloned()
+                    && let Some(r) = session::start(&id, &registry, &state, store).await
+                {
                     running.insert(id, r);
                 }
             }

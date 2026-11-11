@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use egui::{Align, Color32, Frame, Layout, Margin, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
-use crate::backend::{SessionView, Status};
+use crate::backend::{Device, DeviceKind, SessionView, Status};
 use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::qr::Qr;
@@ -21,6 +21,16 @@ pub enum Action {
     RequestCode(String),
     /// Start pairing again (new keys, new QR).
     Retry,
+    /// A new session name, and/or the name and type the phone lists it under (#82).
+    Save { name: Option<String>, device: Option<Device> },
+}
+
+/// The session details being edited before the number is linked.
+pub struct PairEdit {
+    id: String,
+    name: String,
+    device_name: String,
+    kind: DeviceKind,
 }
 
 pub fn show(ui: &mut Ui, state: &mut State, session: Option<&SessionView>) -> Option<Action> {
@@ -32,8 +42,8 @@ pub fn show(ui: &mut Ui, state: &mut State, session: Option<&SessionView>) -> Op
     let info_rect = Rect::from_min_max(pos2(info_left, area.top()), pos2(info_left + INFO, area.bottom()));
     let action = column(&mut widgets::child(ui, column_rect, Layout::top_down(Align::Min)), &p, state, session);
     let webhook = session.map(|s| super::webhook_label(state, &s.id)).unwrap_or_else(|| "-".to_owned());
-    info(&mut widgets::child(ui, info_rect, Layout::top_down(Align::Min)), &p, session, webhook);
-    action
+    let edited = info(&mut widgets::child(ui, info_rect, Layout::top_down(Align::Min)), &p, state, session, webhook);
+    action.or(edited)
 }
 
 fn column(ui: &mut Ui, p: &Palette, state: &mut State, session: Option<&SessionView>) -> Option<Action> {
@@ -292,7 +302,8 @@ fn code_body(ui: &mut Ui, p: &Palette, state: &mut State, session: Option<&Sessi
     action
 }
 
-fn info(ui: &mut Ui, p: &Palette, session: Option<&SessionView>, webhook: String) {
+fn info(ui: &mut Ui, p: &Palette, state: &mut State, session: Option<&SessionView>, webhook: String) -> Option<Action> {
+    let mut action = None;
     theme::card(ui.ctx())
         .inner_margin(Margin::same(20))
         .show(ui, |ui| {
@@ -305,8 +316,15 @@ fn info(ui: &mut Ui, p: &Palette, session: Option<&SessionView>, webhook: String
                 .unwrap_or_else(|| "-".to_owned());
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 12.0;
-                kv(ui, p, tr("Session name", "Nama sesi"), &name, false);
-                kv(ui, p, tr("Name in the Linked devices list", "Nama di daftar Perangkat tertaut"), "Warust", false);
+                // Until the number is linked, its names and type can change (#82).
+                match session.filter(|s| matches!(s.status, Status::Starting | Status::Pairing)) {
+                    Some(s) => action = edit_details(ui, p, state, s),
+                    None => {
+                        let device = session.map(|s| s.device.clone()).unwrap_or_default();
+                        kv(ui, p, tr("Session name", "Nama sesi"), &name, false);
+                        kv(ui, p, tr("Name in the Linked devices list", "Nama di daftar Perangkat tertaut"), &format!("{} · {}", device.name, device.kind.label()), false);
+                    }
+                }
                 kv(ui, p, tr("Key storage", "Penyimpanan kunci"), &store, true);
                 kv(ui, p, "Webhook", &webhook, false);
             });
@@ -329,6 +347,72 @@ fn info(ui: &mut Ui, p: &Palette, session: Option<&SessionView>, webhook: String
                 );
             });
         });
+    action
+}
+
+/// The session name, the name the phone's Linked devices list shows, and the
+/// device type, editable while the number is not linked yet. Saving a new
+/// device name or type starts a new QR code, which carries them.
+fn edit_details(ui: &mut Ui, p: &Palette, state: &mut State, session: &SessionView) -> Option<Action> {
+    if state.pair_edit.as_ref().is_none_or(|e| e.id != session.id) {
+        state.pair_edit = Some(PairEdit { id: session.id.clone(), name: session.name.clone(), device_name: session.device.name.clone(), kind: session.device.kind });
+    }
+    let edit = state.pair_edit.as_mut()?;
+    let mut action = None;
+    field(ui, p, tr("Session name", "Nama sesi"), &mut edit.name, tr("Shown only in warust", "Hanya terlihat di warust"));
+    field(ui, p, tr("Name in the Linked devices list", "Nama di daftar Perangkat tertaut"), &mut edit.device_name, tr("Shown on the phone", "Terlihat di HP"));
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 6.0;
+        ui.label(rich(tr("Device type", "Jenis perangkat"), 12.0, Weight::Regular, p.muted));
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            for kind in DeviceKind::ALL {
+                let on = edit.kind == kind;
+                let (fill, fg, stroke) = if on { (p.primary, p.on_primary, p.primary) } else { (p.raised, p.text_2, p.border) };
+                let galley = ui.painter().layout_no_wrap(kind.label().to_owned(), fonts::ui(12.0, Weight::Medium), fg);
+                let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 20.0, 26.0), Sense::click());
+                ui.painter().rect(rect, 13.0, fill, Stroke::new(1.0, stroke), StrokeKind::Inside);
+                ui.painter().galley(rect.center() - galley.size() / 2.0, galley, fg);
+                if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    edit.kind = kind;
+                }
+            }
+        });
+    });
+    let name = crate::backend::clean_name(&edit.name);
+    let device_name = crate::backend::clean_name(&edit.device_name);
+    let renamed = name.as_ref().is_ok_and(|n| *n != session.name);
+    let device = device_name.as_ref().ok().map(|n| Device { name: n.clone(), kind: edit.kind });
+    let redevice = device.as_ref().is_some_and(|d| *d != session.device);
+    if let Some(why) = name.err().or(device_name.err()) {
+        ui.label(rich(why, 12.0, Weight::Regular, p.red_text));
+    } else if redevice {
+        ui.add(egui::Label::new(rich(tr("Saving shows a new QR code with this name.", "Menyimpan memunculkan kode QR baru dengan nama ini."), 12.0, Weight::Regular, p.text_2)).wrap());
+    }
+    let ready = renamed || redevice;
+    let save = ui.add_enabled_ui(ready, |ui| widgets::button(ui, Some("check"), tr("Save", "Simpan"), Kind::Primary)).inner.clicked();
+    if save && ready {
+        let name = crate::backend::clean_name(&edit.name).ok().filter(|_| renamed);
+        action = Some(Action::Save { name, device: device.filter(|_| redevice) });
+    }
+    action
+}
+
+/// A labelled one-line text field with a hint under it.
+fn field(ui: &mut Ui, p: &Palette, key: &str, text: &mut String, hint: &str) {
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 4.0;
+        ui.label(rich(key, 12.0, Weight::Regular, p.muted));
+        Frame::NONE
+            .fill(p.raised)
+            .stroke(Stroke::new(1.0, p.border_strong))
+            .corner_radius(theme::R_SM)
+            .inner_margin(Margin::symmetric(10, 6))
+            .show(ui, |ui| {
+                ui.add(egui::TextEdit::singleline(text).frame(Frame::NONE).font(fonts::ui(13.0, Weight::Regular)).desired_width(ui.available_width()).char_limit(crate::backend::NAME_MAX));
+            });
+        ui.label(rich(hint, 11.0, Weight::Regular, p.muted));
+    });
 }
 
 fn kv(ui: &mut Ui, p: &Palette, key: &str, value: &str, mono: bool) {

@@ -171,6 +171,8 @@ pub struct State {
     /// Pairing screen: false = QR, true = phone code.
     pub pair_with_code: bool,
     pub pair_phone: String,
+    /// The pairing screen's session details being edited (#82).
+    pub pair_edit: Option<screens::pairing::PairEdit>,
     pub qr: Option<qr::Qr>,
     /// Session waiting for the user to confirm its removal.
     pub confirm_remove: Option<String>,
@@ -658,7 +660,7 @@ impl App {
     fn add_number(&mut self) {
         let id = Backend::new_id();
         let name = crate::trf!("Number {}", "Nomor {}", self.sessions.len() + 1);
-        self.backend.send(Command::Add { id: id.clone(), name });
+        self.backend.send(Command::Add { id: id.clone(), name, device: crate::backend::Device::default() });
         self.open_pairing(id);
     }
 
@@ -1236,6 +1238,14 @@ impl eframe::App for App {
                     self.backend.send(Command::PairCode { id, phone })
                 }
                 screens::pairing::Action::Retry => self.backend.send(Command::Relink { id }),
+                screens::pairing::Action::Save { name, device } => {
+                    if let Some(name) = name {
+                        self.backend.send(Command::Rename { id: id.clone(), name });
+                    }
+                    if let Some(device) = device {
+                        self.backend.send(Command::SetDevice { id, device });
+                    }
+                }
             }
         }
         self.confirm_remove(ui.ctx());

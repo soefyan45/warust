@@ -133,7 +133,7 @@ curl -X POST http://127.0.0.1:8787/sessions/<id>/messages/text \
 | Endpoint | Purpose |
 |---|---|
 | `GET /healthz` | Check that the server is alive (no API key) |
-| `GET /sessions` · `POST /sessions` | List numbers and their status · add a new number |
+| `GET /sessions` · `POST /sessions` | List numbers and their status · add a new number; optional `name`, `device_name` (shown in the phone's Linked devices list, default `Warust`) and `device_type` (`desktop`, `chrome`, `firefox`, `safari`, `edge`) |
 | `GET /sessions/{id}/qr` · `POST /sessions/{id}/pair-code` | QR code or pairing code |
 | `POST /sessions/{id}/messages/text` | Send text through the anti-ban queue |
 | `POST /sessions/{id}/messages/media` | Photo, video (MP4/MOV), document or sticker from a `path` or `url` |
