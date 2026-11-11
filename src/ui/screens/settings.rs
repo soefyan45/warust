@@ -464,6 +464,14 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                         Weight::Regular,
                         p.muted,
                     ));
+                    ui.add_space(6.0);
+                    widgets::toggle(ui, &mut draft.typing, tr("Show \"typing\" to the other person while replying", "Tampilkan \"sedang mengetik\" ke lawan chat saat membalas"));
+                    ui.label(rich(
+                        tr("Status seen receipts are set per number on the Status page.", "Tanda dilihat status diatur per nomor di halaman Status."),
+                        12.0,
+                        Weight::Regular,
+                        p.muted,
+                    ));
                 });
 
                 super::card(
@@ -487,17 +495,6 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                         ));
                     },
                 );
-
-                super::card(ui, tr("Privacy", "Privasi"), "", |ui| {
-                    let draft = form.draft.as_mut().expect("synced");
-                    widgets::toggle(ui, &mut draft.typing, tr("Show \"typing\" to the other person while replying", "Tampilkan \"sedang mengetik\" ke lawan chat saat membalas"));
-                    ui.label(rich(
-                        tr("Status seen receipts are set per number on the Status page.", "Tanda dilihat status diatur per nomor di halaman Status."),
-                        12.0,
-                        Weight::Regular,
-                        p.muted,
-                    ));
-                });
 
                 super::card(ui, tr("Updates", "Pembaruan"), tr("warust looks for new releases on GitHub. Nothing else is sent.", "warust mencari rilis baru di GitHub. Tidak ada data lain yang dikirim."), |ui| {
                     use crate::backend::update::{UpdateState, current};
