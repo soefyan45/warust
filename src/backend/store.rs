@@ -772,6 +772,20 @@ impl Book {
                     }
                 }
             }
+            // Read on the phone (#8): what came in after the newest message
+            // it read stays unread. Ids we don't have change nothing.
+            Some("readto") => {
+                let ids: Vec<&str> = record.get("ids").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
+                if let Some(chat) = text("chat") {
+                    let jid = self.normalize(&chat);
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        if let Some(at) = c.messages.iter().rposition(|m| ids.contains(&m.id.as_str())) {
+                            let after = c.messages[at + 1..].iter().filter(|m| !m.from_me).count() as u32;
+                            c.unread = c.unread.min(after);
+                        }
+                    }
+                }
+            }
             Some("seen") => {
                 if let Some(chat) = text("chat") {
                     let jid = self.normalize(&chat);
@@ -977,6 +991,11 @@ pub fn hidden_record(id: &str) -> Value {
 
 pub fn unpin_record(chat: &str, id: &str) -> Value {
     json!({ "t": "unpin", "chat": chat, "id": id })
+}
+
+/// The phone read `chat` up to the messages `ids` (#8).
+pub fn read_to_record(chat: &str, ids: &[String]) -> Value {
+    json!({ "t": "readto", "chat": chat, "ids": ids })
 }
 
 pub fn seen_record(chat: &str) -> Value {
@@ -1257,6 +1276,22 @@ mod tests {
             unname_record("9@s.whatsapp.net"),
         ]);
         assert_eq!(b.name_of("9@s.whatsapp.net"), Some("Ud4 Ibrahim"));
+    }
+
+    #[test]
+    fn read_on_the_phone_keeps_what_came_after() {
+        let c = "9@s.whatsapp.net";
+        let mut records = vec![
+            msg_record(c, "a", false, c, "1", 1, &Delivery::Received, true),
+            msg_record(c, "b", false, c, "2", 2, &Delivery::Received, true),
+            msg_record(c, "c", false, c, "3", 3, &Delivery::Received, true),
+        ];
+        records.push(read_to_record(c, &["b".to_owned()]));
+        assert_eq!(book(&records).chats[0].unread, 1);
+        records.push(read_to_record(c, &["unknown".to_owned()]));
+        assert_eq!(book(&records).chats[0].unread, 1);
+        records.push(read_to_record(c, &["a".to_owned(), "c".to_owned()]));
+        assert_eq!(book(&records).chats[0].unread, 0);
     }
 
     #[test]

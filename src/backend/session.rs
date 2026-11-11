@@ -1083,6 +1083,19 @@ async fn on_event(
             state.update(id, |v| v.status = Status::Failed(format!("{:?}", f.reason)));
         }
         Event::Receipt(receipt) => {
+            // Read on the phone or another linked device (#8): opening a chat
+            // there sends these, not a mark-as-read.
+            if matches!(receipt.r#type, ReceiptType::ReadSelf | ReceiptType::PlayedSelf) {
+                let chat = receipt.source.chat.to_string();
+                let ids: Vec<String> = receipt.message_ids.iter().map(|m| m.to_string()).collect();
+                let records: Vec<Value> = if chat == store::STATUS_CHAT {
+                    ids.iter().map(|m| store::status_seen_record(m)).collect()
+                } else {
+                    vec![store::read_to_record(&chat, &ids)]
+                };
+                state.record(id, chats, &records);
+                return;
+            }
             let status = match receipt.r#type {
                 ReceiptType::Delivered => Delivery::Delivered,
                 ReceiptType::Read | ReceiptType::Played => Delivery::Read,
