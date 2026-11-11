@@ -181,6 +181,8 @@ pub struct Settings {
     /// How much a custom picture is dimmed toward the chat colour, 0 to 80 %.
     pub wallpaper_dim: u8,
     pub privacy: Privacy,
+    /// Forest top bar: the navigation shows only its icons (#102).
+    pub nav_icons_only: bool,
 }
 
 impl Default for Settings {
@@ -202,6 +204,7 @@ impl Default for Settings {
             wallpaper_file: String::new(),
             wallpaper_dim: 30,
             privacy: Privacy::default(),
+            nav_icons_only: false,
         }
     }
 }

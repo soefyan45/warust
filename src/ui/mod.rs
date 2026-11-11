@@ -536,18 +536,20 @@ impl App {
                         ui.label(rich("warust", 17.0, Weight::SemiBold, p.text));
                     }
                     ui.add_space(14.0);
+                    // The same icons as the classic sidebar.
                     let items = [
-                        (Screen::Ringkasan, tr("Overview", "Ringkasan")),
-                        (Screen::Nomor, tr("Numbers", "Nomor")),
-                        (Screen::Inbox, "Inbox"),
-                        (Screen::Status, "Status"),
-                        (Screen::Log, tr("Message log", "Log pesan")),
-                        (Screen::Integrations, "Webhook & API"),
+                        (Screen::Ringkasan, "gauge", tr("Overview", "Ringkasan")),
+                        (Screen::Nomor, "smartphone", tr("Numbers", "Nomor")),
+                        (Screen::Inbox, "inbox", "Inbox"),
+                        (Screen::Status, "circle-dashed", "Status"),
+                        (Screen::Log, "scroll-text", tr("Message log", "Log pesan")),
+                        (Screen::Integrations, "webhook", "Webhook & API"),
                     ];
                     let current = if self.screen == Screen::Pairing { Screen::Nomor } else { self.screen };
-                    let mut selected = items.iter().position(|(s, _)| *s == current).unwrap_or(usize::MAX);
-                    let labels: Vec<&str> = items.iter().map(|(_, l)| *l).collect();
-                    if widgets::pills(ui, &labels, &mut selected) {
+                    let mut selected = items.iter().position(|(s, _, _)| *s == current).unwrap_or(usize::MAX);
+                    let pills: Vec<(&str, &str)> = items.iter().map(|(_, icon, label)| (*icon, *label)).collect();
+                    // Icons only when chosen in Settings, or when the bar is tight.
+                    if widgets::icon_pills(ui, &pills, &mut selected, tight || self.settings.nav_icons_only) {
                         self.screen = items[selected].0;
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1041,7 +1043,7 @@ fn gateway_rows(ui: &mut Ui, p: &theme::Palette, sessions: &[SessionView]) {
             ui.label(rich(tr("REST API not active", "REST API belum aktif"), 12.0, Weight::Regular, p.muted));
         },
         |ui| {
-            ui.label(rich_mono("v0.1.0", 12.0, p.muted));
+            ui.label(rich_mono(concat!("v", env!("CARGO_PKG_VERSION")), 12.0, p.muted));
         },
     );
 }

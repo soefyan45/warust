@@ -270,9 +270,49 @@ fn pill_sized(ui: &mut Ui, label: &str, active: bool, size: f32, pad: f32, heigh
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
-/// Pills in a white rounded track (Forest navigation).
-pub fn pills(ui: &mut Ui, labels: &[&str], selected: &mut usize) -> bool {
-    pill_track(ui, labels, selected, false)
+/// The Forest navigation: each pill an icon and its label, like the classic
+/// sidebar; with `icons_only` the label moves to the hint.
+pub fn icon_pills(ui: &mut Ui, items: &[(&str, &str)], selected: &mut usize, icons_only: bool) -> bool {
+    let p = theme::palette(ui.ctx());
+    let mut changed = false;
+    Frame::NONE
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(21)
+        .inner_margin(Margin::same(3))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                for (i, (icon, label)) in items.iter().enumerate() {
+                    let active = *selected == i;
+                    let color = if active { p.on_primary } else { p.text_2 };
+                    let weight = if active { Weight::SemiBold } else { Weight::Medium };
+                    let galley = (!icons_only).then(|| ui.painter().layout_no_wrap((*label).to_owned(), fonts::ui(14.0, weight), color));
+                    let width = match &galley {
+                        Some(g) => 16.0 + 7.0 + g.size().x + 32.0,
+                        None => 44.0,
+                    };
+                    let (rect, response) = ui.allocate_exact_size(vec2(width, 34.0), Sense::click());
+                    if active {
+                        ui.painter().rect_filled(rect, 17.0, p.primary);
+                    } else if response.hovered() {
+                        ui.painter().rect_filled(rect, 17.0, p.raised);
+                    }
+                    let icon_x = if galley.is_some() { rect.left() + 16.0 + 8.0 } else { rect.center().x };
+                    icons::paint(ui, Rect::from_center_size(pos2(icon_x, rect.center().y), vec2(16.0, 16.0)), icon, 16.0, color);
+                    if let Some(g) = galley {
+                        ui.painter().galley(pos2(icon_x + 8.0 + 7.0, rect.center().y - g.size().y / 2.0), g, color);
+                    }
+                    let response = response.on_hover_cursor(CursorIcon::PointingHand);
+                    let response = if icons_only { response.on_hover_text(*label) } else { response };
+                    if response.clicked() && !active {
+                        *selected = i;
+                        changed = true;
+                    }
+                }
+            });
+        });
+    changed
 }
 
 fn pill_track(ui: &mut Ui, labels: &[&str], selected: &mut usize, compact: bool) -> bool {
