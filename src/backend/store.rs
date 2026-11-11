@@ -89,6 +89,13 @@ pub struct ChatMsg {
 impl ChatMsg {
     /// Stage 1 of forwarding: plain text only. Media, locations and
     /// contacts are only a label here, not something to send again.
+    /// Media with a file that can go on as forwarded (#6 stage 2): not a call
+    /// line; `downloaded` tells whether the file is here yet.
+    pub fn forwardable_media(&self) -> Option<bool> {
+        let media = self.media.as_ref().filter(|m| !self.deleted && m.kind != "call")?;
+        Some(media.file.as_ref().is_some_and(|f| f.is_file()))
+    }
+
     pub fn forwardable(&self) -> bool {
         !self.deleted && self.media.is_none() && !self.text.trim().is_empty() && self.text != "[Lokasi]" && !self.text.starts_with("[Kontak]")
     }

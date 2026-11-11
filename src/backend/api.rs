@@ -582,12 +582,12 @@ async fn forward_message(
     let Some(message) = found else {
         return Err(error(StatusCode::NOT_FOUND, "message_not_found", "Message not found"));
     };
-    if !message.forwardable() {
-        return Err(error(
-            StatusCode::BAD_REQUEST,
-            "not_forwardable",
-            "Only text messages can be forwarded (media is not supported yet)",
-        ));
+    // Text, or a file that is downloaded (#6 stage 2).
+    if message.forwardable_media() == Some(false) {
+        return Err(error(StatusCode::CONFLICT, "not_downloaded", "Download the file first (POST …/download), then forward it"));
+    }
+    if super::session::forward_body(message, &context.data_dir).is_none() {
+        return Err(error(StatusCode::BAD_REQUEST, "not_forwardable", "This message cannot be forwarded"));
     }
     // Check every target first so a bad one queues nothing.
     let mut chats = Vec::new();
@@ -602,7 +602,12 @@ async fn forward_message(
         let local_id = new_local_id();
         send(
             &context,
-            Command::Enqueue { id: id.clone(), chat: chat.clone(), body: Body::Forward(message.text.clone()), local_id: local_id.clone() },
+            Command::Enqueue {
+                id: id.clone(),
+                chat: chat.clone(),
+                body: super::session::forward_body(message, &context.data_dir).ok_or_else(|| error(StatusCode::BAD_REQUEST, "not_forwardable", "This message cannot be forwarded"))?,
+                local_id: local_id.clone(),
+            },
         )?;
         queued.push(json!({ "to": chat, "id": local_id, "status": "queued", "next": format!("GET /sessions/{id}/messages/{local_id}") }));
     }
