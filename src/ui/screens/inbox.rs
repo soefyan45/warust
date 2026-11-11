@@ -191,12 +191,18 @@ pub fn show(
         .show(ui, |ui| {
             let call_on = state.call_now.is_some();
             let mut info_clicked = false;
+            // Short of room, the right side gets smaller so the name stays readable.
+            let narrow = ui.available_width() < 860.0;
             widgets::row(
                 ui,
                 52.0,
                 |ui| {
                     let hint = if chat.is_group() { tr("Group info", "Info grup") } else { tr("Contact info", "Info kontak") };
-                    let name = ui.add(egui::Label::new(rich(&super::chat_title(&book, chat), 14.0, Weight::SemiBold, p.text)).sense(Sense::click()));
+                    // The name gives way ("…") so the number chip after it still shows.
+                    let room = (ui.available_width() - if several { 200.0 } else { 40.0 }).max(80.0);
+                    let name = ui
+                        .allocate_ui(vec2(room, 24.0), |ui| ui.add(egui::Label::new(rich(&super::chat_title(&book, chat), 14.0, Weight::SemiBold, p.text)).truncate().sense(Sense::click())))
+                        .inner;
                     if name.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
                         info_clicked = true;
                     }
@@ -234,10 +240,10 @@ pub fn show(
                     // A group only while a mention waits: marking it done clears the `@`.
                     if !chat.is_group() || chat.mention_pending() || chat.is_done() {
                         ui.add_space(4.0);
-                        if let Some(done) = done_button(ui, chat) {
+                        if let Some(done) = done_button(ui, chat, narrow) {
                             commands.push(Command::MarkDone { id: session.id.clone(), chat: chat.jid.clone(), done });
                         }
-                        if chat.needs_reply() {
+                        if chat.needs_reply() && !narrow {
                             ui.add_space(4.0);
                             reply_badge(ui, &p);
                         }
@@ -439,7 +445,7 @@ fn call_buttons(ui: &mut Ui, p: &Palette, call_on: bool, session: &SessionView, 
     }
 }
 
-fn done_button(ui: &mut Ui, chat: &Chat) -> Option<bool> {
+fn done_button(ui: &mut Ui, chat: &Chat, narrow: bool) -> Option<bool> {
     let done = chat.is_done();
     let (icon, label, hint) = if done {
         ("check", tr("Done", "Selesai"), tr("Mark as needing a reply again", "Tandai perlu balas lagi"))
@@ -450,6 +456,10 @@ fn done_button(ui: &mut Ui, chat: &Chat) -> Option<bool> {
             tr("Move to the Done tab until a new message arrives", "Pindahkan ke tab Selesai sampai ada pesan baru"),
         )
     };
+    // A narrow header keeps only the check, the label moves to the hint.
+    if narrow {
+        return widgets::icon_button(ui, icon, 32.0, done).on_hover_text(format!("{label}: {hint}")).clicked().then_some(!done);
+    }
     let kind = if done { Kind::Primary } else { Kind::Secondary };
     widgets::button(ui, Some(icon), label, kind).on_hover_text(hint).clicked().then_some(!done)
 }

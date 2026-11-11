@@ -35,7 +35,10 @@ pub fn row(
     right(&mut right_ui);
     let used = right_ui.min_rect().width();
     let left_rect = Rect::from_min_max(rect.min, pos2((rect.right() - used - 12.0).max(rect.left()), rect.bottom()));
-    left(&mut child(ui, left_rect, Layout::left_to_right(Align::Center)));
+    // What does not fit on the left is cut there, never drawn over the right.
+    let mut left_ui = child(ui, left_rect, Layout::left_to_right(Align::Center));
+    left_ui.set_clip_rect(left_rect.intersect(ui.clip_rect()));
+    left(&mut left_ui);
     rect
 }
 
