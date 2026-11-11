@@ -31,6 +31,8 @@ pub struct PairEdit {
     name: String,
     device_name: String,
     kind: DeviceKind,
+    /// The device name copies the session name until it is typed in itself.
+    follows: bool,
 }
 
 pub fn show(ui: &mut Ui, state: &mut State, session: Option<&SessionView>) -> Option<Action> {
@@ -322,7 +324,7 @@ fn info(ui: &mut Ui, p: &Palette, state: &mut State, session: Option<&SessionVie
                     None => {
                         let device = session.map(|s| s.device.clone()).unwrap_or_default();
                         kv(ui, p, tr("Session name", "Nama sesi"), &name, false);
-                        kv(ui, p, tr("Name in the Linked devices list", "Nama di daftar Perangkat tertaut"), &format!("{} · {}", device.name, device.kind.label()), false);
+                        kv(ui, p, tr("Name in the Linked devices list", "Nama di daftar Perangkat tertaut"), &device.kind.on_phone(&device.name), false);
                     }
                 }
                 kv(ui, p, tr("Key storage", "Penyimpanan kunci"), &store, true);
@@ -355,12 +357,36 @@ fn info(ui: &mut Ui, p: &Palette, state: &mut State, session: Option<&SessionVie
 /// device name or type starts a new QR code, which carries them.
 fn edit_details(ui: &mut Ui, p: &Palette, state: &mut State, session: &SessionView) -> Option<Action> {
     if state.pair_edit.as_ref().is_none_or(|e| e.id != session.id) {
-        state.pair_edit = Some(PairEdit { id: session.id.clone(), name: session.name.clone(), device_name: session.device.name.clone(), kind: session.device.kind });
+        let follows = session.device.name == crate::backend::DEFAULT_DEVICE_NAME || session.device.name == session.name;
+        state.pair_edit = Some(PairEdit { id: session.id.clone(), name: session.name.clone(), device_name: session.device.name.clone(), kind: session.device.kind, follows });
     }
     let edit = state.pair_edit.as_mut()?;
     let mut action = None;
-    field(ui, p, tr("Session name", "Nama sesi"), &mut edit.name, tr("Shown only in warust", "Hanya terlihat di warust"));
-    field(ui, p, tr("Name in the Linked devices list", "Nama di daftar Perangkat tertaut"), &mut edit.device_name, tr("Shown on the phone", "Terlihat di HP"));
+    let before = edit.name.clone();
+    field(ui, p, tr("Session name", "Nama sesi"), &mut edit.name, tr("Shown in warust, and on the phone unless you change the name below", "Terlihat di warust, dan di HP kecuali nama di bawah diganti"));
+    if edit.follows && edit.name != before {
+        edit.device_name = edit.name.clone();
+    }
+    if edit.kind.named() {
+        let typed = edit.device_name.clone();
+        field(ui, p, tr("Name in the Linked devices list", "Nama di daftar Perangkat tertaut"), &mut edit.device_name, tr("Shown on the phone", "Terlihat di HP"));
+        // Typed in itself: it stops following the session name.
+        if edit.device_name != typed {
+            edit.follows = false;
+        }
+    } else {
+        // WhatsApp names browser devices itself; the typed name is not used.
+        kv(ui, p, tr("Name in the Linked devices list", "Nama di daftar Perangkat tertaut"), &edit.kind.on_phone(&edit.device_name), false);
+        ui.add(
+            egui::Label::new(rich(
+                tr("WhatsApp names browser devices itself. Pick Desktop to show your own name.", "WhatsApp memberi nama perangkat browser sendiri. Pilih Desktop untuk memakai nama Anda."),
+                11.0,
+                Weight::Regular,
+                p.muted,
+            ))
+            .wrap(),
+        );
+    }
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
         ui.label(rich(tr("Device type", "Jenis perangkat"), 12.0, Weight::Regular, p.muted));
