@@ -6,6 +6,7 @@
 mod api;
 pub mod call;
 pub mod video;
+pub mod movie;
 mod avatars;
 mod media;
 mod notify;
