@@ -598,6 +598,15 @@ impl App {
     }
 }
 
+/// "Lock when idle" choices in minutes; 0 is never.
+const LOCK_MINUTES: [u32; 5] = [0, 1, 2, 5, 10];
+
+/// The choice shown for a stored idle time: its own, or 2 minutes (the
+/// default) for a value that is none of the choices.
+fn lock_choice(minutes: u32) -> usize {
+    LOCK_MINUTES.iter().position(|m| *m == minutes).unwrap_or(2)
+}
+
 impl App {
     /// Saved, so the next start opens in the same theme.
     /// Changes the anti-peek options and saves them at once.
@@ -629,8 +638,10 @@ impl App {
         icons::paint(ui, egui::Rect::from_center_size(egui::pos2(rect.right() - 14.0, rect.center().y), egui::vec2(12.0, 12.0)), "chevron-down", 12.0, fg);
         let response = response.on_hover_text(tr("Anti-peek mode (Ctrl+Shift+P)", "Mode anti-intip (Ctrl+Shift+P)")).on_hover_cursor(CursorIcon::PointingHand);
         let mut privacy = self.settings.privacy.clone();
-        egui::Popup::menu(&response).show(|ui| {
-            ui.set_width(330.0);
+        // A menu closes on any click inside it; this one holds settings, so it
+        // stays open until a click outside or Esc.
+        egui::Popup::menu(&response).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+            ui.set_width(350.0);
             ui.spacing_mut().item_spacing.y = 8.0;
             ui.label(rich(tr("Anti-peek mode", "Mode anti-intip"), 14.0, Weight::SemiBold, p.text));
             ui.add(egui::Label::new(rich(
@@ -644,16 +655,16 @@ impl App {
             widgets::toggle(ui, &mut privacy.blur_chat, tr("Blur chat content: clear while the cursor is on a message", "Buramkan isi chat: terbaca saat kursor di atas pesan"));
             widgets::toggle(ui, &mut privacy.blur_previews, tr("Blur chat list previews and notification text", "Buramkan pratinjau daftar chat dan isi notifikasi"));
             widgets::toggle(ui, &mut privacy.hide_names, tr("Hide names and numbers, for presentations and recordings", "Sembunyikan nama & nomor, untuk presentasi atau rekaman"));
-            ui.horizontal(|ui| {
-                ui.label(rich(tr("Lock when idle", "Kunci otomatis saat ditinggal"), 13.0, Weight::Regular, p.text));
-                let options: [(u32, &str); 5] = [(0, tr("Never", "Tidak")), (1, "1 min"), (2, "2 min"), (5, "5 min"), (10, "10 min")];
-                let shown = options.iter().find(|(m, _)| *m == privacy.lock_minutes).map(|(_, l)| *l).unwrap_or("2 min");
-                egui::ComboBox::from_id_salt("privacy_lock").selected_text(shown).show_ui(ui, |ui| {
-                    for (minutes, label) in options {
-                        ui.selectable_value(&mut privacy.lock_minutes, minutes, label);
-                    }
-                });
-            });
+            // The choices sit in the popup itself: a drop-down would be a
+            // popup inside this one, and a click on it counts as outside.
+            ui.label(rich(tr("Lock when idle", "Kunci otomatis saat ditinggal"), 13.0, Weight::Regular, p.text));
+            let labels = [tr("Never", "Tidak"), "1 min", "2 min", "5 min", "10 min"];
+            let shown = lock_choice(privacy.lock_minutes);
+            let mut choice = shown;
+            widgets::tabs(ui, &labels, &mut choice);
+            if choice != shown {
+                privacy.lock_minutes = LOCK_MINUTES[choice];
+            }
         });
         if privacy != self.settings.privacy {
             self.set_privacy(|p| *p = privacy);
@@ -1337,5 +1348,19 @@ impl eframe::App for App {
             lock_cover(ui.ctx());
         }
         window::edges(ui);
+    }
+}
+
+#[cfg(test)]
+mod lock_choice_tests {
+    use super::*;
+
+    #[test]
+    fn each_idle_time_has_its_choice() {
+        for (choice, minutes) in LOCK_MINUTES.iter().enumerate() {
+            assert_eq!(lock_choice(*minutes), choice);
+        }
+        // A value from an edited settings file shows as the default.
+        assert_eq!(LOCK_MINUTES[lock_choice(3)], 2);
     }
 }
