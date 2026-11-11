@@ -35,7 +35,10 @@ pub fn row(
     right(&mut right_ui);
     let used = right_ui.min_rect().width();
     let left_rect = Rect::from_min_max(rect.min, pos2((rect.right() - used - 12.0).max(rect.left()), rect.bottom()));
-    left(&mut child(ui, left_rect, Layout::left_to_right(Align::Center)));
+    // What does not fit on the left is cut there, never drawn over the right.
+    let mut left_ui = child(ui, left_rect, Layout::left_to_right(Align::Center));
+    left_ui.set_clip_rect(left_rect.intersect(ui.clip_rect()));
+    left(&mut left_ui);
     rect
 }
 
@@ -397,11 +400,6 @@ pub fn search(ui: &mut Ui, text: &mut String, hint: &str, width: f32, kbd: bool)
         });
 }
 
-/// Rounded square with initials, like the chat and contact avatars.
-pub fn avatar(ui: &mut Ui, initials: &str, picture: Option<&Path>, size: f32, filled: bool) {
-    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
-    paint_avatar(ui, rect, initials, picture, filled);
-}
 
 /// The profile picture when cached, else the initials tile.
 pub fn paint_avatar(ui: &Ui, rect: Rect, initials: &str, picture: Option<&Path>, filled: bool) {

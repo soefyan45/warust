@@ -51,6 +51,7 @@ pub fn show(
 ) -> Vec<Command> {
     let p = theme::palette(ui.ctx());
     let mut commands = Vec::new();
+    open_photo(ui.ctx(), state, sessions, &mut commands);
     if state.inbox_scope.as_ref().is_some_and(|id| !sessions.iter().any(|s| &s.id == id)) {
         state.inbox_scope = None;
     }
@@ -190,12 +191,18 @@ pub fn show(
         .show(ui, |ui| {
             let call_on = state.call_now.is_some();
             let mut info_clicked = false;
+            // Short of room, the right side gets smaller so the name stays readable.
+            let narrow = ui.available_width() < 860.0;
             widgets::row(
                 ui,
                 52.0,
                 |ui| {
                     let hint = if chat.is_group() { tr("Group info", "Info grup") } else { tr("Contact info", "Info kontak") };
-                    let name = ui.add(egui::Label::new(rich(&super::chat_title(&book, chat), 14.0, Weight::SemiBold, p.text)).sense(Sense::click()));
+                    // The name gives way ("…") so the number chip after it still shows.
+                    let room = (ui.available_width() - if several { 200.0 } else { 40.0 }).max(80.0);
+                    let name = ui
+                        .allocate_ui(vec2(room, 24.0), |ui| ui.add(egui::Label::new(rich(&super::chat_title(&book, chat), 14.0, Weight::SemiBold, p.text)).truncate().sense(Sense::click())))
+                        .inner;
                     if name.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
                         info_clicked = true;
                     }
@@ -233,10 +240,10 @@ pub fn show(
                     // A group only while a mention waits: marking it done clears the `@`.
                     if !chat.is_group() || chat.mention_pending() || chat.is_done() {
                         ui.add_space(4.0);
-                        if let Some(done) = done_button(ui, chat) {
+                        if let Some(done) = done_button(ui, chat, narrow) {
                             commands.push(Command::MarkDone { id: session.id.clone(), chat: chat.jid.clone(), done });
                         }
-                        if chat.needs_reply() {
+                        if chat.needs_reply() && !narrow {
                             ui.add_space(4.0);
                             reply_badge(ui, &p);
                         }
@@ -438,7 +445,7 @@ fn call_buttons(ui: &mut Ui, p: &Palette, call_on: bool, session: &SessionView, 
     }
 }
 
-fn done_button(ui: &mut Ui, chat: &Chat) -> Option<bool> {
+fn done_button(ui: &mut Ui, chat: &Chat, narrow: bool) -> Option<bool> {
     let done = chat.is_done();
     let (icon, label, hint) = if done {
         ("check", tr("Done", "Selesai"), tr("Mark as needing a reply again", "Tandai perlu balas lagi"))
@@ -449,6 +456,10 @@ fn done_button(ui: &mut Ui, chat: &Chat) -> Option<bool> {
             tr("Move to the Done tab until a new message arrives", "Pindahkan ke tab Selesai sampai ada pesan baru"),
         )
     };
+    // A narrow header keeps only the check, the label moves to the hint.
+    if narrow {
+        return widgets::icon_button(ui, icon, 32.0, done).on_hover_text(format!("{label}: {hint}")).clicked().then_some(!done);
+    }
     let kind = if done { Kind::Primary } else { Kind::Secondary };
     widgets::button(ui, Some(icon), label, kind).on_hover_text(hint).clicked().then_some(!done)
 }
@@ -997,6 +1008,7 @@ fn chat_row(
     let tile = Rect::from_min_size(pos2(row.left() + 12.0, row.top() + 12.0), vec2(32.0, 32.0));
     let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(title) };
     widgets::paint_avatar(ui, tile, &initials, picture, selected);
+    photo_target(ui, tile, Some(session), &chat.jid, title, picture);
 
     let left = tile.right() + 12.0;
     let right = row.right() - 12.0;
@@ -3761,6 +3773,29 @@ const CHAT_MIN: f32 = 640.0;
 /// Space between the chat and the panel beside it.
 const PANEL_GAP: f32 = 12.0;
 
+/// Makes a profile picture at `rect` open the photo viewer (#92) when
+/// clicked; one without a picture stays as it is. `session` is the number
+/// to ask WhatsApp through, else any connected one.
+fn photo_target(ui: &Ui, rect: Rect, session: Option<&str>, jid: &str, title: &str, picture: Option<&Path>) {
+    let Some(picture) = picture.filter(|_| !crate::ui::privacy::hide_names()) else { return };
+    let response = ui.interact(rect, ui.scope_id().with(("photo", jid, rect.min.x as i32, rect.min.y as i32)), Sense::click());
+    if response.on_hover_cursor(CursorIcon::ZoomIn).on_hover_text(tr("View photo", "Lihat foto")).clicked() {
+        let ask = (session.map(str::to_owned), jid.to_owned(), title.to_owned(), picture.to_path_buf());
+        ui.ctx().data_mut(|d| d.insert_temp(egui::Id::unique("photo_ask"), ask));
+    }
+}
+
+/// Opens the photo a picture asked for, and asks WhatsApp for its full size.
+fn open_photo(ctx: &egui::Context, state: &mut State, sessions: &[SessionView], commands: &mut Vec<Command>) {
+    let ask: Option<(Option<String>, String, String, PathBuf)> = ctx.data_mut(|d| d.remove_temp(egui::Id::unique("photo_ask")));
+    let Some((session, jid, title, preview)) = ask else { return };
+    let session = session.or_else(|| sessions.iter().find(|s| s.status == Status::Connected).map(|s| s.id.clone()));
+    if let Some(id) = session.filter(|_| !state.full_avatars.contains_key(&jid)) {
+        commands.push(Command::AvatarFull { id, jid: jid.clone() });
+    }
+    state.photo_view = Some(crate::ui::photo_view::Viewer { jid, title, preview: Some(preview) });
+}
+
 /// The contact panel's content, scrolling: the contact, or a group with its
 /// members (#91). Returns the member whose chat was asked for.
 fn contact_panel(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars, webhook: &str, info: Option<&crate::backend::GroupInfo>) -> Option<String> {
@@ -3821,6 +3856,7 @@ fn group_details(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &A
         let face = Rect::from_min_size(pos2(row.left() + 4.0, row.center().y - 16.0), vec2(32.0, 32.0));
         let picture = avatars.get(&member.jid).and_then(|p| p.as_deref());
         paint_member_face(ui, face, &super::initials(&name), picture, member_color(&member.jid, is_dark(p.bg)));
+        photo_target(ui, face, None, &member.jid, &name, picture);
         let badge = match member.role {
             crate::backend::MemberRole::Owner => Some(tr("Owner", "Pemilik")),
             crate::backend::MemberRole::Admin => Some(tr("Admin", "Admin")),
@@ -3852,7 +3888,9 @@ fn contact(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars
         ui.spacing_mut().item_spacing.y = 10.0;
         let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(&title) };
         let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
-        widgets::avatar(ui, &initials, picture, 48.0, false);
+        let (face, _) = ui.allocate_exact_size(vec2(48.0, 48.0), Sense::hover());
+        widgets::paint_avatar(ui, face, &initials, picture, false);
+        photo_target(ui, face, None, &chat.jid, &title, picture);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             ui.label(rich(&title, 16.0, Weight::SemiBold, p.text));
@@ -3914,6 +3952,8 @@ pub fn compact(
     downloads: &Downloads,
     auto_stickers: bool,
 ) -> Vec<Command> {
+    let mut photo_commands = Vec::new();
+    open_photo(ui.ctx(), state, sessions, &mut photo_commands);
     if state.inbox_scope.as_ref().is_some_and(|id| !sessions.iter().any(|s| &s.id == id)) {
         state.inbox_scope = None;
     }
@@ -3931,13 +3971,15 @@ pub fn compact(
         .as_ref()
         .and_then(|id| sessions.iter().find(|s| &s.id == id))
         .and_then(|s| state.chat_selected.as_ref().and_then(|jid| s.book.chats.iter().find(|c| &c.jid == jid)).map(|c| (s, c)));
-    match open {
+    let mut commands = match open {
         Some((session, chat)) => compact_chat(ui, state, session, chat, sessions.len() > 1, avatars, downloads, auto_stickers),
         None => {
             state.chat_selected = None;
             compact_list(ui, state, sessions, avatars)
         }
-    }
+    };
+    commands.extend(photo_commands);
+    commands
 }
 
 const M_ROW: f32 = 72.0;
@@ -4124,6 +4166,7 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     let tile = Rect::from_min_size(pos2(row.left() + PAD, row.top() + 14.0), vec2(44.0, 44.0));
     let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(title) };
     phone::avatar(ui, tile, &initials, picture, chat.unread > 0);
+    photo_target(ui, tile, Some(session), &chat.jid, title, picture);
     let left = tile.right() + 16.0;
     let right = row.right() - PAD;
     let when = ui.painter().layout_no_wrap(time::short(chat.last_ts()), fonts::ui(12.0, Weight::Regular), p.muted);
@@ -4207,7 +4250,9 @@ fn compact_chat(
                     }
                     let (tile, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
                     let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(&title) };
-                    phone::avatar(ui, tile, &initials, avatars.get(&chat.jid).and_then(|p| p.as_deref()), true);
+                    let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
+                    phone::avatar(ui, tile, &initials, picture, true);
+                    photo_target(ui, tile, Some(&session.id), &chat.jid, &title, picture);
                     ui.add_space(4.0);
                     let (text, title_click) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
                     if title_click.clicked() {
