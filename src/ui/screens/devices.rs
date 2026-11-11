@@ -89,6 +89,9 @@ fn number_menu(row: &egui::Response, state: &mut State, session: &SessionView) {
         if ui.button(tr("Rename…", "Ganti nama…")).clicked() {
             state.rename = Some((session.id.clone(), session.name.clone()));
         }
+        if ui.button(tr("Chat wallpaper…", "Wallpaper chat…")).clicked() {
+            state.number_wallpaper = Some(crate::ui::NumberWallpaperEdit::new(&state.settings, session));
+        }
     });
 }
 

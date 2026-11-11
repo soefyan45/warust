@@ -92,6 +92,21 @@ pub enum VoiceStep {
     Failed(String, std::time::Instant),
 }
 
+/// The "Chat wallpaper" dialog of a number (#60): which number, and its
+/// choice as edited (key `app` = the app's wallpaper).
+pub struct NumberWallpaperEdit {
+    pub id: String,
+    pub name: String,
+    pub wall: backend::settings::NumberWallpaper,
+}
+
+impl NumberWallpaperEdit {
+    pub fn new(settings: &backend::Settings, session: &SessionView) -> Self {
+        let wall = settings.number_wallpapers.get(&session.id).cloned().unwrap_or_else(|| backend::settings::NumberWallpaper { key: "app".to_owned(), file: String::new(), dim: 30 });
+        Self { id: session.id.clone(), name: session.name.clone(), wall }
+    }
+}
+
 /// UI state that survives between frames.
 #[derive(Default)]
 pub struct State {
@@ -188,6 +203,8 @@ pub struct State {
     pub confirm_remove: Option<String>,
     /// "Ganti nama" dialog: the number and the name being typed.
     pub rename: Option<(String, String)>,
+    /// "Chat wallpaper" dialog of a number (#60).
+    pub number_wallpaper: Option<NumberWallpaperEdit>,
     /// "Tautkan ulang" waiting for a yes: it deletes the number's keys.
     pub confirm_relink: Option<String>,
     /// The saved settings, for screens that show them (webhook per number).
@@ -837,6 +854,67 @@ impl App {
         self.state.rename = if close { None } else { Some((id, draft)) };
     }
 
+    /// A number's own chat wallpaper (#60): the Settings picker, plus
+    /// "Same as the app".
+    fn number_wallpaper_dialog(&mut self, ctx: &egui::Context) {
+        let Some(mut edit) = self.state.number_wallpaper.take() else {
+            return;
+        };
+        let p = theme::palette(ctx);
+        let dark = ctx.theme() == egui::Theme::Dark;
+        let (mut close, mut save) = (false, false);
+        let modal = egui::Modal::new(egui::Id::unique("number_wallpaper"))
+            .frame(Frame::NONE.fill(p.panel).stroke(Stroke::new(1.0, p.border_strong)).corner_radius(theme::R_LG).inner_margin(Margin::same(24)))
+            .show(ctx, |ui| {
+                ui.set_width((ctx.content_rect().width() - 80.0).clamp(300.0, 640.0));
+                ui.spacing_mut().item_spacing.y = 12.0;
+                ui.label(rich(&crate::trf!("Chat wallpaper · {}", "Wallpaper chat · {}", edit.name), 16.0, Weight::SemiBold, p.text));
+                egui::ScrollArea::vertical().max_height((ctx.content_rect().height() - 220.0).max(200.0)).show(ui, |ui| {
+                    let wall = screens::settings::WallDraft { key: &mut edit.wall.key, file: &mut edit.wall.file, dim: &mut edit.wall.dim };
+                    screens::settings::wallpaper_picker(ui, &p, wall, &mut self.state.wallpaper_picking, dark, Some(&self.settings));
+                });
+                widgets::row(
+                    ui,
+                    32.0,
+                    |_| {},
+                    |ui| {
+                        save = widgets::button(ui, Some("check"), tr("Save", "Simpan"), Kind::Primary).clicked();
+                        if widgets::button(ui, None, tr("Cancel", "Batal"), Kind::Secondary).clicked() {
+                            close = true;
+                        }
+                    },
+                );
+            });
+        if modal.should_close() {
+            close = true;
+        }
+        if save {
+            let mut settings = (*self.settings).clone();
+            let saved = settings.number_wallpapers.get(&edit.id).map(|w| w.file.clone()).unwrap_or_default();
+            if edit.wall.key == "app" {
+                // Nothing of its own left: its picture goes too.
+                settings.number_wallpapers.remove(&edit.id);
+                screens::settings::forget_custom(&edit.wall.file);
+            } else {
+                settings.number_wallpapers.insert(edit.id.clone(), edit.wall.clone());
+            }
+            if saved != edit.wall.file {
+                screens::settings::forget_custom(&saved);
+            }
+            self.backend.send(Command::SaveSettings(settings));
+            close = true;
+        } else if close {
+            // A picture chosen and then not saved is not kept.
+            let saved = self.settings.number_wallpapers.get(&edit.id).map(|w| w.file.as_str()).unwrap_or_default();
+            if edit.wall.file != saved {
+                screens::settings::forget_custom(&edit.wall.file);
+            }
+        }
+        if !close {
+            self.state.number_wallpaper = Some(edit);
+        }
+    }
+
     fn relink(&mut self, id: String) {
         self.backend.send(Command::Relink { id: id.clone() });
         self.open_pairing(id);
@@ -1052,7 +1130,7 @@ impl eframe::App for App {
         if ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::P))) {
             self.set_privacy(|p| p.enabled = !p.enabled);
         }
-        widgets::set_wallpaper(&self.settings.wallpaper, &self.settings.wallpaper_file, self.settings.wallpaper_dim);
+        widgets::set_wallpapers(&self.settings);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.
@@ -1247,6 +1325,11 @@ impl eframe::App for App {
                 let name = self.sessions.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_default();
                 self.state.rename = Some((id, name));
             }
+            Some(screens::nomor::Action::Wallpaper(id)) => {
+                if let Some(session) = self.sessions.iter().find(|s| s.id == id) {
+                    self.state.number_wallpaper = Some(NumberWallpaperEdit::new(&self.settings, session));
+                }
+            }
             None => {}
         }
         if let (Some(id), Some(a)) = (self.pairing_id.clone(), pairing_action) {
@@ -1267,6 +1350,7 @@ impl eframe::App for App {
         }
         self.confirm_remove(ui.ctx());
         self.rename_dialog(ui.ctx());
+        self.number_wallpaper_dialog(ui.ctx());
         self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
         movie_view::show(ui.ctx(), &mut self.state.video_view);
