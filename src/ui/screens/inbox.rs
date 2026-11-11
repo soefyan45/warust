@@ -3228,11 +3228,14 @@ fn composer(
 ) -> Option<Outgoing> {
     let connected = session.status == Status::Connected;
     let id = ui.make_persistent_id("composer_text");
-    // Taken even while a voice note hides the text box, so the focus does not
-    // jump there later.
-    let opened = std::mem::take(&mut state.focus_composer);
+    let opened = take_open_focus(ui, state);
     match voice_note(ui, p, state, session, chat, compact) {
-        Err(()) => return None,
+        Err(()) => {
+            // A voice note hides the text box: drop the request, so the focus
+            // does not jump there later.
+            state.focus_composer = false;
+            return None;
+        }
         Ok(Some(voice)) => return Some(voice),
         Ok(None) => {}
     }
@@ -3504,6 +3507,22 @@ fn wire_text(group: bool, message: &str, picks: &[(String, String)]) -> (String,
     } else {
         (message.to_owned(), Vec::new())
     }
+}
+
+/// Whether the text box takes the keyboard this frame because its chat was
+/// just opened. egui drops the focus of a box when a click lands elsewhere,
+/// and the click on the chat's row is such a click when the list and the text
+/// box share a frame: the request then waits for the frame after it.
+fn take_open_focus(ui: &Ui, state: &mut State) -> bool {
+    if !state.focus_composer {
+        return false;
+    }
+    if ui.input(|i| i.pointer.any_down() || i.pointer.any_click()) {
+        ui.ctx().request_repaint();
+        return false;
+    }
+    state.focus_composer = false;
+    true
 }
 
 /// Shift+Enter (or Alt+Enter) inside a list: starts the next item, or ends the
@@ -4302,6 +4321,58 @@ mod open_chat_tests {
         open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
         assert!(state.focus_composer);
         assert_eq!(state.chat_selected.as_deref(), Some("628111@s.whatsapp.net"));
+    }
+}
+
+#[cfg(test)]
+mod open_focus_tests {
+    use super::*;
+
+    /// One frame with a text box that takes the focus a just-opened chat asks
+    /// for; whether the box has the keyboard after it.
+    fn frame(ctx: &egui::Context, state: &mut State, events: Vec<egui::Event>) -> bool {
+        let id = egui::Id::unique("box");
+        let mut text = String::new();
+        let input = egui::RawInput { events, ..Default::default() };
+        ctx.run_ui(input, |ui| {
+            if take_open_focus(ui, state) {
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            ui.add(egui::TextEdit::singleline(&mut text).id(id));
+        })
+        .textures_delta
+        .clear();
+        ctx.memory(|m| m.has_focus(id))
+    }
+
+    /// A click far from the text box, as on a row of the chat list.
+    fn click_elsewhere() -> Vec<egui::Event> {
+        let pos = pos2(600.0, 400.0);
+        let button = |pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        vec![egui::Event::PointerMoved(pos), button(true), button(false)]
+    }
+
+    #[test]
+    fn the_click_that_opens_a_chat_does_not_cost_the_focus() {
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        frame(&ctx, &mut state, Vec::new());
+        // The wide layout: the row is clicked and the text box drawn in one
+        // frame. egui drops the focus of a box clicked away from, so the
+        // request waits for the next frame.
+        state.focus_composer = true;
+        frame(&ctx, &mut state, click_elsewhere());
+        assert!(frame(&ctx, &mut state, Vec::new()), "the text box has the keyboard after the click");
+        assert!(!state.focus_composer);
+    }
+
+    #[test]
+    fn without_a_click_the_focus_comes_at_once() {
+        // The phone layout and a clicked notification: no click this frame.
+        let ctx = egui::Context::default();
+        let mut state = State::default();
+        state.focus_composer = true;
+        assert!(frame(&ctx, &mut state, Vec::new()));
     }
 }
 
