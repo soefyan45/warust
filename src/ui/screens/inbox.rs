@@ -1029,7 +1029,7 @@ fn chat_row(
     let muted = chat.is_muted(time::now());
     let reserve = badges + if muted { 22.0 } else { 0.0 };
     let preview_rect = Rect::from_min_max(bottom.min, pos2(right - reserve, bottom.bottom()));
-    paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing);
+    paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 18.0, bottom.center().y - 8.0), vec2(16.0, 16.0));
         icons::paint(ui, bell, "bell-off", 15.0, p.muted);
@@ -1132,11 +1132,17 @@ fn tick(p: &Palette, status: &Delivery, grey: Color32, dark: bool) -> Option<(&'
     }
 }
 
+/// Anti-peek frosts a row's preview unless the cursor is on that row.
+fn preview_veiled(blur: bool, hovered: bool) -> bool {
+    blur && !hovered
+}
+
 /// The last message in a chat row; ours start with their tick, like WhatsApp.
 #[allow(clippy::too_many_arguments)]
-fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, size: f32, color: Color32, typing: Option<&str>) {
-    // Anti-peek: a bar of the same width for every chat, so nothing is read off it.
-    if crate::ui::privacy::blur_previews() {
+fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, size: f32, color: Color32, typing: Option<&str>, hovered: bool) {
+    // Anti-peek: a bar of the same width for every chat, so nothing is read
+    // off it. Like a bubble, it reads while the cursor is on its row.
+    if preview_veiled(crate::ui::privacy::blur_previews(), hovered) {
         crate::ui::privacy::frost_line(&ui.painter().with_clip_rect(rect), rect, 0.72, color.gamma_multiply(0.35));
         return;
     }
@@ -4199,7 +4205,7 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     let muted = chat.is_muted(time::now());
     let reserve = badges + if muted { 24.0 } else { 0.0 };
     let line = Rect::from_min_max(pos2(left, row.top() + 35.0), pos2(right - reserve, row.top() + 56.0));
-    paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing);
+    paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 20.0, line.center().y - 9.0), vec2(18.0, 18.0));
         icons::paint(ui, bell, "bell-off", 17.0, p.muted);
@@ -4587,6 +4593,18 @@ mod open_chat_tests {
         open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
         assert!(state.focus_composer);
         assert_eq!(state.chat_selected.as_deref(), Some("628111@s.whatsapp.net"));
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+
+    #[test]
+    fn a_frosted_preview_reads_under_the_cursor() {
+        assert!(preview_veiled(true, false));
+        assert!(!preview_veiled(true, true), "the cursor is on the row");
+        assert!(!preview_veiled(false, false), "anti-peek is off");
     }
 }
 
