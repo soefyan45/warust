@@ -193,6 +193,10 @@ pub struct State {
     /// Chat whose older messages were just requested, and when.
     pub older_asked: Option<(String, std::time::Instant)>,
     pub contact_panel: bool,
+    /// The details were asked for (the chat's name or the panel button), so
+    /// they may take the chat's place as a page when there is no room beside
+    /// it; a chat just opened shows the chat (#91).
+    pub contact_page: bool,
     /// The Inbox's device panel (Perangkat) is shown.
     pub devices_panel: bool,
     pub log_tab: usize,

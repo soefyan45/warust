@@ -129,11 +129,12 @@ pub fn show(
     let webhook = super::webhook_label(state, &session.id);
     let mut open_member = None;
     let mut chat_ui = None;
-    if state.contact_panel {
-        let column = ui.available_rect_before_wrap();
-        let beside = (column.width() * 0.34).clamp(240.0, 360.0);
-        // The chat's header and composer need their room; below it, a page.
-        let page = column.width() - beside - PANEL_GAP < CHAT_MIN;
+    let column = ui.available_rect_before_wrap();
+    let beside = (column.width() * 0.34).clamp(240.0, 360.0);
+    // The chat's header and composer need their room; below it, a page, and
+    // only when asked for.
+    let page = column.width() - beside - PANEL_GAP < CHAT_MIN;
+    if state.contact_panel && (!page || state.contact_page) {
         let width = if page { column.width() } else { beside };
         let panel_rect = Rect::from_min_max(pos2(column.right() - width, column.top()), column.max);
         let mut panel_ui = ui.new_child(egui::UiBuilder::new().max_rect(panel_rect).layout(Layout::top_down(Align::Min)));
@@ -154,7 +155,7 @@ pub fn show(
             })
             .inner;
         if close {
-            state.contact_panel = false;
+            state.contact_page = false;
         }
         if !page {
             let rest = Rect::from_min_max(column.min, pos2(panel_rect.left() - PANEL_GAP, column.bottom()));
@@ -165,7 +166,6 @@ pub fn show(
             if let Some(jid) = open_member {
                 let existing = book.chats.iter().find(|c| c.jid == jid);
                 open_chat(state, &session.id, &jid, existing);
-                state.contact_panel = false;
             }
             return commands;
         }
@@ -234,6 +234,7 @@ pub fn show(
                 |ui| {
                     if widgets::icon_button(ui, "panel-right", 32.0, state.contact_panel).clicked() {
                         state.contact_panel = !state.contact_panel;
+                        state.contact_page = state.contact_panel;
                     }
                     ui.add_space(4.0);
                     call_buttons(ui, &p, call_on, session, chat, 40.0, &mut commands);
@@ -252,6 +253,7 @@ pub fn show(
             );
             if info_clicked {
                 state.contact_panel = true;
+                state.contact_page = true;
             }
         });
     Panel::bottom(panel_id(state, "composer"))
@@ -740,6 +742,8 @@ pub fn open_chat(state: &mut State, session: &str, jid: &str, chat: Option<&Chat
     if already {
         return;
     }
+    // Another chat opens on its conversation, not on details asked for before.
+    state.contact_page = false;
     // A chat of another number than the filter: the filter follows it, so the
     // chat is not dropped, and its section opens so the row can be seen.
     if state.inbox_scope.as_deref().is_some_and(|scope| scope != session) {
@@ -4312,8 +4316,8 @@ fn compact_chat(
                 |ui| {
                     if widgets::icon_button(ui, "chevron-left", 36.0, false).on_hover_text(tr("Back", "Kembali")).clicked() {
                         // From the details page back to the chat, else to the list.
-                        if state.contact_panel {
-                            state.contact_panel = false;
+                        if state.contact_page {
+                            state.contact_page = false;
                         } else {
                             state.chat_selected = None;
                         }
@@ -4366,11 +4370,12 @@ fn compact_chat(
             );
             if info_clicked {
                 state.contact_panel = true;
+                state.contact_page = true;
             }
         });
     // The contact or group details as a page of their own in place of the
     // chat, like the phone (#91); back returns to the chat.
-    if state.contact_panel {
+    if state.contact_page {
         let info = state.groups_now.get(&crate::backend::Typing::key(&session.id, &chat.jid)).cloned();
         let webhook = super::webhook_label(state, &session.id);
         let back = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
@@ -4379,12 +4384,11 @@ fn compact_chat(
             .show(ui, |ui| contact_panel(ui, &p, book, chat, avatars, &webhook, info.as_ref()))
             .inner;
         if back {
-            state.contact_panel = false;
+            state.contact_page = false;
         }
         if let Some(jid) = open {
             let existing = book.chats.iter().find(|c| c.jid == jid);
             open_chat(state, &session.id, &jid, existing);
-            state.contact_panel = false;
         }
         return commands;
     }
@@ -4638,6 +4642,22 @@ mod open_chat_tests {
         open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
         assert!(state.focus_composer);
         assert_eq!(state.chat_selected.as_deref(), Some("628111@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn a_chat_opens_on_the_conversation_not_the_details_page() {
+        let mut state = State::default();
+        // The panel beside the chat is on by default; its page is not.
+        state.contact_panel = true;
+        open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
+        assert!(!state.contact_page);
+        // Asked for on this chat, the page stays while the chat is clicked again…
+        state.contact_page = true;
+        open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
+        assert!(state.contact_page);
+        // …and another chat opens on its conversation.
+        open_chat(&mut state, "s1", "628222@s.whatsapp.net", None);
+        assert!(!state.contact_page && state.contact_panel);
     }
 }
 
