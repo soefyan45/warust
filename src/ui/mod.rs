@@ -163,6 +163,8 @@ pub struct State {
     /// The voice call from the backend (#39), and whether the phone layout
     /// shows it as a banner.
     pub call_now: Option<backend::call::CallView>,
+    /// The latest release check (#93), for the banner and Settings.
+    pub update: backend::update::UpdateState,
     pub call_minimized: bool,
     /// The call's video pictures as textures (#55).
     pub call_textures: call::Textures,
@@ -510,6 +512,57 @@ impl App {
                     });
                 });
             });
+    }
+
+    /// "warust 0.1.6 is available" (#93): a slim bar under the top bar with
+    /// the release notes, the installer for this OS, and "Later" (no banner
+    /// for that version again).
+    fn update_banner(&mut self, ui: &mut Ui) {
+        let backend::update::UpdateState::Available(release) = &self.state.update else { return };
+        if self.settings.updates.skipped == release.version {
+            return;
+        }
+        let p = theme::palette(ui.ctx());
+        let release = release.clone();
+        let mut later = false;
+        Panel::top("update_banner")
+            .exact_size(44.0)
+            .resizable(false)
+            .show_separator_line(false)
+            .frame(Frame::NONE.fill(p.accent_soft).inner_margin(Margin::symmetric(16, 0)))
+            .show(ui, |ui| {
+                widgets::row(
+                    ui,
+                    44.0,
+                    |ui| {
+                        icons::show(ui, "download", 16.0, p.accent_text);
+                        ui.add_space(4.0);
+                        let text = crate::trf!(
+                            "warust {} is available (you have {})",
+                            "warust {} sudah tersedia (terpasang {})",
+                            release.version,
+                            backend::update::current()
+                        );
+                        ui.add(egui::Label::new(rich(&text, 13.0, Weight::SemiBold, p.accent_text)).truncate());
+                    },
+                    |ui| {
+                        if widgets::button(ui, None, tr("Later", "Nanti"), Kind::Secondary).clicked() {
+                            later = true;
+                        }
+                        if widgets::button(ui, None, tr("What's new", "Apa yang baru"), Kind::Secondary).clicked() {
+                            crate::platform::open_url(&release.page);
+                        }
+                        if widgets::button(ui, Some("download"), tr("Download", "Unduh"), Kind::Primary).clicked() {
+                            crate::platform::open_url(&release.download);
+                        }
+                    },
+                );
+            });
+        if later {
+            let mut settings = (*self.settings).clone();
+            settings.updates.skipped = release.version.clone();
+            self.backend.send(Command::SaveSettings(settings));
+        }
     }
 
     /// Forest: brand, pill navigation, API state and the window buttons in one
@@ -1041,6 +1094,7 @@ impl eframe::App for App {
         self.state.members_now = snapshot.members;
         self.state.groups_now = snapshot.groups;
         self.state.call_now = snapshot.call;
+        self.state.update = snapshot.update;
         if self.state.typing_now.values().any(backend::Typing::fresh) {
             // So a stale "mengetik…" disappears even when nothing else repaints.
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(2));
@@ -1124,6 +1178,7 @@ impl eframe::App for App {
             self.sidebar(ui);
             self.topbar(ui);
         }
+        self.update_banner(ui);
         // Heights of compact::title_bar, topnav and the sidebar/topbar row.
         let bar = if compact { 40.0 } else if theme::template().top_nav() { 72.0 } else { 52.0 };
         // In full screen the title bar lives in AppKit's own toolbar window.

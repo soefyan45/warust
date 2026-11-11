@@ -6,6 +6,7 @@
 mod api;
 pub mod call;
 pub mod video;
+pub mod update;
 pub mod movie;
 mod avatars;
 mod media;
@@ -117,6 +118,8 @@ pub struct Shared {
     pub sessions: Vec<SessionView>,
     /// Profile pictures by normalized JID: a cached file, or `None` for no picture.
     pub avatars: Arc<HashMap<String, Option<PathBuf>>>,
+    /// The latest release check (#93).
+    pub update: update::UpdateState,
     /// Full-size profile pictures asked for the photo viewer (#92), by JID.
     pub full_avatars: Arc<HashMap<String, Option<PathBuf>>>,
     /// Downloads by message id: `None` while running, else why it failed.
@@ -324,6 +327,8 @@ pub enum Command {
     EditMessage { id: String, chat: String, msg_id: String, text: String },
     /// Save new settings; restarts the API server when its part changed.
     SaveSettings(Settings),
+    /// Look for a new release now ("Check now" in Settings).
+    CheckUpdate,
     /// Send a `webhook.test` event to the global webhook URL.
     TestWebhook,
 }
@@ -352,6 +357,20 @@ impl Backend {
                     .build()
                     .expect("tokio runtime");
                 runtime.spawn(webhook::dispatcher(hook_events, state.clone()));
+    // New releases (#93): on start, then once a day, while the setting is on.
+    // A failed automatic check stays quiet.
+    let watcher = state.clone();
+    runtime.spawn(async move {
+        loop {
+            if watcher.settings().updates.auto_check {
+                let found = tokio::task::spawn_blocking(update::check).await.unwrap_or_default();
+                if !matches!(found, update::UpdateState::Failed(_)) {
+                    watcher.set_update(found);
+                }
+            }
+            tokio::time::sleep(update::EVERY).await;
+        }
+    });
                 runtime.block_on(run(data_dir, state, receiver, api_commands));
             })
             .expect("whatsapp thread");
@@ -481,6 +500,13 @@ impl Updater {
     pub(crate) fn set_full_avatar(&self, jid: &str, picture: Option<PathBuf>) {
         if let Ok(mut shared) = self.shared.lock() {
             Arc::make_mut(&mut shared.full_avatars).insert(jid.to_owned(), picture);
+        }
+        self.ctx.request_repaint();
+    }
+
+    pub(crate) fn set_update(&self, update: update::UpdateState) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.update = update;
         }
         self.ctx.request_repaint();
     }
@@ -845,6 +871,11 @@ async fn run(
                 (Some(r), Some(store)) => r.enqueue_as(&id, chat, body, local_id, &state, store),
                 _ => log::warn!("api send: session {id} is not running"),
             },
+            Command::CheckUpdate => {
+                state.set_update(update::UpdateState::Checking);
+                let state = state.clone();
+                tokio::task::spawn_blocking(move || state.set_update(update::check()));
+            }
             Command::SaveSettings(settings) => {
                 let old = state.settings();
                 settings.save(&data_dir);

@@ -72,6 +72,22 @@ impl Webhook {
 }
 
 /// Desktop notifications for incoming messages.
+/// Looking for new releases (#93).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    /// Check GitHub on start and once a day.
+    pub auto_check: bool,
+    /// A version the user put off with "Later": no banner for it.
+    pub skipped: String,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self { auto_check: true, skipped: String::new() }
+    }
+}
+
 /// Anti-peek mode (#57): keeps chats unreadable to people behind the user.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -181,6 +197,7 @@ pub struct Settings {
     /// How much a custom picture is dimmed toward the chat colour, 0 to 80 %.
     pub wallpaper_dim: u8,
     pub privacy: Privacy,
+    pub updates: Updates,
 }
 
 impl Default for Settings {
@@ -202,6 +219,7 @@ impl Default for Settings {
             wallpaper_file: String::new(),
             wallpaper_dim: 30,
             privacy: Privacy::default(),
+            updates: Updates::default(),
         }
     }
 }
