@@ -932,19 +932,19 @@ fn section_header(ui: &Ui, p: &Palette, rect: Rect, session: &SessionView, count
 fn privacy_banner(ui: &mut Ui, p: &Palette) {
     ui.add_space(8.0);
     Frame::NONE.fill(p.accent_soft).corner_radius(R_MD).inner_margin(Margin::symmetric(12, 7)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 8.0;
-            icons::show(ui, "shield", 14.0, p.accent_text);
-            ui.label(rich(
-                tr("Messages are blurred. Move the cursor over a message to read it.", "Isi pesan diburamkan. Arahkan kursor ke pesan untuk membacanya."),
-                12.5,
-                Weight::Medium,
-                p.accent_text,
-            ));
-            ui.with_layout(egui::Layout::right_to_left(Align::Center), |ui| {
+        widgets::row(
+            ui,
+            18.0,
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                icons::show(ui, "shield", 14.0, p.accent_text);
+                let text = tr("Messages are blurred. Move the cursor over a message to read it.", "Isi pesan diburamkan. Arahkan kursor ke pesan untuk membacanya.");
+                ui.add(egui::Label::new(rich(text, 12.5, Weight::Medium, p.accent_text)).truncate());
+            },
+            |ui| {
                 ui.label(rich_mono("Ctrl+Shift+P", 11.0, p.text_2));
-            });
-        });
+            },
+        );
     });
 }
 
@@ -966,7 +966,9 @@ fn bound_banner(ui: &mut Ui, p: &Palette, session: &SessionView) {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
                     icons::show(ui, "lock", 12.0, p.accent_text);
-                    ui.label(rich(&text, 12.0, Weight::Regular, p.accent_text));
+                    // One line that ends in "…" when short of room: a wider
+                    // banner pushes the whole conversation past the column (#105).
+                    ui.add(egui::Label::new(rich(&text, 12.0, Weight::Regular, p.accent_text)).truncate());
                 });
             });
     });
