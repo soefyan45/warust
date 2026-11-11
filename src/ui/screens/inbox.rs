@@ -1281,12 +1281,24 @@ fn media_box(media: &Media, wrap: f32) -> MediaBox {
     let Some(source) = source else {
         return MediaBox::Card;
     };
-    let width = wrap.min(260.0);
-    let height = match (media.width, media.height) {
-        (Some(w), Some(h)) if w > 0 => width * h as f32 / w as f32,
+    // The size the message states, else the one in the file's own header.
+    let pixels = match (media.width, media.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+        _ => widgets::picture_size(&source),
+    };
+    let size = picture_box(wrap.min(260.0), pixels);
+    MediaBox::Picture(source, size)
+}
+
+/// A picture's box in a bubble: as wide as the bubble allows and as tall as
+/// the picture's own shape makes it, so it is neither stretched nor cropped
+/// (#126). 4:3 while the picture's size is unknown.
+fn picture_box(width: f32, pixels: Option<(u32, u32)>) -> egui::Vec2 {
+    let height = match pixels {
+        Some((w, h)) if w > 0 && h > 0 => width * h as f32 / w as f32,
         _ => width * 0.75,
     };
-    MediaBox::Picture(source, vec2(width, height.clamp(80.0, 320.0)))
+    vec2(width, height)
 }
 
 /// The bubble text without the `[Gambar]`-style label the media already shows.
@@ -4747,5 +4759,65 @@ mod enter_tests {
         assert!(sends(Modifiers::NONE));
         assert!(!sends(Modifiers::SHIFT), "Shift+Enter is a new line");
         assert!(!sends(Modifiers::ALT));
+    }
+}
+
+#[cfg(test)]
+mod picture_box_tests {
+    use super::*;
+
+    /// Height over width, which must match the picture's own.
+    fn shape(size: egui::Vec2) -> f32 {
+        size.y / size.x
+    }
+
+    #[test]
+    fn a_tall_screenshot_keeps_its_shape() {
+        // A 9:19 phone screenshot used to be squeezed into 260x320 (#126).
+        let size = picture_box(260.0, Some((1080, 2280)));
+        assert_eq!(size.x, 260.0);
+        assert!((shape(size) - 2280.0 / 1080.0).abs() < 0.001, "{size:?}");
+    }
+
+    #[test]
+    fn a_wide_picture_keeps_its_shape() {
+        let size = picture_box(260.0, Some((4000, 1000)));
+        assert_eq!(size, vec2(260.0, 65.0));
+    }
+
+    #[test]
+    fn a_narrow_bubble_scales_the_picture_down() {
+        let size = picture_box(180.0, Some((1080, 2280)));
+        assert_eq!(size.x, 180.0);
+        assert!((shape(size) - 2280.0 / 1080.0).abs() < 0.001, "{size:?}");
+    }
+
+    #[test]
+    fn an_unknown_size_is_four_by_three() {
+        assert_eq!(picture_box(260.0, None), vec2(260.0, 195.0));
+        assert_eq!(picture_box(260.0, Some((0, 0))), vec2(260.0, 195.0));
+    }
+
+    #[test]
+    fn a_message_without_a_size_uses_the_files_own() {
+        let file = std::env::temp_dir().join(format!("warust-picture-box-{}.png", std::process::id()));
+        image::RgbImage::new(90, 190).save(&file).expect("writes");
+        let media = Media {
+            kind: "image".into(),
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            thumb: None,
+            file: Some(file.clone()),
+            seconds: None,
+            waveform: Vec::new(),
+            voice: false,
+            raw: whatsapp_rust::serde_json::Value::Null,
+        };
+        let MediaBox::Picture(_, size) = media_box(&media, 400.0) else { panic!("a picture box") };
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(size.x, 260.0);
+        assert!((shape(size) - 190.0 / 90.0).abs() < 0.001, "{size:?}");
     }
 }
