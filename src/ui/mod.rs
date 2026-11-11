@@ -16,6 +16,7 @@ mod photo_view;
 pub mod privacy;
 mod qr;
 mod screens;
+mod seen;
 mod stickers;
 mod theme;
 mod time;
@@ -270,6 +271,8 @@ pub struct App {
     pairing_id: Option<String>,
     /// The chat last reported to the notifier as on screen.
     viewing: Option<(String, String)>,
+    /// Marks the chat on screen read as messages arrive in it.
+    seen: seen::Watch,
     /// The unread count last shown on the taskbar icon and the title.
     shown_unread: Option<u32>,
     /// Numbers open in windows of their own (issue #28).
@@ -341,6 +344,7 @@ impl App {
             // Dev aid: WARUST_PAIR=<session id> opens its pairing screen.
             pairing_id: std::env::var("WARUST_PAIR").ok(),
             viewing: None,
+            seen: seen::Watch::default(),
             lock: privacy::Lock::default(),
             windows: Vec::new(),
             shown_unread: None,
@@ -1303,6 +1307,16 @@ impl eframe::App for App {
         } else {
             in_window
         };
+        // A message that arrives in the chat in front of the user is read.
+        // Behind the lock cover nothing is in front of them.
+        let read = viewing.as_ref().filter(|_| !self.lock.locked);
+        let open = read.and_then(|(session, jid)| self.sessions.iter().find(|s| &s.id == session)?.book.chats.iter().find(|c| &c.jid == jid));
+        let newest = open.and_then(|c| c.messages.iter().rev().find(|m| !m.from_me)).map(|m| m.id.as_str());
+        if self.seen.check(read.filter(|_| open.is_some()), newest, open.map_or(0, |c| c.unread))
+            && let Some((session, jid)) = read
+        {
+            self.backend.send(Command::Seen { id: session.clone(), chat: jid.clone() });
+        }
         if viewing != self.viewing {
             self.backend.set_viewing(viewing.clone());
             self.viewing = viewing;
