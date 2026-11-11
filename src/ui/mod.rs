@@ -10,6 +10,7 @@ mod icons;
 mod lists;
 mod mention;
 mod markup;
+mod movie_view;
 mod pdf;
 mod photo_view;
 pub mod privacy;
@@ -135,6 +136,8 @@ pub struct State {
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
     pub pdf_view: Option<pdf::Viewer>,
+    /// Chat video open in the in-app viewer (#84).
+    pub video_view: Option<movie_view::Viewer>,
     /// Profile photo open in the pop-up viewer (#92), and the full-size ones fetched.
     pub photo_view: Option<photo_view::Viewer>,
     pub full_avatars: std::sync::Arc<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
@@ -735,6 +738,7 @@ impl App {
                     };
                 });
                 pdf::show(ui.ctx(), &mut w.state.pdf_view);
+                movie_view::show(ui.ctx(), &mut w.state.video_view);
                 photo_view::show(ui.ctx(), &mut w.state.photo_view, &w.state.full_avatars);
                 if locked {
                     lock_cover(ui.ctx());
@@ -1261,6 +1265,7 @@ impl eframe::App for App {
         self.rename_dialog(ui.ctx());
         self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
+        movie_view::show(ui.ctx(), &mut self.state.video_view);
         photo_view::show(ui.ctx(), &mut self.state.photo_view, &self.state.full_avatars);
         // "Sedang mengetik" for the chat on screen while its reply is typed.
         let open_chat = if self.screen == Screen::Inbox {
