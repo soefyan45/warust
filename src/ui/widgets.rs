@@ -79,6 +79,29 @@ pub fn logo(ui: &Ui, rect: Rect, bubble: Color32, mark: Color32) {
     }
 }
 
+/// The texture of the latest video frame in `latest`, uploaded again only
+/// when a new frame arrived; kept in egui's memory under `key`.
+pub fn frame_texture(ctx: &egui::Context, key: &str, latest: &crate::backend::video::Latest) -> Option<egui::TextureHandle> {
+    let picture = latest.lock().ok()?.clone()?;
+    let id = egui::Id::NULL.with(("frame_texture", key));
+    let cached: Option<(egui::TextureHandle, u64)> = ctx.data(|d| d.get_temp(id));
+    if let Some((handle, generation)) = &cached {
+        if *generation == picture.generation {
+            return Some(handle.clone());
+        }
+    }
+    let image = egui::ColorImage::from_rgba_unmultiplied([picture.width, picture.height], &picture.rgba);
+    let handle = match cached {
+        Some((mut handle, _)) => {
+            handle.set(image, egui::TextureOptions::LINEAR);
+            handle
+        }
+        None => ctx.load_texture(key, image, egui::TextureOptions::LINEAR),
+    };
+    ctx.data_mut(|d| d.insert_temp(id, (handle.clone(), picture.generation)));
+    Some(handle)
+}
+
 /// Paints one line of text inside `rect`, cut with an ellipsis when too wide.
 pub fn paint_text(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32, align: Align) {
     let mut job = LayoutJob { break_on_newline: false, ..Default::default() };

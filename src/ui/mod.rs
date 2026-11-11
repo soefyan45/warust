@@ -10,6 +10,7 @@ mod icons;
 mod lists;
 mod mention;
 mod markup;
+mod movie_view;
 mod pdf;
 pub mod privacy;
 mod qr;
@@ -134,6 +135,8 @@ pub struct State {
     pub attachment: Option<std::path::PathBuf>,
     /// PDF open in the in-app viewer.
     pub pdf_view: Option<pdf::Viewer>,
+    /// Chat video open in the in-app viewer (#84).
+    pub video_view: Option<movie_view::Viewer>,
     /// "Teruskan ke…" dialog for a message of the open chat.
     pub forward: Option<forward::Dialog>,
     /// "Delete message?" asked for a message of the open chat (#72).
@@ -731,6 +734,7 @@ impl App {
                     };
                 });
                 pdf::show(ui.ctx(), &mut w.state.pdf_view);
+                movie_view::show(ui.ctx(), &mut w.state.video_view);
                 if locked {
                     lock_cover(ui.ctx());
                 }
@@ -1255,6 +1259,7 @@ impl eframe::App for App {
         self.rename_dialog(ui.ctx());
         self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
+        movie_view::show(ui.ctx(), &mut self.state.video_view);
         // "Sedang mengetik" for the chat on screen while its reply is typed.
         let open_chat = if self.screen == Screen::Inbox {
             self.state.inbox_session.clone().zip(self.state.chat_selected.clone())

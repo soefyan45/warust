@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align, CentralPanel, Color32, Key, Margin, Rect, ScrollArea, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
-use crate::backend::{Book, ChatMsg, Command, SessionView, Status, StatusPost};
+use crate::backend::{Book, ChatMsg, Command, SessionView, Status, StatusPost, movie};
 use crate::i18n::tr;
 use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, Palette, R_LG};
@@ -41,7 +41,7 @@ fn argb(value: u32) -> Color32 {
 
 /// Paints one update into `card`: a text on its colour, or the photo (asked
 /// for when missing) with a play badge for videos. Clicks open or download it.
-fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: &str, downloads: &Downloads) -> Vec<Command> {
+fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: &str, downloads: &Downloads, playing: Option<&movie::Status>) -> Vec<Command> {
     let mut commands = Vec::new();
     match &post.media {
         None => {
@@ -54,6 +54,29 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
             let galley = ui.painter().layout_job(job);
             let at = pos2(card.center().x, card.center().y - galley.size().y / 2.0);
             ui.painter().galley(at, galley, color);
+        }
+        // A video playing in the card (#84): its frames, and a note while it loads.
+        Some(_) if playing.is_some() => {
+            ui.painter().rect_filled(card, R_LG, Color32::BLACK);
+            let status = playing.expect("checked");
+            match widgets::frame_texture(ui.ctx(), "status_video", &status.picture) {
+                Some(texture) => {
+                    let size = texture.size_vec2();
+                    let scale = (card.width() / size.x).min(card.height() / size.y);
+                    let shown = Rect::from_center_size(card.center(), size * scale);
+                    egui::Image::from_texture(&texture).corner_radius(R_LG).fit_to_exact_size(shown.size()).paint_at(ui, shown);
+                }
+                None => {
+                    if let Some(uri) = picture(post).and_then(|source| widgets::picture_uri(ui.ctx(), &source)) {
+                        egui::Image::from_uri(uri).corner_radius(R_LG).fit_to_exact_size(card.size()).paint_at(ui, card);
+                    }
+                }
+            }
+            if status.loading {
+                let pill = Rect::from_center_size(pos2(card.center().x, card.bottom() - 28.0), vec2(120.0, 26.0));
+                ui.painter().rect_filled(pill, 13.0, Color32::from_black_alpha(160));
+                widgets::paint_text(ui, pill, tr("Loading…", "Memuat…"), fonts::ui(12.0, Weight::Medium), Color32::WHITE, Align::Center);
+            }
         }
         Some(media) => {
             ui.painter().rect_filled(card, R_LG, Color32::BLACK);
@@ -458,9 +481,29 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     if paused || !matches!(&state.status_shown, Some((id, _)) if id == &post.id) {
         state.status_shown = Some((post.id.clone(), now - elapsed));
     }
-    let progress = (elapsed.as_secs_f32() / ADVANCE.as_secs_f32()).min(1.0);
+    // A downloaded video plays in the card; its length is the update's time (#84).
+    let video = post.media.as_ref().filter(|m| m.kind == "video").and_then(|m| m.file.clone()).filter(|_| movie::available());
+    movie::stop_unless(video.as_ref().map(|_| post.id.as_str()));
+    let playing = video.as_ref().and_then(|file| {
+        if movie::status(&post.id).is_none() {
+            movie::play(&post.id, file, movie::repaint_for(ui.ctx()));
+        }
+        let status = movie::status(&post.id)?;
+        if paused && status.playing {
+            movie::pause(&post.id);
+        } else if !paused && !status.playing && !status.ended {
+            movie::play(&post.id, file, movie::repaint_for(ui.ctx()));
+        }
+        // A paused video still needs asking about now and then, or it stops.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
+        Some(status)
+    });
+    let (progress, finished) = match &playing {
+        Some(s) => ((if s.duration > 0.0 { s.position / s.duration } else { 0.0 }).min(1.0), s.ended),
+        None => ((elapsed.as_secs_f32() / ADVANCE.as_secs_f32()).min(1.0), elapsed >= ADVANCE),
+    };
     if !paused {
-        if elapsed >= ADVANCE {
+        if finished {
             if state.status_index + 1 < count {
                 state.status_index += 1;
             } else if let Some(next) = next {
@@ -510,6 +553,15 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     widgets::paint_text(ui, Rect::from_min_max(pos2(text_left, head.top() + 23.0), pos2(text_right, head.top() + 41.0)), &sub, fonts::ui(12.0, Weight::Regular), soft, Align::Min);
     let menu_rect = Rect::from_center_size(pos2(head.right() - 20.0, head.center().y), vec2(40.0, 40.0));
     let pause_rect = menu_rect.translate(vec2(-48.0, 0.0));
+    // A video's sound on or off.
+    if let Some(status) = &playing {
+        let mute_rect = pause_rect.translate(vec2(-48.0, 0.0));
+        let hint = if status.muted { tr("Sound on", "Nyalakan suara") } else { tr("Mute", "Bisukan") };
+        if stage_button(ui, mute_rect, "status_mute", true, false).on_hover_text(hint).clicked() {
+            movie::set_muted(!status.muted);
+        }
+        icons::paint(ui, Rect::from_center_size(mute_rect.center(), vec2(18.0, 18.0)), if status.muted { "volume-x" } else { "volume-2" }, 18.0, white);
+    }
     if stage_button(ui, pause_rect, "status_pause", true, false).on_hover_text(if state.status_paused { tr("Resume", "Lanjut") } else { tr("Pause", "Jeda") }).clicked() {
         state.status_paused = !state.status_paused;
     }
@@ -542,7 +594,11 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     let side_room = if phone { pad * 2.0 } else { 150.0 };
     let width = (height * 9.0 / 16.0).max(240.0).min(area.width() - side_room);
     let card = Rect::from_min_size(pos2(area.center().x - width / 2.0, top), vec2(width, height));
-    commands.extend(paint_post(ui, p, card, post, &e.session.id, downloads));
+    commands.extend(paint_post(ui, p, card, post, &e.session.id, downloads, playing.as_ref()));
+    // A click on a playing video pauses or resumes it, like the pause button.
+    if playing.is_some() && ui.interact(card, ui.scope_id().with(("status_movie", &post.id)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        state.status_paused = !state.status_paused;
+    }
     if !phone {
         for (dir, icon, enabled) in [(-1.0, "chevron-left", state.status_index > 0), (1.0, "chevron-right", state.status_index + 1 < count)] {
             let cx = if dir < 0.0 { card.left() - 42.0 } else { card.right() + 42.0 };

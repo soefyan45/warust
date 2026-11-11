@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::backend::store::PinLength;
-use crate::backend::{Book, Chat, ChatMsg, Command, Delivery, MAX_FILE_BYTES, Media, SessionView, Status};
+use crate::backend::{Book, Chat, ChatMsg, Command, Delivery, MAX_FILE_BYTES, Media, SessionView, Status, movie};
 
 /// Profile pictures by JID, as the backend shares them.
 type Avatars = HashMap<String, Option<PathBuf>>;
@@ -1202,6 +1202,8 @@ enum MediaClick {
     OpenPdf(PathBuf, String),
     /// "Call back" on a call's line: a video call (true) or a voice call.
     Call(bool),
+    /// A downloaded video and its title, for the in-app player (#84).
+    PlayVideo(PathBuf, String),
 }
 
 const PREVIEW_HEIGHT: f32 = 140.0;
@@ -1791,6 +1793,9 @@ fn paint_media(
     }
     match (&media.file, shown) {
         (Some(_), MediaBox::Document { pdf: Some(file), .. }) => Some(MediaClick::OpenPdf(file.clone(), media_title(media))),
+        (Some(file), _) if media.kind == "video" && movie::available() && media.seconds.is_none_or(|s| s as f32 <= movie::MAX_SECONDS) => {
+            Some(MediaClick::PlayVideo(file.clone(), media_title(media)))
+        }
         (Some(file), _) => {
             open_file(file);
             None
@@ -1927,6 +1932,7 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
     match event {
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
+        MsgEvent::Media(MediaClick::PlayVideo(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
         MsgEvent::Media(MediaClick::Call(video)) => {
             if state.call_now.is_none() && !chat.is_group() {
                 commands.push(Command::PlaceCall { id: session.id.clone(), chat: chat.jid.clone(), video });
