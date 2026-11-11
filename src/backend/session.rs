@@ -706,6 +706,23 @@ fn remove_media_file(state: &Updater, id: &str, msg_id: &str) {
     }
 }
 
+/// Reads every chat's mute from the phone once (#87). The phone only sends
+/// changes, and a number linked before warust read mutes never got the
+/// ones already set; replaying the collection that holds them brings each
+/// back as a `MuteUpdate`.
+fn sync_mutes_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: Arc<Client>) {
+    if state.book(id).is_none_or(|book| book.mutes_synced) {
+        return;
+    }
+    let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
+    tokio::spawn(async move {
+        match client.resync_app_state_collection(whatsapp_rust::WAPatchName::RegularHigh).await {
+            Ok(_) => state.record(&id, &chats, &[store::mutes_synced_record()]),
+            Err(e) => log::warn!("session {id}: reading mutes from the phone failed: {e}"),
+        }
+    });
+}
+
 /// The id of the message a "delete for everyone" takes back.
 fn revoked(message: &wa::Message) -> Option<String> {
     use wa::message::protocol_message::Type;
@@ -929,6 +946,7 @@ async fn on_event(
         }),
         Event::Connected(_) => {
             fetch_group_names(state, id, chats, client.clone());
+            sync_mutes_once(state, id, chats, client.clone());
             let phone = client.pn().map(|jid| mask_phone(&jid.to_string()));
             let own_number = client.pn().map(|jid| store::bare(&jid.to_string()).split('@').next().unwrap_or_default().to_owned());
             let own_lid = client.lid().map(|jid| user_part(&jid.to_string()).to_owned());

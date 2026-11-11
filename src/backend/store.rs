@@ -344,6 +344,9 @@ pub struct Book {
     archived: HashSet<String>,
     /// Muted chats (normalized JIDs) and until when, like `archived`.
     muted: HashMap<String, i64>,
+    /// The phone's mutes were read in full once (#87): a number linked
+    /// before warust read mutes gets them on its next connection.
+    pub mutes_synced: bool,
     /// Messages deleted for me: history repeating them does not bring them back.
     hidden: HashSet<String>,
 }
@@ -665,6 +668,7 @@ impl Book {
                     }
                 }
             }
+            Some("mutesync") => self.mutes_synced = true,
             Some("mute") => {
                 // `until` 0 (or missing) unmutes.
                 if let Some(chat) = text("chat") {
@@ -933,6 +937,11 @@ pub fn seen_record(chat: &str) -> Value {
 }
 
 /// Archives a chat, or (with `false`) takes it out of the archive.
+/// The phone's mutes were read in full.
+pub fn mutes_synced_record() -> Value {
+    json!({ "t": "mutesync" })
+}
+
 /// Mutes a chat until `until` (Unix seconds, `i64::MAX` for always), or
 /// unmutes it with `None`.
 pub fn mute_record(chat: &str, until: Option<i64>) -> Value {
