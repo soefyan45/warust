@@ -214,8 +214,7 @@ fn entries<'a>(sessions: &'a [SessionView], scope: Option<&str>, search: &str) -
             }
         }
     }
-    // Muted posters last, apart from the rest.
-    all.sort_by_key(|e| (e.muted(), !e.unseen(), std::cmp::Reverse(e.last_ts())));
+    all.sort_by_key(|e| (!e.unseen(), std::cmp::Reverse(e.last_ts())));
     all
 }
 
@@ -301,7 +300,7 @@ pub fn page(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatars: &
     let frame = theme::pane(ui.ctx(), stage(ui.ctx()), Margin::ZERO).fill(stage(ui.ctx()));
     CentralPanel::default().frame(frame).show(ui, |ui| match current {
         Some(i) => {
-            let next = all.iter().skip(i + 1).find(|e| e.unseen() && !e.muted());
+            let next = all.iter().skip(i + 1).find(|e| e.unseen() && e.muted() == all[i].muted());
             commands.extend(stage_view(ui, &p, state, &all[i], next, downloads, false));
         }
         None => {
@@ -323,7 +322,7 @@ pub fn compact(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatars
     dev_open(state, &all);
     match all.iter().position(|e| is_open(state, e)) {
         Some(i) => {
-            let next = all.iter().skip(i + 1).find(|e| e.unseen() && !e.muted());
+            let next = all.iter().skip(i + 1).find(|e| e.unseen() && e.muted() == all[i].muted());
             let rect = ui.max_rect();
             ui.painter().rect_filled(rect, 0.0, stage(ui.ctx()));
             stage_view(ui, &p, state, &all[i], next, downloads, true)
@@ -361,7 +360,23 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
     }
     widgets::search(ui, &mut state.status_search, tr("Search name or number", "Cari nama atau nomor"), ui.available_width(), false);
     ui.add_space(8.0);
-    let list = entries(sessions, state.status_scope.as_deref(), &state.status_search);
+    let mut list = entries(sessions, state.status_scope.as_deref(), &state.status_search);
+    // All by default; muted contacts can be left out, or shown alone (#101).
+    let muted_count = list.iter().filter(|e| e.muted()).count();
+    let labels = [
+        crate::trf!("All · {}", "Semua · {}", list.len()),
+        crate::trf!("Not muted · {}", "Tidak dibisukan · {}", list.len() - muted_count),
+        crate::trf!("Muted · {muted_count}", "Dibisukan · {muted_count}"),
+    ];
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    state.status_filter = state.status_filter.min(2);
+    widgets::tabs(ui, &labels, &mut state.status_filter);
+    ui.add_space(4.0);
+    match state.status_filter {
+        1 => list.retain(|e| !e.muted()),
+        2 => list.retain(|e| e.muted()),
+        _ => {}
+    }
     let footer = if phone { 0.0 } else { 28.0 };
     let several = sessions.len() > 1;
     let height = ui.available_height() - footer;
@@ -373,40 +388,16 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
                 ui.label(rich(tr("New statuses from contacts show up here.", "Status baru dari kontak muncul di sini."), 12.0, Weight::Regular, p.muted));
             });
         }
-        // Muted posters come last (see `entries`), in a section of their own.
-        let muted_from = list.iter().position(|e| e.muted()).unwrap_or(list.len());
-        let unseen = list[..muted_from].iter().filter(|e| e.unseen()).count();
-        let sections = [
-            (tr("NOT SEEN", "BELUM DILIHAT"), &list[..unseen], false),
-            (tr("SEEN", "SUDAH DILIHAT"), &list[unseen..muted_from], false),
-            (tr("MUTED UPDATES", "STATUS DIBISUKAN"), &list[muted_from..], true),
-        ];
-        for (label, group, muted) in sections {
+        let unseen = list.iter().filter(|e| e.unseen()).count();
+        for (label, group) in [(tr("NOT SEEN", "BELUM DILIHAT"), &list[..unseen]), (tr("SEEN", "SUDAH DILIHAT"), &list[unseen..])] {
             if group.is_empty() {
                 continue;
             }
             ui.add_space(10.0);
-            if muted {
-                // Closed by default, like the phone; a click opens it.
-                let open_now = state.status_muted_open;
-                let header = ui.horizontal(|ui| {
-                    ui.add_space(10.0);
-                    icons::show(ui, if open_now { "chevron-down" } else { "chevron-right" }, 13.0, p.muted);
-                    ui.label(rich(&format!("{label} · {}", group.len()), 11.0, Weight::SemiBold, p.muted));
-                });
-                let toggle = ui.interact(header.response.rect, ui.make_persistent_id("status_muted_header"), Sense::click());
-                if toggle.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    state.status_muted_open = !state.status_muted_open;
-                }
-                if !state.status_muted_open {
-                    continue;
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    ui.add_space(10.0);
-                    ui.label(rich(&format!("{label} · {}", group.len()), 11.0, Weight::SemiBold, p.muted));
-                });
-            }
+            ui.horizontal(|ui| {
+                ui.add_space(10.0);
+                ui.label(rich(&format!("{label} · {}", group.len()), 11.0, Weight::SemiBold, p.muted));
+            });
             ui.add_space(6.0);
             for e in group {
                 if !avatars.contains_key(&e.poster) && state.avatar_asked.insert(e.poster.clone()) {
@@ -463,7 +454,13 @@ fn poster_row(ui: &mut Ui, p: &Palette, e: &Entry, picture: Option<&Path>, selec
         crate::trf!("{n} {en}", "{n} status")
     };
     let count_w = ui.painter().layout_no_wrap(count.clone(), fonts::ui(12.0, Weight::Regular), p.muted).size().x;
-    let name = Rect::from_min_max(pos2(left, rect.top() + 13.0), pos2(rect.right() - count_w - 20.0, rect.top() + 33.0));
+    // A struck bell before the count marks a muted poster.
+    let bell = if e.muted() { 20.0 } else { 0.0 };
+    if e.muted() {
+        let at = Rect::from_center_size(pos2(rect.right() - count_w - 12.0 - 10.0, rect.top() + 23.0), vec2(14.0, 14.0));
+        icons::paint(ui, at, "bell-off", 13.0, p.muted);
+    }
+    let name = Rect::from_min_max(pos2(left, rect.top() + 13.0), pos2(rect.right() - count_w - 20.0 - bell, rect.top() + 33.0));
     widgets::paint_text(ui, name, &title, fonts::ui(15.0, Weight::SemiBold), p.text, Align::Min);
     widgets::paint_text(ui, Rect::from_min_max(pos2(rect.right() - count_w - 12.0, rect.top() + 13.0), pos2(rect.right() - 12.0, rect.top() + 33.0)), &count, fonts::ui(12.0, Weight::Regular), p.muted, Align::Max);
     let when = ago(e.last_ts());
