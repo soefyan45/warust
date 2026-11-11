@@ -629,7 +629,7 @@ impl App {
             widgets::toggle(ui, &mut privacy.enabled, tr("On (Ctrl+Shift+P)", "Aktif (Ctrl+Shift+P)"));
             ui.separator();
             widgets::toggle(ui, &mut privacy.blur_chat, tr("Blur chat content: clear while the cursor is on a message", "Buramkan isi chat: terbaca saat kursor di atas pesan"));
-            widgets::toggle(ui, &mut privacy.blur_previews, tr("Blur chat list previews and notification text", "Buramkan pratinjau daftar chat dan isi notifikasi"));
+            widgets::toggle(ui, &mut privacy.blur_previews, tr("Blur chat list previews (clear while the cursor is on the chat) and notification text", "Buramkan pratinjau daftar chat (terbaca saat kursor di chat itu) dan isi notifikasi"));
             widgets::toggle(ui, &mut privacy.hide_names, tr("Hide names and numbers, for presentations and recordings", "Sembunyikan nama & nomor, untuk presentasi atau rekaman"));
             ui.horizontal(|ui| {
                 ui.label(rich(tr("Lock when idle", "Kunci otomatis saat ditinggal"), 13.0, Weight::Regular, p.text));
