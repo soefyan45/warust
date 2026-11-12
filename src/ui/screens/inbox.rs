@@ -862,7 +862,9 @@ fn number_chips(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[Session
                 }
                 for s in sessions {
                     let count = s.book.chats.iter().filter(|c| !c.archived).count();
-                    let label = format!("{} · {count}", super::devices::chip_label(s));
+                    // The main number's chip starts with a star (#138).
+                    let star = if super::devices::is_main(state, s) { "★ " } else { "" };
+                    let label = format!("{star}{} · {count}", super::devices::chip_label(s));
                     let dot = super::devices::status_dot(p, &s.status);
                     let active = state.inbox_scope.as_deref() == Some(s.id.as_str());
                     let chip = number_chip_button(ui, p, &label, Some(dot), active);

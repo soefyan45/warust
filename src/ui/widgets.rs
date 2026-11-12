@@ -520,6 +520,23 @@ pub fn picture_size(path: &Path) -> Option<(u32, u32)> {
 }
 
 
+/// A number's name in `rect`, followed by a small "Main" tag when it is the
+/// main number (#138); the name gives way ("…") so the tag still shows.
+pub fn paint_number_name(ui: &Ui, rect: Rect, name: &str, font: egui::FontId, color: Color32, main: bool) {
+    if !main {
+        paint_text(ui, rect, name, font, color, Align::Min);
+        return;
+    }
+    let p = theme::palette(ui.ctx());
+    let tag = ui.painter().layout_no_wrap(crate::i18n::tr("Main", "Utama").to_owned(), fonts::ui(10.5, Weight::SemiBold), p.accent_text);
+    let tag_w = tag.size().x + 12.0;
+    let name_w = ui.painter().layout_no_wrap(name.to_owned(), font.clone(), color).size().x.min((rect.width() - tag_w - 6.0).max(0.0));
+    paint_text(ui, Rect::from_min_size(rect.min, vec2(name_w, rect.height())), name, font, color, Align::Min);
+    let pill = Rect::from_min_size(pos2(rect.left() + name_w + 6.0, rect.center().y - 8.0), vec2(tag_w, 16.0));
+    ui.painter().rect_filled(pill, 8.0, p.accent_soft);
+    ui.painter().galley(pill.center() - tag.size() / 2.0, tag, p.accent_text);
+}
+
 /// A designed chat wallpaper (Pego "Mobile · Chat wallpaper"): settings key,
 /// names, the colour under it, and the image.
 pub struct Wallpaper {

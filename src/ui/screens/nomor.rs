@@ -43,6 +43,8 @@ pub enum Action {
     Rename(String),
     /// Choose the number's own chat wallpaper (#60).
     Wallpaper(String),
+    /// Make it the main number, or (`None`) have none (#138).
+    Main(Option<String>),
 }
 
 pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) -> Option<Action> {
@@ -341,6 +343,7 @@ fn table(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) 
     }
 
     let query = state.nomor_search.trim().to_lowercase();
+    let main = state.settings.main_number.clone();
     let mut action = None;
     for session in sessions {
         let connected = session.status == Status::Connected;
@@ -374,7 +377,7 @@ fn table(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) 
         let text_x = cols[0].left() + 40.0;
         let name = Rect::from_min_max(pos2(text_x, row.center().y - 18.0), pos2(cols[0].right(), row.center().y));
         let phone_rect = Rect::from_min_max(pos2(text_x, row.center().y), pos2(cols[0].right(), row.center().y + 16.0));
-        widgets::paint_text(ui, name, &session.name, fonts::ui(14.0, Weight::Medium), p.text, Align::Min);
+        widgets::paint_number_name(ui, name, &session.name, fonts::ui(14.0, Weight::Medium), p.text, main.as_deref() == Some(session.id.as_str()));
         widgets::paint_text(ui, phone_rect, &phone, fonts::mono(12.0), p.muted, Align::Min);
 
         let (_, color, label, detail) = describe(p, &session.status);
@@ -396,7 +399,7 @@ fn table(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) 
             ui.painter().rect_filled(cols[6].shrink2(vec2(0.0, 14.0)), theme::R_SM, p.raised);
         }
         icons::paint(ui, cols[6], "ellipsis", 16.0, p.muted);
-        if let Some(a) = row_menu(&menu, p, session) {
+        if let Some(a) = row_menu(&menu, p, session, main.as_deref() == Some(session.id.as_str())) {
             action = Some(a);
         }
     }
@@ -404,7 +407,7 @@ fn table(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) 
 }
 
 /// The menu a number's row opens: pairing, relink, unlink, remove.
-pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView) -> Option<Action> {
+pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView, main: bool) -> Option<Action> {
     let connected = session.status == Status::Connected;
     let mut action = None;
     egui::Popup::menu(anchor).show(|ui| {
@@ -417,6 +420,9 @@ pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView) -> 
         }
         if ui.button(tr("Chat wallpaper…", "Wallpaper chat…")).clicked() {
             action = Some(Action::Wallpaper(session.id.clone()));
+        }
+        if ui.button(if main { tr("Main number ✓", "Nomor utama ✓") } else { tr("Set as main number", "Jadikan nomor utama") }).clicked() {
+            action = Some(Action::Main((!main).then(|| session.id.clone())));
         }
         // Kept apart from the steps that unlink, so a slip does not relink.
         ui.separator();

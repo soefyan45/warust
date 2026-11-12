@@ -217,6 +217,8 @@ pub struct State {
     pub rename: Option<(String, String)>,
     /// "Chat wallpaper" dialog of a number (#60).
     pub number_wallpaper: Option<NumberWallpaperEdit>,
+    /// Asked from a menu: make this the main number, or have none (#138).
+    pub set_main: Option<Option<String>>,
     /// "Tautkan ulang" waiting for a yes: it deletes the number's keys.
     pub confirm_relink: Option<String>,
     /// The saved settings, for screens that show them (webhook per number).
@@ -315,6 +317,8 @@ pub struct App {
     seen: seen::Watch,
     /// The unread count last shown on the taskbar icon and the title.
     shown_unread: Option<u32>,
+    /// The Inbox was put on the main number at start, or nothing waits for it (#138).
+    main_applied: bool,
     /// A ready update was asked to install (once per download, #93).
     update_asked: bool,
     /// Numbers open in windows of their own (issue #28).
@@ -444,6 +448,7 @@ impl App {
             lock: privacy::Lock::default(),
             windows: Vec::new(),
             shown_unread: None,
+            main_applied: false,
             update_asked: false,
             tray: None,
             tray_made_for: None,
@@ -944,6 +949,40 @@ fn lock_choice(minutes: u32) -> usize {
 impl App {
     /// Saved, so the next start opens in the same theme.
     /// Changes the anti-peek options and saves them at once.
+    /// Makes `id` the main number, or (`None`) leaves none, and saves it (#138).
+    fn set_main(&mut self, id: Option<String>) {
+        let mut settings = (*self.settings).clone();
+        settings.main_number = id.clone();
+        if let Some(draft) = self.state.settings_form.draft.as_mut() {
+            draft.main_number = id;
+        }
+        self.settings = std::sync::Arc::new(settings.clone());
+        self.backend.send(Command::SaveSettings(settings));
+    }
+
+    /// Puts the Inbox on the main number once, as soon as its session has
+    /// loaded (#138). A number picked by hand before that wins, and an
+    /// unlinked main number leaves the Inbox on all numbers.
+    fn open_on_main(&mut self) {
+        if self.main_applied {
+            return;
+        }
+        let Some(main) = self.settings.main_number.clone() else {
+            self.main_applied = true;
+            return;
+        };
+        if self.state.inbox_scope.is_some() {
+            self.main_applied = true;
+            return;
+        }
+        if let Some(session) = self.sessions.iter().find(|s| s.id == main) {
+            if !matches!(session.status, Status::LoggedOut | Status::Banned(_)) {
+                self.state.inbox_scope = Some(main);
+            }
+            self.main_applied = true;
+        }
+    }
+
     fn set_privacy(&mut self, change: impl FnOnce(&mut backend::settings::Privacy)) {
         let mut settings = (*self.settings).clone();
         change(&mut settings.privacy);
@@ -1521,12 +1560,24 @@ impl eframe::App for App {
         }
         let snapshot = self.backend.snapshot();
         self.sessions = snapshot.sessions;
+        // The main number first in every list (#138).
+        if let Some(main) = snapshot.settings.main_number.as_deref() {
+            self.sessions.sort_by_key(|s| s.id != main);
+        }
+        // With a main number the Inbox opens on it, not on the remembered
+        // number (#138); the rest of the remembered view still comes back.
+        let main_set = snapshot.settings.main_number.is_some();
         let sessions = &self.sessions;
-        self.view.follow(self.screen, &mut self.state, |id| sessions.iter().any(|s| s.id == id));
+        self.view.follow(self.screen, &mut self.state, |id| !main_set && sessions.iter().any(|s| s.id == id));
         self.avatars = snapshot.avatars;
         self.state.full_avatars = snapshot.full_avatars;
         self.downloads = snapshot.downloads;
         self.settings = snapshot.settings;
+        self.open_on_main();
+        let asked = self.state.set_main.take().or_else(|| self.windows.iter_mut().find_map(|w| w.state.set_main.take()));
+        if let Some(id) = asked {
+            self.set_main(id);
+        }
         self.state.settings = self.settings.clone();
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
@@ -1662,9 +1713,9 @@ impl eframe::App for App {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 }
                 match self.screen {
-                Screen::Ringkasan if compact => summary_action = screens::ringkasan::compact(ui, &self.sessions, &self.webhooks),
+                Screen::Ringkasan if compact => summary_action = screens::ringkasan::compact(ui, &self.sessions, &self.webhooks, self.settings.main_number.as_deref()),
                 Screen::Ringkasan => summary_action = screens::ringkasan::show(ui, &mut self.state, &self.sessions, &self.webhooks),
-                Screen::Nomor if compact => action = screens::devices::compact(ui, &self.sessions),
+                Screen::Nomor if compact => action = screens::devices::compact(ui, &self.sessions, self.settings.main_number.as_deref()),
                 Screen::Nomor => action = screens::nomor::show(ui, &mut self.state, &self.sessions),
                 Screen::More => more_action = compact::more(ui, api_on, failed_hooks),
                 Screen::Status => {
@@ -1754,6 +1805,7 @@ impl eframe::App for App {
                 let name = self.sessions.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_default();
                 self.state.rename = Some((id, name));
             }
+            Some(screens::nomor::Action::Main(id)) => self.state.set_main = Some(id),
             Some(screens::nomor::Action::Wallpaper(id)) => {
                 if let Some(session) = self.sessions.iter().find(|s| s.id == id) {
                     self.state.number_wallpaper = Some(NumberWallpaperEdit::new(&self.settings, session));

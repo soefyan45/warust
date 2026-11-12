@@ -228,7 +228,7 @@ fn paint_tag(ui: &Ui, p: &Palette, right: f32, y: f32, status: &Status) {
 
 /// One number: icon tile, name, masked phone (or what it waits for) and its
 /// state tag. `divider` draws the line under it.
-pub fn device_row(ui: &mut Ui, session: &SessionView, divider: bool) -> Response {
+pub fn device_row(ui: &mut Ui, session: &SessionView, divider: bool, main: bool) -> Response {
     let p = theme::palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 72.0), Sense::click());
     if response.hovered() {
@@ -243,7 +243,7 @@ pub fn device_row(ui: &mut Ui, session: &SessionView, divider: bool) -> Response
     icons::paint(ui, Rect::from_center_size(tile.center(), vec2(20.0, 20.0)), icon, 20.0, icon_color);
     let left = tile.right() + 14.0;
     let right = rect.right() - 110.0;
-    widgets::paint_text(ui, Rect::from_min_max(pos2(left, rect.top() + 14.0), pos2(right, rect.top() + 36.0)), &session.name, fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
+    widgets::paint_number_name(ui, Rect::from_min_max(pos2(left, rect.top() + 14.0), pos2(right, rect.top() + 36.0)), &session.name, fonts::ui(16.0, Weight::SemiBold), p.text, main);
     let sub = match &session.phone {
         Some(phone) => phone.clone(),
         None if session.status == Status::Pairing => tr("Not scanned yet", "Belum dipindai").to_owned(),

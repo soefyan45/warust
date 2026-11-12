@@ -613,7 +613,7 @@ fn waited(secs: i64) -> String {
 
 /// Beranda in the phone layout (Pego `m5/Beranda`, `m3/Beranda`): today's
 /// messages, chats waiting for a reply, and the numbers.
-pub fn compact(ui: &mut Ui, sessions: &[SessionView], deliveries: &[HookDelivery]) -> Option<Action> {
+pub fn compact(ui: &mut Ui, sessions: &[SessionView], deliveries: &[HookDelivery], main: Option<&str>) -> Option<Action> {
     use crate::ui::compact::{self, PAD};
     let p = theme::palette(ui.ctx());
     let mut action = None;
@@ -715,7 +715,7 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView], deliveries: &[HookDelivery
                 }
                 let shown = sessions.len().min(4);
                 for (i, s) in sessions.iter().take(shown).enumerate() {
-                    if compact::device_row(ui, s, i + 1 < shown).clicked() {
+                    if compact::device_row(ui, s, i + 1 < shown, main == Some(s.id.as_str())).clicked() {
                         action = Some(Action::Devices);
                     }
                 }
