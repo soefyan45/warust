@@ -308,6 +308,36 @@ pub struct App {
     update_asked: bool,
     /// Numbers open in windows of their own (issue #28).
     windows: Vec<NumberWindow>,
+    /// The tray icon while "close to tray" is on (#134). `None` when it is
+    /// off or this desktop has no tray: closing the window then quits.
+    tray: Option<crate::tray::Tray>,
+    /// The setting and the language `tray` was last made for.
+    tray_made_for: Option<(bool, String)>,
+    /// What was picked on the tray icon, for `logic` to act on.
+    tray_asked: std::sync::Arc<TrayAsked>,
+    /// The main window was closed to the tray and nothing showed it since.
+    hidden: bool,
+    /// The app is ending for real (the tray's Quit, a restart into an
+    /// update), so this close is not turned into hiding.
+    quitting: bool,
+}
+
+/// What the tray icon asked for since `logic` last looked. Its callbacks run
+/// outside the UI's frame, on Linux on another thread.
+#[derive(Default)]
+struct TrayAsked {
+    open: std::sync::atomic::AtomicBool,
+    quit: std::sync::atomic::AtomicBool,
+}
+
+/// The app icon at the size of a tray icon.
+fn tray_icon() -> crate::tray::Icon {
+    let image = image::load_from_memory(include_bytes!("../../assets/app/warust-256.png"))
+        .expect("the bundled icon is a valid PNG")
+        .resize_exact(64, 64, image::imageops::FilterType::Lanczos3)
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+    crate::tray::Icon { rgba: image.into_raw(), width, height }
 }
 
 /// One number's inbox in its own OS window, with its own chat, composer and
@@ -380,6 +410,11 @@ impl App {
             windows: Vec::new(),
             shown_unread: None,
             update_asked: false,
+            tray: None,
+            tray_made_for: None,
+            tray_asked: Default::default(),
+            hidden: false,
+            quitting: false,
             state: State {
                 contact_panel: true,
                 // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
@@ -390,6 +425,88 @@ impl App {
                 ..State::default()
             },
         }
+    }
+
+    /// Unread messages on the taskbar/Dock icon and in the window title.
+    /// Muted chats keep their own count but not the icon's, as on the phone.
+    fn show_unread(&mut self, ctx: &egui::Context) {
+        let now = time::now();
+        let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).filter(|c| !c.is_muted(now)).map(|c| c.unread).sum();
+        if self.shown_unread != Some(unread) {
+            crate::platform::set_unread_badge(unread);
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(crate::platform::window_title(unread)));
+            self.shown_unread = Some(unread);
+        }
+    }
+
+    /// Keeps the tray icon in step with the "close to tray" setting and the
+    /// language of its menu (#134).
+    fn sync_tray(&mut self, ctx: &egui::Context, frame: &eframe::Frame) {
+        use std::sync::atomic::Ordering;
+        let want = (self.settings.close_to_tray, self.settings.language.clone());
+        if self.tray_made_for.as_ref() == Some(&want) {
+            return;
+        }
+        // The old icon goes before a new one is made: its menu is in the old
+        // language.
+        self.tray = None;
+        // Wayland can neither hide a window nor bring one back (winit says so
+        // by not knowing whether it is visible), so there the icon would lead
+        // nowhere: no icon, and closing the window quits.
+        let can_hide = cfg!(target_os = "macos") || frame.winit_window().is_some_and(|w| w.is_visible().is_some());
+        if !can_hide {
+            log::info!("this desktop cannot hide a window: closing it quits warust");
+        }
+        if want.0 && can_hide {
+            let labels = crate::tray::Labels {
+                tooltip: "warust".to_owned(),
+                open: tr("Open warust", "Buka warust").to_owned(),
+                quit: tr("Quit", "Keluar").to_owned(),
+            };
+            let (asked, ctx) = (self.tray_asked.clone(), ctx.clone());
+            let handler = move |event| {
+                match event {
+                    crate::tray::Event::Open => asked.open.store(true, Ordering::Relaxed),
+                    crate::tray::Event::Quit => asked.quit.store(true, Ordering::Relaxed),
+                }
+                // Runs `logic`, also while the window is hidden.
+                ctx.request_repaint();
+            };
+            self.tray = crate::tray::Tray::new(&tray_icon(), &labels, std::sync::Arc::new(handler));
+            if self.tray.is_none() {
+                log::info!("no tray icon on this desktop: closing the window quits warust");
+            }
+        }
+        // Also when there is no tray here, so it is not tried on every frame.
+        self.tray_made_for = Some(want);
+    }
+
+    /// Closes the main window to the tray (#134): warust keeps running.
+    fn hide_window(&mut self, ctx: &egui::Context) {
+        self.hidden = true;
+        // No chat is on screen any more, so the notifier holds none back.
+        self.backend.set_viewing(None);
+        self.viewing = None;
+        if !crate::platform::hide_app() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+        }
+    }
+
+    /// Brings the main window back from the tray, or up from behind.
+    fn show_window(&mut self, ctx: &egui::Context) {
+        self.hidden = false;
+        crate::platform::unhide_app();
+        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        ctx.request_repaint();
+    }
+
+    /// Ends the app for real: `logic` lets this close through.
+    fn quit(&mut self, ctx: &egui::Context) {
+        self.quitting = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        ctx.request_repaint();
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
@@ -609,7 +726,7 @@ impl App {
         }
         let (text, release, buttons) = match &update {
             UpdateState::Restarting => {
-                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                self.quit(ui.ctx());
                 return;
             }
             UpdateState::Available(r) if self.settings.updates.skipped != r.version => (
@@ -1312,12 +1429,42 @@ impl eframe::App for App {
         self.backend.close_notifications();
     }
 
-    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+    /// Runs before every `ui`, and on its own while the main window is hidden
+    /// in the tray (#134): whatever has to work without a window is here.
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        use std::sync::atomic::Ordering;
         // A clicked notification: bring the window up on that chat.
-        if let Some(chat) = self.backend.take_open_chat() {
+        let chat = self.backend.take_open_chat();
+        let open = self.tray_asked.open.swap(false, Ordering::Relaxed);
+        if chat.is_some() || open {
+            self.show_window(ctx);
+        }
+        if let Some(chat) = chat {
             self.state.open_chat_requested = Some(chat);
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(false));
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
+        if self.tray_asked.quit.swap(false, Ordering::Relaxed) {
+            self.quit(ctx);
+        }
+        // Closing the main window hides it while the tray icon is there to
+        // bring it back; without one, closing quits as before.
+        if ctx.input(|i| i.viewport().close_requested()) && !self.quitting && self.tray.is_some() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.hide_window(ctx);
+        }
+        if self.hidden {
+            // `ui` does not run now, and the Dock or taskbar icon is where
+            // new messages show.
+            self.sessions = self.backend.snapshot().sessions;
+            self.show_unread(ctx);
+        }
+    }
+
+    fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        // Drawn again, so on screen again: also after a click on the Dock
+        // icon, which shows the window without going through `show_window`.
+        // Not in the frame that closes it: `logic` has just hidden it.
+        if !ui.ctx().input(|i| i.viewport().close_requested()) {
+            self.hidden = false;
         }
         let snapshot = self.backend.snapshot();
         self.sessions = snapshot.sessions;
@@ -1340,6 +1487,7 @@ impl eframe::App for App {
         self.api = snapshot.api;
         crate::i18n::set(&self.settings.language);
         privacy::set(&self.settings.privacy);
+        self.sync_tray(ui.ctx(), frame);
         if ui.input_mut(|i| i.consume_shortcut(&egui::KeyboardShortcut::new(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, egui::Key::P))) {
             self.set_privacy(|p| p.enabled = !p.enabled);
         }
@@ -1589,17 +1737,10 @@ impl eframe::App for App {
             self.open_window(ui.ctx(), id);
         }
         let in_window = self.number_windows(ui.ctx());
-        // Unread messages on the taskbar/Dock icon and in the window title.
-        // Muted chats keep their own count but not the icon's, as on the phone.
-        let now = time::now();
-        let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).filter(|c| !c.is_muted(now)).map(|c| c.unread).sum();
-        if self.shown_unread != Some(unread) {
-            crate::platform::set_unread_badge(unread);
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(crate::platform::window_title(unread)));
-            self.shown_unread = Some(unread);
-        }
+        self.show_unread(ui.ctx());
         // The open chat in a focused window gets no notification.
-        let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);
+        // In the tray no chat is in front of the user, so its messages notify.
+        let focused = !self.hidden && ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);
         let viewing = if focused && self.screen == Screen::Inbox {
             self.state.inbox_session.clone().zip(self.state.chat_selected.clone())
         } else {

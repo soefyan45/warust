@@ -539,6 +539,19 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                     }
                 });
 
+                super::card(
+                    ui,
+                    tr("Window", "Jendela"),
+                    tr(
+                        "In the tray, numbers stay connected and the API, webhooks and notifications keep working. The tray icon opens warust again or quits it.",
+                        "Di tray, nomor tetap tersambung dan API, webhook, serta notifikasi tetap jalan. Ikon tray membuka warust lagi atau mengeluarkannya.",
+                    ),
+                    |ui| {
+                        let draft = form.draft.as_mut().expect("synced");
+                        widgets::toggle(ui, &mut draft.close_to_tray, tr("Closing the window keeps warust running in the tray", "Menutup jendela membuat warust tetap jalan di tray"));
+                    },
+                );
+
                 super::card(ui, "Data", tr("Sessions, chats, media, and settings are stored on this computer.", "Sesi, chat, media, dan pengaturan disimpan di komputer ini."), |ui| {
                     line(ui, tr("Data folder", "Folder data"), |ui| {
                         ui.add(egui::Label::new(rich_mono(&data_dir.display().to_string(), 12.0, p.text)).truncate());
