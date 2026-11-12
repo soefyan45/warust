@@ -133,6 +133,8 @@ pub struct State {
     /// already asked for this run.
     pub typing_now: std::sync::Arc<std::collections::HashMap<String, backend::Typing>>,
     pub presence_watched: std::collections::HashSet<(String, String)>,
+    /// Contacts' online state (from the backend), keyed like `typing_now`.
+    pub presence_now: std::sync::Arc<std::collections::HashMap<String, backend::Presence>>,
     /// Group members by `session|group` (from the backend), and the groups
     /// whose members were already asked for this run.
     pub members_now: std::sync::Arc<std::collections::HashMap<String, Vec<backend::Member>>>,
@@ -300,6 +302,10 @@ pub struct App {
     pairing_id: Option<String>,
     /// The chat last reported to the notifier as on screen.
     viewing: Option<(String, String)>,
+    /// Whether a warust window was in front when last told to the backend.
+    active: Option<bool>,
+    /// The backend's `presence_epoch` last acted on.
+    presence_epoch: u64,
     /// Marks the chat on screen read as messages arrive in it.
     seen: seen::Watch,
     /// The unread count last shown on the taskbar icon and the title.
@@ -375,6 +381,8 @@ impl App {
             // Dev aid: WARUST_PAIR=<session id> opens its pairing screen.
             pairing_id: std::env::var("WARUST_PAIR").ok(),
             viewing: None,
+            active: None,
+            presence_epoch: 0,
             seen: seen::Watch::default(),
             lock: privacy::Lock::default(),
             windows: Vec::new(),
@@ -905,6 +913,7 @@ impl App {
                 continue;
             };
             w.state.settings = self.settings.clone();
+            w.state.presence_now = self.state.presence_now.clone();
             let builder = egui::ViewportBuilder::default()
                 .with_title(format!("{} · warust", session.name))
                 .with_app_id("warust")
@@ -1328,6 +1337,17 @@ impl eframe::App for App {
         self.state.settings = self.settings.clone();
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
+        self.state.presence_now = snapshot.presence;
+        if self.presence_epoch != snapshot.presence_epoch {
+            // A number went online (a window came to the front, the setting
+            // was turned on, it reconnected). WhatsApp says who is online
+            // only from then on: ask again for the open chats.
+            self.presence_epoch = snapshot.presence_epoch;
+            self.state.presence_watched.clear();
+            for w in &mut self.windows {
+                w.state.presence_watched.clear();
+            }
+        }
         self.state.members_now = snapshot.members;
         self.state.groups_now = snapshot.groups;
         self.state.call_now = snapshot.call;
@@ -1597,6 +1617,13 @@ impl eframe::App for App {
             crate::platform::set_unread_badge(unread);
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(crate::platform::window_title(unread)));
             self.shown_unread = Some(unread);
+        }
+        // The numbers are online while one of warust's windows is in front and
+        // not behind the lock cover (the backend checks the setting).
+        let active = !self.lock.locked && ui.ctx().input(|i| i.raw.viewports.values().any(|v| v.focused == Some(true)));
+        if self.active != Some(active) {
+            self.active = Some(active);
+            self.backend.send(Command::Active { active });
         }
         // The open chat in a focused window gets no notification.
         let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);

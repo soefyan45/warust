@@ -18,7 +18,8 @@ use whatsapp_rust::wacore::proto_helpers::build_quote_context_with_info;
 use whatsapp_rust::wacore::store::DevicePropsOverride;
 use whatsapp_rust::wacore::types::message::AddressingMode;
 use whatsapp_rust::wacore_binary::JidExt;
-use whatsapp_rust::wacore::types::presence::{ChatActivity, ReceiptType};
+use whatsapp_rust::features::PresencePolicy;
+use whatsapp_rust::wacore::types::presence::{ChatActivity, PresenceStatus, ReceiptType};
 
 use super::media;
 use crate::i18n::tr;
@@ -184,6 +185,22 @@ impl Running {
         tokio::spawn(async move {
             if let Err(e) = client.presence().subscribe(jid).await {
                 log::debug!("session {id}: presence subscribe failed: {e}");
+            }
+        });
+    }
+
+    /// Shows this number as online, or (with `false`) offline, to contacts.
+    /// Best effort: before the connection is up it fails, and `Connected`
+    /// announces it again. Once "online" is out, the UI is told to ask for
+    /// its open chats' presence: asked earlier, WhatsApp would not answer.
+    pub fn set_online(&self, id: &str, online: bool, state: &Updater) {
+        let (client, id, state) = (self.client.clone(), id.to_owned(), state.clone());
+        tokio::spawn(async move {
+            let sent = if online { client.presence().set_available().await } else { client.presence().set_unavailable().await };
+            match sent {
+                Ok(()) if online => state.presence_ready(),
+                Ok(()) => {}
+                Err(e) => log::debug!("session {id}: presence not sent: {e}"),
             }
         });
     }
@@ -608,6 +625,11 @@ pub async fn start(id: &str, registry: &Registry, state: &Updater, chats: Arc<Mu
     let shown = registry.device(id);
     let bot = Bot::builder()
         .with_backend(device)
+        // warust says when the number is online: while a window is in front
+        // (`Command::Active`). The library's own announcement on connect would
+        // leave it online around the clock, which also keeps the phone from
+        // notifying.
+        .with_presence_policy(PresencePolicy::Manual)
         .with_device_props(
             DevicePropsOverride::new()
                 // A browser type is listed as "<Browser> (<OS>)": give it the real OS.
@@ -1022,6 +1044,14 @@ async fn on_event(
             v.status = Status::Failed(crate::trf!("Pairing code failed: {e:?}", "Kode pairing gagal: {e:?}"));
         }),
         Event::Connected(_) => {
+            if state.online_wanted() {
+                // A new connection knows nothing of what was asked on the
+                // last one: the open chats' presence is asked again.
+                match client.presence().set_available().await {
+                    Ok(()) => state.presence_ready(),
+                    Err(e) => log::debug!("session {id}: presence not sent: {e}"),
+                }
+            }
             fetch_group_names(state, id, chats, client.clone());
             sync_mutes_once(state, id, chats, client.clone());
             sync_contacts_once(state, id, chats, client.clone());
@@ -1046,11 +1076,22 @@ async fn on_event(
                 restore_queue(id, queue, state, chats);
             }
         }
-        Event::Disconnected(_) => state.update(id, |v| {
-            if v.status == Status::Connected {
-                v.status = Status::Reconnecting;
-            }
-        }),
+        Event::Disconnected(_) => {
+            state.clear_presence(Some(id));
+            state.update(id, |v| {
+                if v.status == Status::Connected {
+                    v.status = Status::Reconnecting;
+                }
+            });
+        }
+        Event::Presence(update) => {
+            let Some(book) = state.book(id) else {
+                return;
+            };
+            let chat = book.normalize(&store::bare(&update.from.to_string()));
+            let presence = super::Presence { online: update.status == PresenceStatus::Available, last_seen: update.last_seen.map(|at| at.timestamp()) };
+            state.set_presence(id, &chat, presence);
+        }
         Event::ChatPresence(update) => {
             let chat = update.source.chat.to_string();
             if chat.starts_with("status@") {

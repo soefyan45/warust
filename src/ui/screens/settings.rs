@@ -465,6 +465,17 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                         p.muted,
                     ));
                     ui.add_space(6.0);
+                    widgets::toggle(ui, &mut draft.share_online, tr("Show when you are online", "Tampilkan saat Anda online"));
+                    ui.label(rich(
+                        tr(
+                            "On: contacts see your number online while a warust window is in front, and you see when they are online. This applies to every linked number. Off: neither, as on WhatsApp.",
+                            "Menyala: kontak melihat nomor Anda online selama jendela warust di depan, dan Anda melihat saat mereka online. Berlaku untuk semua nomor yang tertaut. Mati: keduanya tidak, seperti di WhatsApp.",
+                        ),
+                        12.0,
+                        Weight::Regular,
+                        p.muted,
+                    ));
+                    ui.add_space(6.0);
                     widgets::toggle(ui, &mut draft.typing, tr("Show \"typing\" to the other person while replying", "Tampilkan \"sedang mengetik\" ke lawan chat saat membalas"));
                     ui.label(rich(
                         tr("Status seen receipts are set per number on the Status page.", "Tanda dilihat status diatur per nomor di halaman Status."),
