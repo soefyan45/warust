@@ -1306,12 +1306,46 @@ fn media_box(media: &Media, wrap: f32) -> MediaBox {
     let Some(source) = source else {
         return MediaBox::Card;
     };
-    let width = wrap.min(260.0);
-    let height = match (media.width, media.height) {
-        (Some(w), Some(h)) if w > 0 => width * h as f32 / w as f32,
-        _ => width * 0.75,
+    // The size the message states, else the one in the file's own header.
+    let pixels = match (media.width, media.height) {
+        (Some(w), Some(h)) if w > 0 && h > 0 => Some((w, h)),
+        _ => widgets::picture_size(&source),
     };
-    MediaBox::Picture(source, vec2(width, height.clamp(80.0, 320.0)))
+    let size = picture_box(wrap.min(260.0), pixels);
+    MediaBox::Picture(source, size)
+}
+
+/// The tallest and shortest a picture's box gets in a bubble, and how narrow
+/// a tall picture may make it before it is cropped instead.
+const PICTURE_MAX_H: f32 = 320.0;
+const PICTURE_MIN_H: f32 = 80.0;
+const PICTURE_MIN_W: f32 = 180.0;
+
+/// A picture's box in a bubble (#126): the picture's own shape where it fits
+/// between 80 and 320 px tall. A taller one first gets narrower (down to
+/// 180 px), then is cropped to the box; a very wide one is cropped at 80 px
+/// tall. Never stretched: see `cover_uv`. 4:3 while its size is unknown.
+fn picture_box(width: f32, pixels: Option<(u32, u32)>) -> egui::Vec2 {
+    let Some((w, h)) = pixels.filter(|(w, h)| *w > 0 && *h > 0) else {
+        return vec2(width, width * 0.75);
+    };
+    let shape = h as f32 / w as f32;
+    let width = if width * shape > PICTURE_MAX_H { (PICTURE_MAX_H / shape).clamp(PICTURE_MIN_W.min(width), width) } else { width };
+    vec2(width, (width * shape).clamp(PICTURE_MIN_H, PICTURE_MAX_H))
+}
+
+/// The part of a `pixels`-sized picture that fills `size` without stretching:
+/// the middle of it, cut on the sides that do not fit (#126).
+fn cover_uv(pixels: (u32, u32), size: egui::Vec2) -> Rect {
+    let picture = pixels.0 as f32 / pixels.1.max(1) as f32;
+    let room = size.x / size.y.max(1.0);
+    if picture > room {
+        let keep = room / picture;
+        Rect::from_min_max(pos2((1.0 - keep) / 2.0, 0.0), pos2((1.0 + keep) / 2.0, 1.0))
+    } else {
+        let keep = picture / room;
+        Rect::from_min_max(pos2(0.0, (1.0 - keep) / 2.0), pos2(1.0, (1.0 + keep) / 2.0))
+    }
 }
 
 /// The bubble text without the `[Gambar]`-style label the media already shows.
@@ -1746,7 +1780,9 @@ fn paint_media(
     match shown {
         MediaBox::Picture(source, _) => {
             if let Some(uri) = widgets::picture_uri(ui.ctx(), source) {
-                egui::Image::from_uri(uri).corner_radius(R_MD).fit_to_exact_size(rect.size()).paint_at(ui, rect);
+                // Cropped to the box, never stretched (#126).
+                let uv = widgets::picture_size(source).map_or(Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), |px| cover_uv(px, rect.size()));
+                egui::Image::from_uri(uri).uv(uv).corner_radius(R_MD).fit_to_exact_size(rect.size()).paint_at(ui, rect);
             } else {
                 ui.painter().rect_filled(rect, R_MD, p.border);
             }
@@ -4911,5 +4947,80 @@ mod enter_tests {
         assert!(sends(Modifiers::NONE));
         assert!(!sends(Modifiers::SHIFT), "Shift+Enter is a new line");
         assert!(!sends(Modifiers::ALT));
+    }
+}
+
+#[cfg(test)]
+mod picture_box_tests {
+    use super::*;
+
+    #[test]
+    fn a_tall_screenshot_gets_narrower_then_cropped() {
+        // A 9:19 phone screenshot used to be squeezed into 260x320 (#126);
+        // uncapped it would be about 550 px tall.
+        let size = picture_box(260.0, Some((1080, 2280)));
+        assert_eq!(size, vec2(PICTURE_MIN_W, PICTURE_MAX_H));
+        // What shows is its middle, full width, with nothing stretched.
+        let uv = cover_uv((1080, 2280), size);
+        assert_eq!((uv.min.x, uv.max.x), (0.0, 1.0));
+        assert!(uv.min.y > 0.0 && (uv.min.y + uv.max.y - 1.0).abs() < 0.001, "{uv:?}");
+    }
+
+    #[test]
+    fn a_picture_that_fits_keeps_its_shape() {
+        let size = picture_box(260.0, Some((1000, 1000)));
+        assert_eq!(size, vec2(260.0, 260.0));
+        assert_eq!(cover_uv((1000, 1000), size), Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)));
+    }
+
+    #[test]
+    fn a_long_screenshot_stays_one_screen_tall() {
+        let size = picture_box(260.0, Some((1080, 5000)));
+        assert_eq!(size, vec2(PICTURE_MIN_W, PICTURE_MAX_H));
+    }
+
+    #[test]
+    fn a_wide_panorama_is_cropped_at_the_minimum_height() {
+        let size = picture_box(260.0, Some((4000, 300)));
+        assert_eq!(size, vec2(260.0, PICTURE_MIN_H));
+        let uv = cover_uv((4000, 300), size);
+        assert_eq!((uv.min.y, uv.max.y), (0.0, 1.0));
+        assert!(uv.min.x > 0.0, "{uv:?}");
+    }
+
+    #[test]
+    fn a_narrow_bubble_never_widens_the_picture() {
+        let size = picture_box(150.0, Some((1080, 2280)));
+        assert_eq!(size.x, 150.0);
+        assert!(size.y <= PICTURE_MAX_H);
+    }
+
+    #[test]
+    fn an_unknown_size_is_four_by_three() {
+        assert_eq!(picture_box(260.0, None), vec2(260.0, 195.0));
+        assert_eq!(picture_box(260.0, Some((0, 0))), vec2(260.0, 195.0));
+    }
+
+    #[test]
+    fn a_message_without_a_size_uses_the_files_own() {
+        let file = std::env::temp_dir().join(format!("warust-picture-box-{}.png", std::process::id()));
+        image::RgbImage::new(90, 190).save(&file).expect("writes");
+        let media = Media {
+            kind: "image".into(),
+            name: None,
+            size: None,
+            width: None,
+            height: None,
+            thumb: None,
+            file: Some(file.clone()),
+            seconds: None,
+            waveform: Vec::new(),
+            voice: false,
+            raw: whatsapp_rust::serde_json::Value::Null,
+        };
+        let MediaBox::Picture(_, size) = media_box(&media, 400.0) else { panic!("a picture box") };
+        let _ = std::fs::remove_file(&file);
+        // 90x190 is tall: narrower, then capped like any tall picture.
+        assert_eq!(size, vec2(PICTURE_MIN_W, PICTURE_MAX_H));
     }
 }
