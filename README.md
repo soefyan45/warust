@@ -66,6 +66,10 @@ Also: color emoji, sending photos/videos/documents/stickers, voice message recor
 desktop notifications (click to open the chat), two templates (Forest, and Classic dark/light), and a phone layout when the window
 is shrunk below 1100 px.
 
+Closing the window keeps warust running behind a tray icon (the menu bar on macOS), so numbers stay connected and the API,
+webhooks and notifications keep working; the icon opens the window again or quits. Settings → Window turns this off. On a Linux
+desktop without a tray (GNOME without the AppIndicator extension), closing the window quits as usual.
+
 ## Install
 
 Download from [Releases](https://github.com/soefyan45/warust/releases/latest):

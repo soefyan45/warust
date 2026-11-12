@@ -49,6 +49,7 @@ Untuk merekam dan meng-encode pesan suara:
   dan [byteorder](https://github.com/BurntSushi/byteorder) (Unlicense OR MIT).
 - [cmake](https://github.com/rust-lang/cmake-rs) (MIT OR Apache-2.0), hanya alat build untuk libopus;
   tidak ikut di dalam binary.
+- [ksni](https://github.com/iovxw/ksni), Unlicense: ikon tray di Linux (StatusNotifierItem lewat D-Bus).
 
 ### libopus
 

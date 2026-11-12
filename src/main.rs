@@ -7,6 +7,7 @@
 mod backend;
 mod i18n;
 mod platform;
+mod tray;
 mod ui;
 
 fn main() -> eframe::Result<()> {
