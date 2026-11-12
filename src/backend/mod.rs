@@ -143,6 +143,10 @@ pub struct Shared {
     pub presence: Arc<HashMap<String, Presence>>,
     /// A warust window is in front (and not locked): the numbers are "online".
     pub active: bool,
+    /// Goes up each time a number has announced itself online. WhatsApp tells
+    /// who is online only from then on, so the UI asks again for the chats
+    /// it has open.
+    pub presence_epoch: u64,
     /// Group members by `session|group` (normalized JID), from `Command::GroupMembers`.
     pub members: Arc<HashMap<String, Vec<Member>>>,
     /// A group's details for the contact panel (#91), by the same key.
@@ -221,6 +225,37 @@ pub struct Presence {
 /// is in front.
 pub fn online_wanted(share: bool, active: bool) -> bool {
     share && active
+}
+
+/// How long the windows must stay out of front before the numbers go
+/// offline. Shorter absences (a file dialog, a glance at another app) would
+/// have contacts see online/offline flips.
+const AWAY_DELAY: Duration = Duration::from_secs(2);
+
+/// Holds back "offline" until the windows have been away for `AWAY_DELAY`.
+/// Each time they come to the front or leave it is a turn; a leave settles
+/// only if no other turn followed it.
+#[derive(Default)]
+struct Away {
+    turn: u64,
+}
+
+impl Away {
+    /// A window came to the front: a leave still waiting is void.
+    fn front(&mut self) {
+        self.turn += 1;
+    }
+
+    /// The windows left the front: the turn to settle after the delay.
+    fn left(&mut self) -> u64 {
+        self.turn += 1;
+        self.turn
+    }
+
+    /// Whether the leave of `turn` still stands.
+    fn settled(&self, turn: u64) -> bool {
+        self.turn == turn
+    }
 }
 
 /// A contact typing (or recording a voice note) in a chat.
@@ -309,6 +344,9 @@ pub enum Command {
     /// A warust window came to the front (or the last one left it): the
     /// numbers go online (or offline), if the settings share it.
     Active { active: bool },
+    /// From inside the backend: `AWAY_DELAY` has passed since the windows
+    /// left the front on turn `turn` (see `Away`).
+    AwaySettled { turn: u64 },
     /// Show (or stop showing) "recording audio" on the contact's side while a
     /// voice note is recorded for this chat.
     RecordingAudio { id: String, chat: String, on: bool },
@@ -595,6 +633,15 @@ impl Updater {
         self.shared.lock().map(|s| online_wanted(s.settings.share_online, s.active)).unwrap_or(false)
     }
 
+    /// A number has just announced itself online: has the UI ask again for
+    /// the presence of its open chats.
+    pub(crate) fn presence_ready(&self) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.presence_epoch += 1;
+        }
+        self.ctx.request_repaint();
+    }
+
     /// Records a contact's online state in a chat.
     pub(crate) fn set_presence(&self, session: &str, chat: &str, presence: Presence) {
         if let Ok(mut shared) = self.shared.lock() {
@@ -759,10 +806,18 @@ fn unread_incoming(book: &Book, chat: &str) -> Vec<(String, String)> {
 fn announce_online(state: &Updater, running: &HashMap<String, Running>) {
     let online = state.online_wanted();
     for (id, r) in running {
-        r.set_online(id, online);
+        r.set_online(id, online, state);
     }
     if !online {
         state.clear_presence(None);
+    }
+}
+
+/// Records whether a window is in front and, when that changed, announces it.
+fn set_active(state: &Updater, running: &HashMap<String, Running>, active: bool) {
+    let changed = state.shared.lock().map(|mut s| std::mem::replace(&mut s.active, active) != active).unwrap_or(false);
+    if changed {
+        announce_online(state, running);
     }
 }
 
@@ -811,6 +866,7 @@ async fn run(
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Pictures asked for a number not running yet, sent once it runs (#116).
     let mut waiting_avatars: HashMap<String, Vec<String>> = HashMap::new();
+    let mut away = Away::default();
     loop {
         waiting_avatars.retain(|id, jids| match running.get(id) {
             Some(r) => {
@@ -1134,10 +1190,20 @@ async fn run(
                     }
                 }
             }
-            Command::Active { active } => {
-                let changed = state.shared.lock().map(|mut s| std::mem::replace(&mut s.active, active) != active).unwrap_or(false);
-                if changed {
-                    announce_online(&state, &running);
+            Command::Active { active: true } => {
+                away.front();
+                set_active(&state, &running, true);
+            }
+            Command::Active { active: false } => {
+                let (turn, state) = (away.left(), state.clone());
+                tokio::spawn(async move {
+                    tokio::time::sleep(AWAY_DELAY).await;
+                    state.send(Command::AwaySettled { turn });
+                });
+            }
+            Command::AwaySettled { turn } => {
+                if away.settled(turn) {
+                    set_active(&state, &running, false);
                 }
             }
             Command::Typing { id, chat, typing } => {
@@ -1243,5 +1309,25 @@ async fn run(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_short_absence_does_not_go_offline() {
+        let mut away = Away::default();
+        // A file dialog takes the front, then the window has it back.
+        let left = away.left();
+        away.front();
+        assert!(!away.settled(left), "back before the delay ran out");
+        // Left twice in a row: only the last leave counts.
+        let first = away.left();
+        away.front();
+        let second = away.left();
+        assert!(!away.settled(first));
+        assert!(away.settled(second), "still away when the delay ran out");
     }
 }

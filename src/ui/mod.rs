@@ -304,6 +304,8 @@ pub struct App {
     viewing: Option<(String, String)>,
     /// Whether a warust window was in front when last told to the backend.
     active: Option<bool>,
+    /// The backend's `presence_epoch` last acted on.
+    presence_epoch: u64,
     /// Marks the chat on screen read as messages arrive in it.
     seen: seen::Watch,
     /// The unread count last shown on the taskbar icon and the title.
@@ -380,6 +382,7 @@ impl App {
             pairing_id: std::env::var("WARUST_PAIR").ok(),
             viewing: None,
             active: None,
+            presence_epoch: 0,
             seen: seen::Watch::default(),
             lock: privacy::Lock::default(),
             windows: Vec::new(),
@@ -1335,6 +1338,16 @@ impl eframe::App for App {
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
         self.state.presence_now = snapshot.presence;
+        if self.presence_epoch != snapshot.presence_epoch {
+            // A number went online (a window came to the front, the setting
+            // was turned on, it reconnected). WhatsApp says who is online
+            // only from then on: ask again for the open chats.
+            self.presence_epoch = snapshot.presence_epoch;
+            self.state.presence_watched.clear();
+            for w in &mut self.windows {
+                w.state.presence_watched.clear();
+            }
+        }
         self.state.members_now = snapshot.members;
         self.state.groups_now = snapshot.groups;
         self.state.call_now = snapshot.call;
@@ -1611,14 +1624,6 @@ impl eframe::App for App {
         if self.active != Some(active) {
             self.active = Some(active);
             self.backend.send(Command::Active { active });
-            if active {
-                // WhatsApp says who is online only while we are: ask again
-                // for the open chats.
-                self.state.presence_watched.clear();
-                for w in &mut self.windows {
-                    w.state.presence_watched.clear();
-                }
-            }
         }
         // The open chat in a focused window gets no notification.
         let focused = ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);

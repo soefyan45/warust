@@ -191,13 +191,16 @@ impl Running {
 
     /// Shows this number as online, or (with `false`) offline, to contacts.
     /// Best effort: before the connection is up it fails, and `Connected`
-    /// announces it again.
-    pub fn set_online(&self, id: &str, online: bool) {
-        let (client, id) = (self.client.clone(), id.to_owned());
+    /// announces it again. Once "online" is out, the UI is told to ask for
+    /// its open chats' presence: asked earlier, WhatsApp would not answer.
+    pub fn set_online(&self, id: &str, online: bool, state: &Updater) {
+        let (client, id, state) = (self.client.clone(), id.to_owned(), state.clone());
         tokio::spawn(async move {
             let sent = if online { client.presence().set_available().await } else { client.presence().set_unavailable().await };
-            if let Err(e) = sent {
-                log::debug!("session {id}: presence not sent: {e}");
+            match sent {
+                Ok(()) if online => state.presence_ready(),
+                Ok(()) => {}
+                Err(e) => log::debug!("session {id}: presence not sent: {e}"),
             }
         });
     }
@@ -1042,8 +1045,11 @@ async fn on_event(
         }),
         Event::Connected(_) => {
             if state.online_wanted() {
-                if let Err(e) = client.presence().set_available().await {
-                    log::debug!("session {id}: presence not sent: {e}");
+                // A new connection knows nothing of what was asked on the
+                // last one: the open chats' presence is asked again.
+                match client.presence().set_available().await {
+                    Ok(()) => state.presence_ready(),
+                    Err(e) => log::debug!("session {id}: presence not sent: {e}"),
                 }
             }
             fetch_group_names(state, id, chats, client.clone());
