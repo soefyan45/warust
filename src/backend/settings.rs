@@ -193,6 +193,9 @@ pub struct Settings {
     /// Opening a chat sends read receipts (blue ticks) and syncs "read" to
     /// the phone. Off by default (it only clears the local badge).
     pub send_read: bool,
+    /// Contacts see "online" while a warust window is in front (and, as
+    /// WhatsApp only tells those who share theirs, we see them online too).
+    pub share_online: bool,
     /// UI language: `en` (the default, also for older files) or `id`.
     pub language: String,
     /// Chat background: `auto` (the template's own), one of the designed
@@ -250,6 +253,7 @@ impl Default for Settings {
             notify: Notify::default(),
             typing: true,
             send_read: false,
+            share_online: true,
             language: crate::i18n::EN.to_owned(),
             wallpaper: "auto".to_owned(),
             wallpaper_file: String::new(),
@@ -355,6 +359,15 @@ mod tests {
         assert!(!old.api.enabled && old.api.key.starts_with("wr_"));
         assert_eq!(old.sending.gap(), Duration::from_secs(4));
         assert_eq!(Sending { gap_secs: 1, jitter_secs: 0 }.gap(), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn online_is_shared_unless_turned_off() {
+        assert!(Settings::default().share_online);
+        let old: Settings = serde_json::from_str(r#"{"typing":false}"#).unwrap();
+        assert!(old.share_online, "a file from before the option");
+        let off: Settings = serde_json::from_str(r#"{"share_online":false}"#).unwrap();
+        assert!(!off.share_online);
     }
 
     #[test]

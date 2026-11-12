@@ -133,6 +133,8 @@ pub struct State {
     /// already asked for this run.
     pub typing_now: std::sync::Arc<std::collections::HashMap<String, backend::Typing>>,
     pub presence_watched: std::collections::HashSet<(String, String)>,
+    /// Contacts' online state (from the backend), keyed like `typing_now`.
+    pub presence_now: std::sync::Arc<std::collections::HashMap<String, backend::Presence>>,
     /// Group members by `session|group` (from the backend), and the groups
     /// whose members were already asked for this run.
     pub members_now: std::sync::Arc<std::collections::HashMap<String, Vec<backend::Member>>>,
@@ -300,6 +302,10 @@ pub struct App {
     pairing_id: Option<String>,
     /// The chat last reported to the notifier as on screen.
     viewing: Option<(String, String)>,
+    /// Whether a warust window was in front when last told to the backend.
+    active: Option<bool>,
+    /// The backend's `presence_epoch` last acted on.
+    presence_epoch: u64,
     /// Marks the chat on screen read as messages arrive in it.
     seen: seen::Watch,
     /// The unread count last shown on the taskbar icon and the title.
@@ -405,6 +411,8 @@ impl App {
             // Dev aid: WARUST_PAIR=<session id> opens its pairing screen.
             pairing_id: std::env::var("WARUST_PAIR").ok(),
             viewing: None,
+            active: None,
+            presence_epoch: 0,
             seen: seen::Watch::default(),
             lock: privacy::Lock::default(),
             windows: Vec::new(),
@@ -481,9 +489,42 @@ impl App {
         self.tray_made_for = Some(want);
     }
 
+    /// Installs a downloaded update once nothing is going on (no call, empty
+    /// queues, no recording, nothing typed), and quits for the restart. Runs
+    /// from the banner and, while warust waits in the tray where `ui` does
+    /// not run, from `logic` (#93, #134).
+    fn install_when_idle(&mut self, ctx: &egui::Context) {
+        use backend::update::UpdateState;
+        match &self.state.update {
+            UpdateState::Restarting => {
+                self.update_asked = false;
+                self.quit(ctx);
+            }
+            UpdateState::Ready(_) => {
+                let idle = self.state.call_now.is_none()
+                    && self.sessions.iter().all(|s| s.queue == 0)
+                    && self.state.voice.is_none()
+                    && self.state.composer.trim().is_empty();
+                if idle && !self.update_asked {
+                    self.update_asked = true;
+                    self.backend.send(Command::InstallUpdate);
+                }
+                // Looks again for an idle moment even when nothing repaints.
+                ctx.request_repaint_after(std::time::Duration::from_secs(5));
+            }
+            _ => self.update_asked = false,
+        }
+    }
+
     /// Closes the main window to the tray (#134): warust keeps running.
     fn hide_window(&mut self, ctx: &egui::Context) {
         self.hidden = true;
+        // No window is in front now: the numbers go offline (#131), as `ui`,
+        // which would notice, does not run while hidden.
+        if self.active != Some(false) {
+            self.active = Some(false);
+            self.backend.send(Command::Active { active: false });
+        }
         // No chat is on screen any more, so the notifier holds none back.
         self.backend.set_viewing(None);
         self.viewing = None;
@@ -720,15 +761,10 @@ impl App {
     /// installs, and the window closes for warust to start again.
     fn update_banner(&mut self, ui: &mut Ui) {
         use backend::update::UpdateState;
+        self.install_when_idle(ui.ctx());
         let update = self.state.update.clone();
-        if !matches!(update, UpdateState::Ready(_)) {
-            self.update_asked = false;
-        }
         let (text, release, buttons) = match &update {
-            UpdateState::Restarting => {
-                self.quit(ui.ctx());
-                return;
-            }
+            UpdateState::Restarting => return,
             UpdateState::Available(r) if self.settings.updates.skipped != r.version => (
                 crate::trf!("warust {} is available (you have {})", "warust {} sudah tersedia (terpasang {})", r.version, backend::update::current()),
                 r.clone(),
@@ -737,16 +773,6 @@ impl App {
             UpdateState::Downloading(r) => (crate::trf!("Downloading warust {}…", "Mengunduh warust {}…", r.version), r.clone(), false),
             UpdateState::Installing(r) => (crate::trf!("Installing warust {}; warust restarts by itself", "Memasang warust {}; warust akan mulai ulang sendiri", r.version), r.clone(), false),
             UpdateState::Ready(r) => {
-                let idle = self.state.call_now.is_none()
-                    && self.sessions.iter().all(|s| s.queue == 0)
-                    && self.state.voice.is_none()
-                    && self.state.composer.trim().is_empty();
-                if idle && !self.update_asked {
-                    self.update_asked = true;
-                    self.backend.send(Command::InstallUpdate);
-                }
-                // Looks again for an idle moment even when nothing repaints.
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs(5));
                 (crate::trf!("warust {} is ready and installs once warust is idle", "warust {} siap dan dipasang saat warust tidak dipakai", r.version), r.clone(), false)
             }
             _ => return,
@@ -1022,6 +1048,7 @@ impl App {
                 continue;
             };
             w.state.settings = self.settings.clone();
+            w.state.presence_now = self.state.presence_now.clone();
             let builder = egui::ViewportBuilder::default()
                 .with_title(format!("{} · warust", session.name))
                 .with_app_id("warust")
@@ -1454,8 +1481,13 @@ impl eframe::App for App {
         if self.hidden {
             // `ui` does not run now, and the Dock or taskbar icon is where
             // new messages show.
-            self.sessions = self.backend.snapshot().sessions;
+            let snapshot = self.backend.snapshot();
+            self.sessions = snapshot.sessions;
+            self.state.call_now = snapshot.call;
+            self.state.update = snapshot.update;
             self.show_unread(ctx);
+            // A downloaded update still installs while warust is in the tray.
+            self.install_when_idle(ctx);
         }
     }
 
@@ -1475,6 +1507,17 @@ impl eframe::App for App {
         self.state.settings = self.settings.clone();
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
+        self.state.presence_now = snapshot.presence;
+        if self.presence_epoch != snapshot.presence_epoch {
+            // A number went online (a window came to the front, the setting
+            // was turned on, it reconnected). WhatsApp says who is online
+            // only from then on: ask again for the open chats.
+            self.presence_epoch = snapshot.presence_epoch;
+            self.state.presence_watched.clear();
+            for w in &mut self.windows {
+                w.state.presence_watched.clear();
+            }
+        }
         self.state.members_now = snapshot.members;
         self.state.groups_now = snapshot.groups;
         self.state.call_now = snapshot.call;
@@ -1738,6 +1781,13 @@ impl eframe::App for App {
         }
         let in_window = self.number_windows(ui.ctx());
         self.show_unread(ui.ctx());
+        // The numbers are online while one of warust's windows is in front and
+        // not behind the lock cover (the backend checks the setting).
+        let active = !self.lock.locked && ui.ctx().input(|i| i.raw.viewports.values().any(|v| v.focused == Some(true)));
+        if self.active != Some(active) {
+            self.active = Some(active);
+            self.backend.send(Command::Active { active });
+        }
         // The open chat in a focused window gets no notification.
         // In the tray no chat is in front of the user, so its messages notify.
         let focused = !self.hidden && ui.ctx().input(|i| i.viewport().focused).unwrap_or(true);

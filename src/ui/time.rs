@@ -103,6 +103,17 @@ pub fn day_label(ts: i64) -> String {
     }
 }
 
+/// `last seen today at 09.43`, `last seen yesterday at 09.43`, else with the
+/// day label (`last seen Monday at 09.43`, `last seen 12/08/2026 at 09.43`).
+pub fn last_seen(ts: i64) -> String {
+    let at = clock(ts);
+    match day(now()) - day(ts) {
+        0 => crate::trf!("last seen today at {}", "terakhir dilihat hari ini pukul {}", at),
+        1 => crate::trf!("last seen yesterday at {}", "terakhir dilihat kemarin pukul {}", at),
+        _ => crate::trf!("last seen {} at {}", "terakhir dilihat {} pukul {}", day_label(ts), at),
+    }
+}
+
 /// For the chat list: the time today, else the day label.
 pub fn short(ts: i64) -> String {
     if ts == 0 {
