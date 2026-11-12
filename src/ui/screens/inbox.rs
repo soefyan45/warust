@@ -194,6 +194,7 @@ pub fn show(
             let mut info_clicked = false;
             // Short of room, the right side gets smaller so the name stays readable.
             let narrow = ui.available_width() < 860.0;
+            let group_text = chat.is_group().then(|| group_label(state, &session.id, chat));
             widgets::row(
                 ui,
                 52.0,
@@ -210,13 +211,17 @@ pub fn show(
                     if chat.is_muted(time::now()) {
                         icons::show(ui, "bell-off", 14.0, p.muted);
                     }
+                    if let Some(group) = &group_text {
+                        icons::show(ui, "users", 13.0, p.muted);
+                        ui.label(rich(group, 12.0, Weight::Medium, p.muted));
+                    }
                     if several {
                         // Which number the chat came in on, and so replies from.
                         ui.label(rich(tr("to", "masuk ke"), 12.0, Weight::Regular, p.muted));
                         let width = ui.painter().layout_no_wrap(super::devices::chip_label(session), fonts::ui(11.0, Weight::Medium), p.text_2).size().x + 24.0;
                         let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
                         number_chip(ui, &p, rect.min, session);
-                    } else {
+                    } else if group_text.is_none() {
                         ui.label(rich_mono(&super::chat_subtitle(chat), 12.0, p.muted));
                     }
                     if let Some(typing) = &typing_now {
@@ -1031,6 +1036,9 @@ fn chat_row(
     let tile = Rect::from_min_size(pos2(row.left() + 12.0, row.top() + 12.0), vec2(32.0, 32.0));
     let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(title) };
     widgets::paint_avatar(ui, tile, &initials, picture, selected);
+    if chat.is_group() {
+        group_badge(ui, p, tile);
+    }
     photo_target(ui, tile, Some(session), &chat.jid, title, picture);
 
     let left = tile.right() + 12.0;
@@ -1860,6 +1868,15 @@ enum MsgAction {
     Edit,
     /// Send a failed message again.
     Retry,
+    /// Answer a group message in a private chat with its sender (#136).
+    ReplyPrivately,
+}
+
+/// What can be done with a group member from their message (#136).
+enum MemberAction {
+    Message,
+    Call { video: bool },
+    Info,
 }
 
 /// What the user did on a message in the open chat.
@@ -1867,6 +1884,8 @@ enum MsgEvent {
     Media(MediaClick),
     /// A context menu action on the message with this id.
     Menu(MsgAction, String),
+    /// A group member's face or name was used (#136): their JID.
+    Member(MemberAction, String),
 }
 
 /// How long WhatsApp lets a sender edit a message.
@@ -1969,6 +1988,56 @@ fn more_button(ui: &Ui, p: &Palette, bubble: Rect, m: &ChatMsg) -> Option<egui::
     Some(response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(tr("Message actions", "Aksi pesan")))
 }
 
+/// A group member's face and name in their bubble open what can be done with
+/// them (#136): message them, call them, or see their details.
+fn member_menu(ui: &Ui, face: Rect, name: Rect, msg_id: &str, label: &str) -> Option<MemberAction> {
+    let face = ui.interact(face, ui.scope_id().with(("member_face", msg_id)), Sense::click());
+    let name = ui.interact(name, ui.scope_id().with(("member_name", msg_id)), Sense::click());
+    let hint = crate::trf!("Message or call {label}", "Kirim pesan atau telepon {label}");
+    let who = face.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(&hint) | name.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(&hint);
+    let mut picked = None;
+    egui::Popup::menu(&who).show(|ui| {
+        ui.set_min_width(200.0);
+        if ui.button(crate::trf!("Message {label}", "Kirim pesan ke {label}")).clicked() {
+            picked = Some(MemberAction::Message);
+        }
+        if ui.button(tr("Voice call", "Panggilan suara")).clicked() {
+            picked = Some(MemberAction::Call { video: false });
+        }
+        if ui.button(tr("Video call", "Panggilan video")).clicked() {
+            picked = Some(MemberAction::Call { video: true });
+        }
+        if ui.button(tr("Contact info", "Info kontak")).clicked() {
+            picked = Some(MemberAction::Info);
+        }
+    });
+    picked
+}
+
+/// A group's mark on its avatar (#136): a small round badge with the `users`
+/// icon at the bottom right, so a group with a logo does not pass for a contact.
+fn group_badge(ui: &Ui, p: &Palette, avatar: Rect) {
+    let r = (avatar.width() * 0.22).clamp(7.0, 10.0);
+    let center = avatar.right_bottom() - vec2(r * 0.6, r * 0.6);
+    ui.painter().circle(center, r, p.panel, Stroke::new(1.0, p.border));
+    icons::paint(ui, Rect::from_center_size(center, vec2(r * 1.25, r * 1.25)), "users", r * 1.25, p.text_2);
+}
+
+/// "Group · 12 members" once the group's members are known, else "Group" (#136).
+fn group_label(state: &State, session: &str, chat: &Chat) -> String {
+    let key = crate::backend::Typing::key(session, &chat.jid);
+    let count = state
+        .groups_now
+        .get(&key)
+        .map(|g| g.members.len())
+        .filter(|n| *n > 0)
+        .or_else(|| state.members_now.get(&key).map(Vec::len).filter(|n| *n > 0));
+    match count {
+        Some(n) => crate::trf!("Group · {n} members", "Grup · {n} anggota"),
+        None => tr("Group", "Grup").to_owned(),
+    }
+}
+
 /// Room under a failed bubble for its "Not sent · Retry" line.
 const FAILED_FOOT: f32 = 22.0;
 
@@ -2043,6 +2112,37 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
             state.delete_ask = Some(DeleteAsk { session: session.id.clone(), chat: chat.jid.clone(), msg_id, everyone });
         }
         MsgEvent::Menu(MsgAction::Retry, msg_id) => commands.push(Command::Retry { id: session.id.clone(), msg_id }),
+        // The sender's own chat on the same number, with the group message in
+        // the reply bar; the quote keeps pointing at the group (#136).
+        MsgEvent::Menu(MsgAction::ReplyPrivately, msg_id) => {
+            let Some(m) = chat.messages.iter().find(|m| m.id == msg_id && !m.from_me) else { return };
+            let private = session.book.normalize(&m.sender);
+            let author = super::sender_label(&session.book, &m.sender);
+            let snippet = m.text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let existing = session.book.chats.iter().find(|c| c.jid == private);
+            open_chat(state, &session.id, &private, existing);
+            state.reply = Some(ReplyTarget { session: session.id.clone(), chat: private, id: m.id.clone(), author, snippet });
+        }
+        MsgEvent::Member(action, jid) => {
+            let jid = session.book.normalize(&jid);
+            match action {
+                MemberAction::Message => {
+                    let existing = session.book.chats.iter().find(|c| c.jid == jid);
+                    open_chat(state, &session.id, &jid, existing);
+                }
+                MemberAction::Call { video } => {
+                    if state.call_now.is_none() {
+                        commands.push(Command::PlaceCall { id: session.id.clone(), chat: jid, video });
+                    }
+                }
+                MemberAction::Info => {
+                    let existing = session.book.chats.iter().find(|c| c.jid == jid);
+                    open_chat(state, &session.id, &jid, existing);
+                    state.contact_panel = true;
+                    state.contact_page = true;
+                }
+            }
+        }
     }
 }
 
@@ -2164,7 +2264,7 @@ fn pinned_bar(ui: &mut Ui, p: &Palette, chat: &Chat) {
 }
 
 /// Right-click / long-press menu of a message bubble; returns the chosen action.
-fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
+fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool, group: bool) -> Option<MsgAction> {
     let mut action = None;
     if matches!(m.status, Delivery::Failed(_)) && ui.button(tr("Retry", "Kirim ulang")).clicked() {
         action = Some(MsgAction::Retry);
@@ -2172,6 +2272,9 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool) -> Option<MsgAction> {
     // A message still in the send queue has no WhatsApp id to quote yet.
     if !m.id.starts_with("local-") && ui.button(tr("Reply", "Balas")).clicked() {
         action = Some(MsgAction::Reply);
+    }
+    if group && !m.from_me && ui.button(tr("Reply privately", "Balas secara pribadi")).clicked() {
+        action = Some(MsgAction::ReplyPrivately);
     }
     // Text only for now; media forwarding is stage 2.
     // Text, or a file once it is downloaded (#6 stage 2).
@@ -2459,11 +2562,11 @@ fn messages(
                         let mut action = None;
                         // A deleted message has nothing left to reply to, copy, forward or pin.
                         if !m.deleted {
-                            bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                            bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
                             // The same menu from a ⋯ beside the bubble, for a plain click (#3).
                             if let Some(picked) = more_button(ui, &p, rect, m).and_then(|btn| {
                                 let mut picked = None;
-                                egui::Popup::menu(&btn).show(|ui| picked = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                                egui::Popup::menu(&btn).show(|ui| picked = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
                                 picked
                             }) {
                                 action = Some(picked);
@@ -2489,13 +2592,17 @@ fn messages(
                             match avatars.get(&jid) {
                                 Some(picture) => paint_member_face(ui, face, &super::initials(&super::sender_label(book, &m.sender)), picture.as_deref(), color),
                                 None => {
-                                    want_avatars.push(jid);
+                                    want_avatars.push(jid.clone());
                                     paint_member_face(ui, face, &super::initials(&super::sender_label(book, &m.sender)), None, color);
                                 }
                             }
                             let height = name.size().y;
+                            let name_rect = Rect::from_min_size(at, name.size());
                             painter.galley(at, name, color);
                             at.y += height + 4.0;
+                            if let Some(picked) = member_menu(ui, face, name_rect, &m.id, &super::sender_label(book, &m.sender)) {
+                                clicked = Some(MsgEvent::Member(picked, jid));
+                            }
                         }
                         if let Some(quote) = quote {
                             let boxed = Rect::from_min_size(at, vec2(size.x - 28.0, quote.size().y + 10.0));
@@ -2541,7 +2648,7 @@ fn messages(
                                     crate::platform::open_url(&url);
                                 }
                             }
-                            label.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now)));
+                            label.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
                             at.y += height + 4.0;
                         }
                         // "Salin" copies the whole caption; egui does not expose the label selection, Cmd/Ctrl+C copies a partial one.
@@ -4260,6 +4367,9 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     let tile = Rect::from_min_size(pos2(row.left() + PAD, row.top() + 14.0), vec2(44.0, 44.0));
     let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(title) };
     phone::avatar(ui, tile, &initials, picture, chat.unread > 0);
+    if chat.is_group() {
+        group_badge(ui, &p, tile);
+    }
     photo_target(ui, tile, Some(session), &chat.jid, title, picture);
     let left = tile.right() + 16.0;
     let right = row.right() - PAD;
@@ -4320,6 +4430,7 @@ fn compact_chat(
     let book = &session.book;
     let title = super::chat_title(book, chat);
     let typing_now = typing_label(state, &session.id, book, chat);
+    let group_text = chat.is_group().then(|| group_label(state, &session.id, chat));
     let presence_now = presence_label(state, &session.id, chat);
     Panel::top(panel_id(state, "m_chat_header"))
         .exact_size(64.0)
@@ -4347,6 +4458,9 @@ fn compact_chat(
                     let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(&title) };
                     let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
                     phone::avatar(ui, tile, &initials, picture, true);
+                    if chat.is_group() {
+                        group_badge(ui, &p, tile);
+                    }
                     photo_target(ui, tile, Some(&session.id), &chat.jid, &title, picture);
                     ui.add_space(4.0);
                     let (text, title_click) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
@@ -4360,11 +4474,18 @@ fn compact_chat(
                         let color = if theme::template().top_nav() { p.accent_text } else { p.text_2 };
                         icons::paint(ui, Rect::from_min_size(pos2(bottom.left(), bottom.center().y - 6.0), vec2(12.0, 12.0)), "arrow-down-left", 12.0, color);
                         let label = Rect::from_min_max(pos2(bottom.left() + 16.0, bottom.top()), bottom.max);
-                        widgets::paint_text(ui, label, &crate::trf!("Chat to {}", "Chat masuk ke {}", super::devices::chip_label(session)), fonts::ui(12.0, Weight::Medium), color, Align::Min);
+                        let to = crate::trf!("Chat to {}", "Chat masuk ke {}", super::devices::chip_label(session));
+                        let text = match &group_text {
+                            Some(group) => format!("{group} · {to}"),
+                            None => to,
+                        };
+                        widgets::paint_text(ui, label, &text, fonts::ui(12.0, Weight::Medium), color, Align::Min);
                     } else if let Some(typing) = &typing_now {
                         widgets::paint_text(ui, bottom, typing, fonts::ui(12.0, Weight::Medium), typing_color(&p), Align::Min);
                     } else if let Some((presence, online)) = &presence_now {
                         widgets::paint_text(ui, bottom, presence, fonts::ui(12.0, Weight::Regular), if *online { typing_color(&p) } else { p.muted }, Align::Min);
+                    } else if let Some(group) = &group_text {
+                        widgets::paint_text(ui, bottom, group, fonts::ui(12.0, Weight::Medium), p.muted, Align::Min);
                     } else {
                         widgets::paint_text(ui, bottom, &super::chat_subtitle(chat), fonts::mono(12.0), p.muted, Align::Min);
                     }

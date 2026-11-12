@@ -93,18 +93,35 @@ pub struct ReplyQuote {
     pub participant: Option<String>,
     /// Its text or caption, for the quote box.
     pub text: String,
+    /// The group it was said in, when the reply goes to a private chat
+    /// ("Reply privately", #136); `None` for a quote from the same chat.
+    pub remote: Option<String>,
 }
 
 /// Builds the reply body for `text` quoting message `reply_to` (a real or
-/// local id) of `chat`; `None` when that chat has no such message.
+/// local id) of `chat`; `None` when that chat has no such message. A private
+/// chat may also quote a group message, which then keeps its group (#136).
 pub fn reply_body(book: &store::Book, chat: &str, text: String, reply_to: &str, mentions: Vec<String>) -> Option<Body> {
     let real = book.aliases.get(reply_to).map(String::as_str).unwrap_or(reply_to);
-    let quoted = book.chats.iter().find(|c| c.jid == chat)?.messages.iter().find(|m| m.id == real || m.id == reply_to)?;
-    Some(Body::Reply { text, quote: reply_quote(quoted), mentions })
+    let (owner, quoted) = book.chats.iter().find_map(|c| c.messages.iter().find(|m| m.id == real || m.id == reply_to).map(|m| (c.jid.as_str(), m)))?;
+    let remote = quote_remote(&book.normalize(chat), owner)?;
+    Some(Body::Reply { text, quote: reply_quote(quoted, remote), mentions })
 }
 
-fn reply_quote(m: &store::ChatMsg) -> ReplyQuote {
-    ReplyQuote { id: m.id.clone(), participant: (!m.from_me).then(|| m.sender.clone()), text: m.text.clone() }
+/// Where a quote from chat `owner` may go in chat `chat`: the same chat
+/// (`Some(None)`), or a private chat quoting a group (`Some(Some(group))`).
+fn quote_remote(chat: &str, owner: &str) -> Option<Option<String>> {
+    if owner == chat {
+        Some(None)
+    } else if owner.ends_with("@g.us") && !chat.ends_with("@g.us") {
+        Some(Some(owner.to_owned()))
+    } else {
+        None
+    }
+}
+
+fn reply_quote(m: &store::ChatMsg, remote: Option<String>) -> ReplyQuote {
+    ReplyQuote { id: m.id.clone(), participant: (!m.from_me).then(|| m.sender.clone()), text: m.text.clone(), remote }
 }
 
 /// The message to pin or unpin. `sender` is its author as stored, `None` for
@@ -564,8 +581,10 @@ fn queued_body(book: &store::Book, m: &store::ChatMsg) -> Option<Body> {
         if let Some(quote) = &m.quote {
             // A reply: the quoted message must still be in the book (it gives the participant).
             let real = book.aliases.get(&quote.id).unwrap_or(&quote.id);
-            let quoted = book.chats.iter().flat_map(|c| &c.messages).find(|q| q.id == *real || q.id == quote.id)?;
-            return Some(Body::Reply { text: m.text.clone(), quote: reply_quote(quoted), mentions: m.mentions.clone() });
+            let (owner, quoted) = book.chats.iter().find_map(|c| c.messages.iter().find(|q| q.id == *real || q.id == quote.id).map(|q| (c.jid.as_str(), q)))?;
+            let chat = book.chats.iter().find(|c| c.messages.iter().any(|x| x.id == m.id)).map_or(owner, |c| c.jid.as_str());
+            let remote = quote_remote(chat, owner)?;
+            return Some(Body::Reply { text: m.text.clone(), quote: reply_quote(quoted, remote), mentions: m.mentions.clone() });
         }
         if !m.mentions.is_empty() {
             return Some(Body::Mention { text: m.text.clone(), mentions: m.mentions.clone() });
@@ -1513,8 +1532,13 @@ async fn prepare(client: &Client, chat: &Jid, body: Body) -> Result<wa::Message,
                 Some(sender) => sender.parse::<Jid>().map_err(|e| crate::trf!("Invalid message sender JID: {e:?}", "JID pengirim pesan tidak valid: {e:?}"))?.to_non_ad(),
                 None => own_author(client, chat).await?,
             };
-            // Same chat: no remote_jid, like a reply in WA Web.
-            let mut context = build_quote_context_with_info(quote.id, &participant, chat, chat, &wa::Message::text(quote.text));
+            // Same chat: no remote_jid, like a reply in WA Web. A private
+            // reply to a group message names the group (#136).
+            let group = match &quote.remote {
+                Some(group) => Some(group.parse::<Jid>().map_err(|e| crate::trf!("Invalid group JID: {e:?}", "JID grup tidak valid: {e:?}"))?),
+                None => None,
+            };
+            let mut context = build_quote_context_with_info(quote.id, &participant, group.as_ref().unwrap_or(chat), chat, &wa::Message::text(quote.text));
             context.mentioned_jid = mentions;
             Ok(wa::Message::text_with_context(text, context))
         }
@@ -1756,7 +1780,7 @@ mod tests {
         std::fs::write(&path, lines).unwrap();
         let (_, book) = Store::open(&path);
         let body = |id: &str| queued_body(&book, book.chats[0].messages.iter().find(|m| m.id == id).unwrap());
-        let quote = |id: &str, participant: Option<&str>, text: &str| ReplyQuote { id: id.to_owned(), participant: participant.map(str::to_owned), text: text.to_owned() };
+        let quote = |id: &str, participant: Option<&str>, text: &str| ReplyQuote { id: id.to_owned(), participant: participant.map(str::to_owned), text: text.to_owned(), remote: None };
         assert!(matches!(body("r1"), Some(Body::Reply { text, quote: q, .. }) if text == "jam 5" && q == quote("IN1", Some(them), "kapan kirim?")));
         assert!(matches!(body("r2"), Some(Body::Reply { quote: q, .. }) if q == quote("OUT1", None, "besok")));
         assert!(body("r3").is_none());
@@ -1764,6 +1788,10 @@ mod tests {
         assert!(matches!(reply_body(&book, group, "hai".to_owned(), "IN1", Vec::new()), Some(Body::Reply { quote: q, .. }) if q == quote("IN1", Some(them), "kapan kirim?")));
         assert!(reply_body(&book, group, "hai".to_owned(), "NOPE", Vec::new()).is_none());
         assert!(reply_body(&book, "other@g.us", "hai".to_owned(), "IN1", Vec::new()).is_none());
+        // "Reply privately" (#136): a private chat quotes the group message,
+        // which keeps its group.
+        let private = reply_body(&book, "628222@s.whatsapp.net", "hai".to_owned(), "IN1", Vec::new());
+        assert!(matches!(private, Some(Body::Reply { quote: q, .. }) if q.remote.as_deref() == Some(group) && q.id == "IN1"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
