@@ -20,6 +20,7 @@ mod seen;
 mod stickers;
 mod theme;
 mod time;
+mod view;
 mod widgets;
 mod window;
 
@@ -298,6 +299,10 @@ pub struct App {
     /// Theme taken from the settings last; `None` until the first frame.
     applied_theme: Option<String>,
     applied_template: Option<String>,
+    /// Keeps the screen and the Inbox's number and tab for the next start (#128).
+    view: view::Keeper,
+    /// The start opened on the screen the last run ended on.
+    screen_restored: bool,
     /// Session shown on the Pairing screen.
     pairing_id: Option<String>,
     /// The chat last reported to the notifier as on screen.
@@ -394,10 +399,32 @@ impl App {
             Ok("settings") => Screen::Settings,
             _ => Screen::Nomor,
         };
+        let mut state = State {
+            contact_panel: true,
+            // Dev aid: WARUST_SCREEN=pemicu opens the first trigger.
+            integrations_tab: if std::env::var("WARUST_SCREEN").as_deref() == Ok("pemicu") { 2 } else { 0 },
+            rule_selected: (std::env::var("WARUST_SCREEN").as_deref() == Ok("pemicu")).then_some(0),
+            ..State::default()
+        };
+        // Where the last run ended (#128). The dev aids still win over it.
+        let (mut view, last_screen) = view::Keeper::open(crate::platform::data_dir(), &mut state);
+        // A dev override must not become the next normal start's view.
+        if std::env::var_os("WARUST_SCREEN").is_some() || std::env::var_os("WARUST_DEVICES").is_some() {
+            view.read_only();
+        }
+        // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
+        if std::env::var("WARUST_DEVICES").as_deref() == Ok("hidden") {
+            state.devices_panel = false;
+        }
+        let last_screen = last_screen.filter(|_| std::env::var_os("WARUST_SCREEN").is_none());
+        let screen_restored = last_screen.is_some();
+        let screen = last_screen.unwrap_or(screen);
         // Sessions live in the data folder (device stores in sessions/<id>.db).
         let backend = Backend::start(cc.egui_ctx.clone(), crate::platform::data_dir().to_path_buf());
         Self {
             screen,
+            view,
+            screen_restored,
             search: String::new(),
             backend,
             sessions: Vec::new(),
@@ -423,15 +450,7 @@ impl App {
             tray_asked: Default::default(),
             hidden: false,
             quitting: false,
-            state: State {
-                contact_panel: true,
-                // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
-                devices_panel: std::env::var("WARUST_DEVICES").as_deref() != Ok("hidden"),
-                // Dev aid: WARUST_SCREEN=pemicu opens the first trigger.
-                integrations_tab: if std::env::var("WARUST_SCREEN").as_deref() == Ok("pemicu") { 2 } else { 0 },
-                rule_selected: (std::env::var("WARUST_SCREEN").as_deref() == Ok("pemicu")).then_some(0),
-                ..State::default()
-            },
+            state,
         }
     }
 
@@ -1453,6 +1472,8 @@ fn gateway_rows(ui: &mut Ui, p: &theme::Palette, sessions: &[SessionView]) {
 
 impl eframe::App for App {
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        // A change made in the very last frame is kept too.
+        self.view.follow(self.screen, &mut self.state, |_| false);
         self.backend.close_notifications();
     }
 
@@ -1500,6 +1521,8 @@ impl eframe::App for App {
         }
         let snapshot = self.backend.snapshot();
         self.sessions = snapshot.sessions;
+        let sessions = &self.sessions;
+        self.view.follow(self.screen, &mut self.state, |id| sessions.iter().any(|s| s.id == id));
         self.avatars = snapshot.avatars;
         self.state.full_avatars = snapshot.full_avatars;
         self.downloads = snapshot.downloads;
@@ -1538,7 +1561,8 @@ impl eframe::App for App {
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.
-            let first = self.applied_template.is_none() && std::env::var_os("WARUST_SCREEN").is_none();
+            // Not when the start opened on the last run's screen (#128).
+            let first = self.applied_template.is_none() && std::env::var_os("WARUST_SCREEN").is_none() && !self.screen_restored;
             if first && template == theme::Template::Forest && self.screen == Screen::Nomor {
                 self.screen = Screen::Ringkasan;
             }
