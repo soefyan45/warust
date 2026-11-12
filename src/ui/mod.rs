@@ -371,7 +371,11 @@ impl App {
             ..State::default()
         };
         // Where the last run ended (#128). The dev aids still win over it.
-        let (view, last_screen) = view::Keeper::open(crate::platform::data_dir(), &mut state);
+        let (mut view, last_screen) = view::Keeper::open(crate::platform::data_dir(), &mut state);
+        // A dev override must not become the next normal start's view.
+        if std::env::var_os("WARUST_SCREEN").is_some() || std::env::var_os("WARUST_DEVICES").is_some() {
+            view.read_only();
+        }
         // Dev aid: WARUST_DEVICES=hidden starts with the device panel hidden.
         if std::env::var("WARUST_DEVICES").as_deref() == Ok("hidden") {
             state.devices_panel = false;

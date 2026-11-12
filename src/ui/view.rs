@@ -119,6 +119,10 @@ pub struct Keeper {
     /// The saved number, until its session is loaded. Sessions come in one at
     /// a time after a start, and the Inbox drops a number it does not know.
     waiting_scope: Option<String>,
+    /// A run with a dev override (`WARUST_SCREEN`, `WARUST_DEVICES`): the
+    /// file is read but not written, so the override does not become the
+    /// next normal start's view.
+    read_only: bool,
 }
 
 impl Keeper {
@@ -132,7 +136,12 @@ impl Keeper {
         state.inbox_grouped = saved.inbox_grouped;
         state.devices_panel = saved.devices_panel;
         let waiting_scope = saved.inbox_scope.clone();
-        (Self { data_dir: data_dir.to_owned(), saved, waiting_scope }, screen)
+        (Self { data_dir: data_dir.to_owned(), saved, waiting_scope, read_only: false }, screen)
+    }
+
+    /// Keeps this run's view out of the file (a dev override is in use).
+    pub fn read_only(&mut self) {
+        self.read_only = true;
     }
 
     /// Once a frame, before the screens draw: selects the saved number when
@@ -152,7 +161,7 @@ impl Keeper {
             inbox_grouped: state.inbox_grouped,
             devices_panel: state.devices_panel,
         };
-        if now != self.saved {
+        if now != self.saved && !self.read_only {
             now.save(&self.data_dir);
             self.saved = now;
         }
@@ -180,6 +189,24 @@ mod tests {
 
     const NONE: fn(&str) -> bool = |_| false;
     const ALL: fn(&str) -> bool = |_| true;
+
+    #[test]
+    fn a_dev_override_run_leaves_the_file_alone() {
+        let dir = folder("dev");
+        let (mut keeper, mut state, _) = start(&dir);
+        state.chat_tab = TAB_DONE;
+        keeper.follow(Screen::Inbox, &mut state, ALL);
+        // The next run starts with WARUST_DEVICES=hidden and on another screen.
+        let (mut keeper, mut state, _) = start(&dir);
+        keeper.read_only();
+        state.devices_panel = false;
+        keeper.follow(Screen::Settings, &mut state, ALL);
+        // A normal start after it still opens where the first run ended.
+        let (_, state, screen) = start(&dir);
+        assert!(screen == Some(Screen::Inbox));
+        assert!(state.devices_panel);
+        assert_eq!(state.chat_tab, TAB_DONE);
+    }
 
     #[test]
     fn a_first_start_keeps_the_defaults() {
