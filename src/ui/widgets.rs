@@ -1,8 +1,8 @@
 //! Small painted widgets shared by the screens, matching the Pego components
 //! (`D/*` dark, `M/*` light).
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use egui::text::{LayoutJob, TextWrapping};
@@ -505,6 +505,18 @@ pub fn picture_uri(ctx: &egui::Context, path: &Path) -> Option<String> {
         loaded.insert(uri.clone());
     }
     Some(uri)
+}
+
+/// A picture file's size in pixels, read from its header once and remembered.
+pub fn picture_size(path: &Path) -> Option<(u32, u32)> {
+    static SIZES: OnceLock<Mutex<HashMap<PathBuf, (u32, u32)>>> = OnceLock::new();
+    let mut sizes = SIZES.get_or_init(Default::default).lock().ok()?;
+    if let Some(size) = sizes.get(path) {
+        return Some(*size);
+    }
+    let size = image::image_dimensions(path).ok()?;
+    sizes.insert(path.to_owned(), size);
+    Some(size)
 }
 
 

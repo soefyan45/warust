@@ -216,6 +216,9 @@ pub struct Settings {
     /// Classic's sidebar as a rail.
     pub nav_icons_only: bool,
     pub updates: Updates,
+    /// Closing the main window hides it and warust keeps running behind its
+    /// tray icon (#134). Off: closing the window quits.
+    pub close_to_tray: bool,
 }
 
 /// A number's chat wallpaper: the same choices as the app's `wallpaper`,
@@ -262,6 +265,7 @@ impl Default for Settings {
             privacy: Privacy::default(),
             nav_icons_only: false,
             updates: Updates::default(),
+            close_to_tray: true,
         }
     }
 }
@@ -385,5 +389,14 @@ mod tests {
         assert_eq!(old.main_number, None);
         let set: Settings = serde_json::from_str(r#"{"main_number":"s1"}"#).unwrap();
         assert_eq!(set.main_number.as_deref(), Some("s1"));
+    }
+
+    #[test]
+    fn close_to_tray_is_on_unless_turned_off() {
+        assert!(Settings::default().close_to_tray);
+        let old: Settings = serde_json::from_str(r#"{"typing":false}"#).unwrap();
+        assert!(old.close_to_tray);
+        let off: Settings = serde_json::from_str(r#"{"close_to_tray":false}"#).unwrap();
+        assert!(!off.close_to_tray);
     }
 }

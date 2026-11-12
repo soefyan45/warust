@@ -67,6 +67,10 @@ Juga: emoji berwarna, kirim foto/video/dokumen/stiker, rekam pesan suara, pratin
 notifikasi desktop (klik untuk membuka chat), dua template (Forest, dan Klasik gelap/terang), serta tata letak HP saat jendela
 dikecilkan di bawah 1100 px.
 
+Menutup jendela membuat warust tetap jalan di balik ikon tray (menu bar di macOS), jadi nomor tetap tersambung dan API,
+webhook, serta notifikasi tetap jalan; ikon itu membuka jendela lagi atau mengeluarkan aplikasi. Pengaturan → Jendela untuk
+mematikannya. Di desktop Linux tanpa tray (GNOME tanpa ekstensi AppIndicator), menutup jendela tetap keluar seperti biasa.
+
 ## Pasang
 
 Unduh dari [Releases](https://github.com/soefyan45/warust/releases/latest):

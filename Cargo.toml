@@ -99,13 +99,20 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 # needed there; both crates are already in the tree through arboard and winit.
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFURL", "CFCGTypes"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBitmapContext", "CGColorSpace", "CGContext", "CGImage", "CGPDFDocument", "CGPDFPage"] }
-# Native window buttons in the top bar, and the unread count on the Dock
-# icon; already in the tree through winit.
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSDockTile", "NSResponder", "NSView", "NSWindow", "NSControl", "NSButton"] }
+# Native window buttons in the top bar, the unread count on the Dock icon, and
+# the menu bar icon (#134); already in the tree through winit.
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "NSApplication", "NSDockTile", "NSResponder", "NSView", "NSWindow", "NSControl", "NSButton", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSMenu", "NSMenuItem", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics"] }
 
-# Windows: toasts through WinRT, the same windows crate accesskit already uses.
+# Windows: toasts through WinRT, the same windows crate accesskit already uses;
+# the Win32 parts are the tray icon and its menu (#134).
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation"] }
+windows = { version = "0.62", features = ["UI_Notifications", "Data_Xml_Dom", "Foundation", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+# Linux: the tray icon (#134) as a StatusNotifierItem over D-Bus, so no GTK.
+# zbus is already in the tree through accesskit, on async-io; ksni's default
+# tokio feature would switch that zbus to tokio, so it stays off.
+[target.'cfg(target_os = "linux")'.dependencies]
+ksni = { version = "0.3.7", default-features = false, features = ["async-io", "blocking"] }
 
 # The face detector is slow unoptimised; keep it fast in debug runs too.
 [profile.dev.package.rustface]

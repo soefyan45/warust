@@ -205,6 +205,36 @@ pub fn set_unread_badge(count: u32) {
     let _ = count;
 }
 
+/// macOS: hides the app the way Cmd+H does (#134), so that a click on its
+/// Dock icon, Cmd+Tab or a clicked notification shows it again; a window
+/// hidden on its own would not come back that way. False elsewhere, where
+/// the caller hides the window itself.
+pub fn hide_app() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSApplication;
+        // AppKit only from the main thread, where the UI runs.
+        if let Some(mtm) = MainThreadMarker::new() {
+            NSApplication::sharedApplication(mtm).hide(None);
+            return true;
+        }
+    }
+    false
+}
+
+/// macOS: shows the app again after [`hide_app`], in front. Nothing elsewhere.
+pub fn unhide_app() {
+    #[cfg(target_os = "macos")]
+    {
+        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSApplication;
+        if let Some(mtm) = MainThreadMarker::new() {
+            NSApplication::sharedApplication(mtm).unhide(None);
+        }
+    }
+}
+
 /// The window title with the unread count in front, as messaging apps do.
 pub fn window_title(count: u32) -> String {
     if count == 0 { "warust".to_owned() } else { format!("({count}) warust") }
