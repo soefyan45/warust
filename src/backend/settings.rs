@@ -209,6 +209,8 @@ pub struct Settings {
     /// A number's own chat wallpaper, by session id (#60). A number not in
     /// here uses the app's.
     pub number_wallpapers: HashMap<String, NumberWallpaper>,
+    /// The main number (#138): listed first, and the Inbox opens on it.
+    pub main_number: Option<String>,
     pub privacy: Privacy,
     /// Navigation shows only its icons (#102): Forest's top pills, or
     /// Classic's sidebar as a rail.
@@ -256,6 +258,7 @@ impl Default for Settings {
             wallpaper_file: String::new(),
             wallpaper_dim: 30,
             number_wallpapers: HashMap::new(),
+            main_number: None,
             privacy: Privacy::default(),
             nav_icons_only: false,
             updates: Updates::default(),
@@ -373,5 +376,14 @@ mod tests {
         assert!(!old.send_read);
         let on: Settings = serde_json::from_str(r#"{"send_read":true}"#).unwrap();
         assert!(on.send_read);
+    }
+
+    #[test]
+    fn no_main_number_unless_chosen() {
+        assert_eq!(Settings::default().main_number, None);
+        let old: Settings = serde_json::from_str(r#"{"typing":false}"#).unwrap();
+        assert_eq!(old.main_number, None);
+        let set: Settings = serde_json::from_str(r#"{"main_number":"s1"}"#).unwrap();
+        assert_eq!(set.main_number.as_deref(), Some("s1"));
     }
 }

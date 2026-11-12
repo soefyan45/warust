@@ -988,8 +988,13 @@ async fn run(
                 state.remove(&id);
                 // Its own wallpaper and the picture copied for it go too (#60).
                 let mut settings = (*state.settings()).clone();
-                if let Some(wall) = settings.number_wallpapers.remove(&id) {
+                let wall = settings.number_wallpapers.remove(&id);
+                if let Some(wall) = &wall {
                     settings::forget_wallpaper(&data_dir, &wall.file);
+                }
+                // A removed main number leaves no main (#138).
+                let was_main = settings.main_number.take_if(|main| *main == id).is_some();
+                if wall.is_some() || was_main {
                     settings.save(&data_dir);
                     if let Ok(mut shared) = state.shared.lock() {
                         shared.settings = Arc::new(settings);

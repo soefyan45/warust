@@ -35,6 +35,11 @@ pub fn status_dot(p: &Palette, status: &Status) -> Color32 {
     }
 }
 
+/// Whether `session` is the main number (#138).
+pub fn is_main(state: &State, session: &SessionView) -> bool {
+    state.settings.main_number.as_deref() == Some(session.id.as_str())
+}
+
 /// One row: icon tile with a status dot, title, subtitle, unread badge.
 #[allow(clippy::too_many_arguments)]
 fn item(
@@ -48,6 +53,7 @@ fn item(
     dot: Option<Color32>,
     badge: u32,
     selected: bool,
+    main: bool,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ITEM), Sense::click());
     if selected {
@@ -66,7 +72,7 @@ fn item(
     let left = tile.right() + 12.0;
     let right = rect.right() - if badge > 0 { 40.0 } else { 10.0 };
     let name = Rect::from_min_max(pos2(left, rect.top() + 9.0), pos2(right, rect.top() + 28.0));
-    widgets::paint_text(ui, name, title, fonts::ui(14.0, Weight::Medium), p.text, Align::Min);
+    widgets::paint_number_name(ui, name, title, fonts::ui(14.0, Weight::Medium), p.text, main);
     let sub = Rect::from_min_max(pos2(left, rect.top() + 29.0), pos2(right, rect.top() + 46.0));
     let font = if mono { fonts::mono(12.0) } else { fonts::ui(12.0, Weight::Regular) };
     widgets::paint_text(ui, sub, subtitle, font, subtitle_color, Align::Min);
@@ -88,6 +94,10 @@ fn number_menu(row: &egui::Response, state: &mut State, session: &SessionView) {
         }
         if ui.button(tr("Rename…", "Ganti nama…")).clicked() {
             state.rename = Some((session.id.clone(), session.name.clone()));
+        }
+        let main = is_main(state, session);
+        if ui.button(if main { tr("Main number ✓", "Nomor utama ✓") } else { tr("Set as main number", "Jadikan nomor utama") }).clicked() {
+            state.set_main = Some((!main).then(|| session.id.clone()));
         }
         if ui.button(tr("Chat wallpaper…", "Wallpaper chat…")).clicked() {
             state.number_wallpaper = Some(crate::ui::NumberWallpaperEdit::new(&state.settings, session));
@@ -116,6 +126,7 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
         None,
         total,
         state.inbox_scope.is_none(),
+        false,
     );
     if all.clicked() {
         state.inbox_scope = None;
@@ -123,7 +134,8 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
     for s in &connected {
         let phone = s.phone.clone().unwrap_or_default();
         let selected = state.inbox_scope.as_deref() == Some(s.id.as_str());
-        let row = item(ui, p, "smartphone", &s.name, &phone, p.muted, true, Some(p.green), unread(s), selected);
+        let main = is_main(state, s);
+        let row = item(ui, p, "smartphone", &s.name, &phone, p.muted, true, Some(p.green), unread(s), selected, main);
         if row.clicked() {
             state.inbox_scope = Some(s.id.clone());
         }
@@ -138,7 +150,7 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
             let detail = if chats > 0 { crate::trf!("{label} · {chats} old chats", "{label} · {chats} chat lama") } else { label };
             let selected = state.inbox_scope.as_deref() == Some(s.id.as_str());
             let dot = status_dot(p, &s.status);
-            let row = item(ui, p, icon, &s.name, &detail, dot, false, Some(dot), unread(s), selected);
+            let row = item(ui, p, icon, &s.name, &detail, dot, false, Some(dot), unread(s), selected, is_main(state, s));
             if row.clicked() {
                 state.inbox_scope = Some(s.id.clone());
             }
@@ -178,7 +190,7 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
 /// Perangkat in the phone layout (Pego `m5/Perangkat`, `m3/Perangkat`): the
 /// numbers that can reply, the ones that cannot, and "Tambah nomor". A row
 /// opens the same menu as on the Nomor screen.
-pub fn compact(ui: &mut Ui, sessions: &[SessionView]) -> Option<super::nomor::Action> {
+pub fn compact(ui: &mut Ui, sessions: &[SessionView], main: Option<&str>) -> Option<super::nomor::Action> {
     use crate::ui::compact::{self, PAD};
     let p = theme::palette(ui.ctx());
     let mut action = None;
@@ -212,8 +224,9 @@ pub fn compact(ui: &mut Ui, sessions: &[SessionView]) -> Option<super::nomor::Ac
                     ui.set_width(ui.available_width());
                     ui.spacing_mut().item_spacing.y = 0.0;
                     for (i, s) in group.iter().enumerate() {
-                        let row = compact::device_row(ui, s, i + 1 < group.len());
-                        if let Some(a) = super::nomor::row_menu(&row, &p, s) {
+                        let is_main = main == Some(s.id.as_str());
+                        let row = compact::device_row(ui, s, i + 1 < group.len(), is_main);
+                        if let Some(a) = super::nomor::row_menu(&row, &p, s, is_main) {
                             action = Some(a);
                         }
                     }
