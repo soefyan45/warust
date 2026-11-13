@@ -359,6 +359,18 @@ fn line(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     });
 }
 
+/// The widest the page's column gets.
+const COLUMN: f32 = 760.0;
+
+/// Where the page's column goes in the space `free`: in the middle, at most
+/// `COLUMN` wide, on whole pixels so text stays sharp. A narrower window is
+/// filled as it is.
+fn column_rect(free: egui::Rect) -> egui::Rect {
+    let width = free.width().min(COLUMN);
+    let left = free.left() + ((free.width() - width) / 2.0).floor();
+    egui::Rect::from_min_max(egui::pos2(left, free.top()), egui::pos2(left + width, free.bottom()))
+}
+
 pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Command> {
     let p = theme::palette(ui.ctx());
     let mut commands = Vec::new();
@@ -367,8 +379,12 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
         .frame(theme::page(ui.ctx()))
         .show(ui, |ui| {
             ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                // The page's column sits in the middle of a wide window; the
+                // scroll area keeps the full width.
+                let page = ui;
+                let mut column = page.new_child(egui::UiBuilder::new().max_rect(column_rect(page.available_rect_before_wrap())));
+                let ui = &mut column;
                 ui.spacing_mut().item_spacing.y = 20.0;
-                ui.set_max_width(ui.available_width().min(760.0));
                 super::page_head(
                     ui,
                     tr("Settings", "Pengaturan"),
@@ -580,6 +596,7 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                 if let Some(settings) = save_bar(ui, form) {
                     commands.push(Command::SaveSettings(settings));
                 }
+                page.allocate_rect(column.min_rect(), egui::Sense::hover());
             });
         });
     commands
@@ -588,6 +605,17 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_column_is_centred_in_a_wide_page() {
+        let page = |width: f32| egui::Rect::from_min_size(egui::pos2(40.0, 28.0), egui::vec2(width, f32::INFINITY));
+        let wide = column_rect(page(1321.0));
+        assert_eq!(wide.width(), COLUMN);
+        assert_eq!((wide.left() - 40.0, 40.0 + 1321.0 - wide.right()), (280.0, 281.0), "equal sides, on whole pixels");
+        assert_eq!(wide.top(), 28.0);
+        // A window narrower than the column is filled, as before.
+        assert_eq!(column_rect(page(500.0)), page(500.0));
+    }
 
     #[test]
     fn form_validates_and_tracks_edits() {
