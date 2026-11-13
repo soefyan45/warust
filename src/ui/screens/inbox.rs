@@ -299,15 +299,17 @@ pub fn show(
                 if crate::ui::privacy::blur_chat() {
                     privacy_banner(ui, &p);
                 }
-                if msg_search_bar(ui, &p, state, session, chat) || older_bar(ui, &p, state, session, chat) {
-                    state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
-                    commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
-                }
+                let mut older = msg_search_bar(ui, &p, state, session, chat);
                 pinned_bar(ui, &p, chat);
                 let mut want = Vec::new();
                 let own = (session.own_number.as_deref(), session.own_lid.as_deref());
                 let query = search_query(state, &session.id, &chat.jid);
-                let event = messages(ui, &p, &book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref());
+                let top = older_state(state, session, chat);
+                let event = messages(ui, &p, &book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref(), &mut |ui| older |= older_bar(ui, &p, top));
+                if older {
+                    state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
+                    commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
+                }
                 ask_avatars(state, &mut commands, &session.id, want);
                 if let Some(event) = event {
                     on_message_event(event, state, session, chat, &mut commands);
@@ -506,16 +508,44 @@ fn reply_badge(ui: &mut Ui, p: &Palette) {
     widgets::paint_text(ui, rect, text, fonts::ui(12.0, Weight::SemiBold), color, Align::Center);
 }
 
-/// "Load older messages from the phone". Returns true when clicked.
-fn older_bar(ui: &mut Ui, p: &Palette, state: &State, session: &SessionView, chat: &Chat) -> bool {
-    let asked = state
-        .older_asked
-        .as_ref()
-        .is_some_and(|(jid, at)| jid == &chat.jid && at.elapsed().as_secs() < 30);
+/// What stands above a chat's first message.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Older {
+    /// The phone was asked for history a moment ago: say so.
+    Asked,
+    /// "Load older messages from the phone".
+    Offer,
+    /// The number is not connected: nothing to ask.
+    Nothing,
+}
+
+/// What `older_bar` shows for this chat now.
+fn older_state(state: &State, session: &SessionView, chat: &Chat) -> Older {
+    older_for(state.older_asked.as_ref(), &chat.jid, session.status == Status::Connected, std::time::Instant::now())
+}
+
+/// `asked` is the chat last asked for and when; the answer is awaited for
+/// half a minute, in that chat only.
+fn older_for(asked: Option<&(String, std::time::Instant)>, chat: &str, connected: bool, now: std::time::Instant) -> Older {
+    let waiting = asked.is_some_and(|(jid, at)| jid == chat && now.saturating_duration_since(*at).as_secs() < 30);
+    match () {
+        () if waiting => Older::Asked,
+        () if connected => Older::Offer,
+        () => Older::Nothing,
+    }
+}
+
+/// "Load older messages from the phone", at the top of the thread: it scrolls
+/// with the messages and is met on reaching the first one. Returns true when
+/// clicked.
+fn older_bar(ui: &mut Ui, p: &Palette, older: Older) -> bool {
     let mut clicked = false;
+    if older == Older::Nothing {
+        return clicked;
+    }
     ui.add_space(8.0);
     ui.vertical_centered(|ui| {
-        if asked {
+        if older == Older::Asked {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
             ui.label(rich(
                 tr(
@@ -526,7 +556,7 @@ fn older_bar(ui: &mut Ui, p: &Palette, state: &State, session: &SessionView, cha
                 Weight::Regular,
                 p.muted,
             ));
-        } else if session.status == Status::Connected {
+        } else {
             clicked = widgets::button(ui, Some("download"), tr("Load older messages from phone", "Muat pesan lama dari HP"), Kind::Secondary).clicked();
         }
     });
@@ -2619,6 +2649,8 @@ fn messages(
     own: (Option<&str>, Option<&str>),
     anchor: &mut Option<UnreadAnchor>,
     search: Option<&str>,
+    // Drawn above the first message, inside the scroll area.
+    top: &mut dyn FnMut(&mut Ui),
 ) -> Option<MsgEvent> {
     const GAP: f32 = 6.0;
     /// Extra space before a group run from another member.
@@ -2777,7 +2809,10 @@ fn messages(
         .stick_to_bottom(true)
         .auto_shrink(false)
         .show(ui, |ui| {
-            ui.add_space(12.0);
+            top(ui);
+            // Room for the "older messages not shown" note, which is painted
+            // above the first message.
+            ui.add_space(if start > 0 { 28.0 } else { 12.0 });
             let height = content.max(ui.available_height());
             let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
             let mut painter = ui.painter().clone();
@@ -4871,15 +4906,17 @@ fn compact_chat(
         widgets::wallpaper(ui, ui.max_rect(), &session.id);
         Frame::NONE.inner_margin(Margin { left: 12, right: 12, top: 0, bottom: 6 }).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            if msg_search_bar(ui, &p, state, session, chat) || older_bar(ui, &p, state, session, chat) {
-                state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
-                commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
-            }
+            let mut older = msg_search_bar(ui, &p, state, session, chat);
             pinned_bar(ui, &p, chat);
             let mut want = Vec::new();
             let own = (session.own_number.as_deref(), session.own_lid.as_deref());
             let query = search_query(state, &session.id, &chat.jid);
-            let event = messages(ui, &p, book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref());
+            let top = older_state(state, session, chat);
+            let event = messages(ui, &p, book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref(), &mut |ui| older |= older_bar(ui, &p, top));
+            if older {
+                state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
+                commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
+            }
             ask_avatars(state, &mut commands, &session.id, want);
             if let Some(event) = event {
                 on_message_event(event, state, session, chat, &mut commands);
@@ -4985,6 +5022,19 @@ mod typing_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn what_stands_above_the_first_message() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert_eq!(older_for(None, "a", true, now), Older::Offer);
+        assert_eq!(older_for(None, "a", false, now), Older::Nothing, "not connected: nothing to ask");
+        let asked = ("a".to_owned(), now);
+        assert_eq!(older_for(Some(&asked), "a", true, now + Duration::from_secs(5)), Older::Asked);
+        assert_eq!(older_for(Some(&asked), "a", false, now + Duration::from_secs(5)), Older::Asked, "still said after a disconnect");
+        assert_eq!(older_for(Some(&asked), "b", true, now + Duration::from_secs(5)), Older::Offer, "another chat");
+        assert_eq!(older_for(Some(&asked), "a", true, now + Duration::from_secs(31)), Older::Offer, "offered again after half a minute");
     }
 
     #[test]
