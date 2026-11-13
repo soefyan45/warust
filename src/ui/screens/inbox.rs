@@ -85,7 +85,15 @@ pub fn show(
 
     let several = sessions.len() > 1;
     let forest = theme::template().top_nav();
-    if state.devices_panel {
+    // Mint in a narrow window: the list, or the open chat with a way back.
+    let single = theme::mint() && ui.ctx().content_rect().width() < crate::ui::compact::MINT_SINGLE;
+    if single && selected.is_none() {
+        CentralPanel::default().frame(theme::pane(ui.ctx(), p.bg, Margin { left: 8, right: 8, top: 0, bottom: 8 })).show(ui, |ui| {
+            commands.extend(chat_list(ui, &p, state, sessions, avatars));
+        });
+        return commands;
+    }
+    if state.devices_panel && !theme::mint() {
         Panel::left(panel_id(state, "devices"))
             .default_size(if forest { 250.0 } else { 230.0 })
             .size_range(210.0..=320.0)
@@ -94,6 +102,7 @@ pub fn show(
             .frame(theme::pane(ui.ctx(), p.panel, Margin { left: 10, right: 10, top: 0, bottom: 10 }))
             .show(ui, |ui| super::devices::show(ui, &p, state, sessions));
     }
+    if !single {
     Panel::left(panel_id(state, "chat_list"))
         .default_size(if forest { 360.0 } else { 300.0 })
         .size_range(if forest { 330.0..=460.0 } else { 260.0..=420.0 })
@@ -103,6 +112,7 @@ pub fn show(
         .show(ui, |ui| {
             commands.extend(chat_list(ui, &p, state, sessions, avatars));
         });
+    }
     let Some(chat) = selected else {
         CentralPanel::default().frame(theme::pane(ui.ctx(), p.bg, Margin::ZERO)).show(ui, |ui| {
             let (title, desc) = if book.chats.is_empty() {
@@ -130,19 +140,40 @@ pub fn show(
     let mut open_member = None;
     let mut chat_ui = None;
     let column = ui.available_rect_before_wrap();
-    let beside = (column.width() * 0.34).clamp(240.0, 360.0);
+    let mint = theme::mint();
+    // Mint: a fixed 320, flush against the chat with a line between them.
+    let beside = if mint { 320.0 } else { (column.width() * 0.34).clamp(240.0, 360.0) };
+    let (gap, chat_min) = if mint { (0.0, 560.0) } else { (PANEL_GAP, CHAT_MIN) };
     // The chat's header and composer need their room; below it, a page, and
     // only when asked for.
-    let page = column.width() - beside - PANEL_GAP < CHAT_MIN;
+    let page = column.width() - beside - gap < chat_min;
     if state.contact_panel && (!page || state.contact_page) {
         let width = if page { column.width() } else { beside };
         let panel_rect = Rect::from_min_max(pos2(column.right() - width, column.top()), column.max);
         let mut panel_ui = ui.new_child(egui::UiBuilder::new().max_rect(panel_rect).layout(Layout::top_down(Align::Min)));
         panel_ui.set_clip_rect(panel_rect.intersect(ui.clip_rect()));
         let mut close = false;
-        open_member = theme::pane(ui.ctx(), p.panel, Margin::same(18))
+        if mint && !page {
+            panel_ui.painter().vline(panel_rect.left(), panel_rect.y_range(), Stroke::new(1.0, p.border));
+        }
+        open_member = theme::pane(ui.ctx(), if mint { p.bg } else { p.panel }, Margin::same(18))
             .show(&mut panel_ui, |ui| {
                 ui.set_min_size(ui.available_size());
+                if mint && !page {
+                    // Beside the chat: a title and a way to close it.
+                    widgets::row(
+                        ui,
+                        24.0,
+                        |ui| {
+                            let label = if chat.is_group() { tr("Group info", "Info grup") } else { tr("Contact info", "Info kontak") };
+                            ui.label(rich(label, 14.0, Weight::SemiBold, p.text));
+                        },
+                        |ui| {
+                            close = widgets::icon_button(ui, "x", 28.0, false).on_hover_text(tr("Close", "Tutup")).clicked();
+                        },
+                    );
+                    ui.add_space(10.0);
+                }
                 if page {
                     ui.horizontal(|ui| {
                         close = widgets::icon_button(ui, "chevron-left", 32.0, false).on_hover_text(tr("Back to the chat", "Kembali ke chat")).clicked();
@@ -156,9 +187,13 @@ pub fn show(
             .inner;
         if close {
             state.contact_page = false;
+            // Mint's panel has one switch: closed is closed, beside the chat too.
+            if mint {
+                state.contact_panel = false;
+            }
         }
         if !page {
-            let rest = Rect::from_min_max(column.min, pos2(panel_rect.left() - PANEL_GAP, column.bottom()));
+            let rest = Rect::from_min_max(column.min, pos2(panel_rect.left() - gap, column.bottom()));
             chat_ui = Some(ui.new_child(egui::UiBuilder::new().max_rect(rest).layout(*ui.layout())));
         }
         ui.allocate_rect(column, Sense::hover());
@@ -192,6 +227,7 @@ pub fn show(
         .show(ui, |ui| {
             let call_on = state.call_now.is_some();
             let mut info_clicked = false;
+            let mut back_clicked = false;
             let mut search_clicked = false;
             // Short of room, the right side gets smaller so the name stays readable.
             let narrow = ui.available_width() < 860.0;
@@ -201,6 +237,62 @@ pub fn show(
                 52.0,
                 |ui| {
                     let hint = if chat.is_group() { tr("Group info", "Info grup") } else { tr("Contact info", "Info kontak") };
+                    if single && widgets::icon_button(ui, "chevron-left", 32.0, false).on_hover_text(tr("Back to the chat list", "Kembali ke daftar chat")).clicked() {
+                        back_clicked = true;
+                    }
+                    if theme::mint() {
+                        // Mint: the contact's picture, then two lines: the name, and under
+                        // it the number the chat came in on and whether they are there.
+                        // The picture and the name open and close the details.
+                        let title = super::chat_title(&book, chat);
+                        let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
+                        let (face, face_response) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
+                        widgets::paint_avatar(ui, face, &super::initials(&title), picture, false);
+                        if face_response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
+                            info_clicked = true;
+                        }
+                        ui.add_space(4.0);
+                        let room = ui.available_width().max(80.0);
+                        ui.allocate_ui_with_layout(vec2(room, 42.0), Layout::top_down(Align::Min), |ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.horizontal(|ui| {
+                                let name = ui.add(egui::Label::new(rich(&title, 14.0, Weight::SemiBold, p.text)).truncate().sense(Sense::click()));
+                                if name.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
+                                    info_clicked = true;
+                                }
+                                if chat.is_muted(time::now()) {
+                                    icons::show(ui, "bell-off", 14.0, p.muted);
+                                }
+                                if let Some(group) = &group_text {
+                                    icons::show(ui, "users", 13.0, p.muted);
+                                    ui.label(rich(group, 12.0, Weight::Medium, p.muted));
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 6.0;
+                                if several {
+                                    ui.label(rich(tr("to", "masuk ke"), 12.0, Weight::Regular, p.muted));
+                                    let width = ui.painter().layout_no_wrap(super::devices::chip_label(session), fonts::ui(11.0, Weight::Medium), p.text_2).size().x + 38.0;
+                                    let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+                                    number_chip(ui, &p, rect.min, session);
+                                } else if group_text.is_none() {
+                                    ui.label(rich_mono(&super::chat_subtitle(chat), 12.0, p.muted));
+                                }
+                                if let Some(typing) = &typing_now {
+                                    ui.label(rich(typing, 12.0, Weight::Medium, typing_color(&p)));
+                                } else if let Some((presence, online)) = &presence_now {
+                                    ui.label(rich(presence, 12.0, Weight::Regular, if *online { typing_color(&p) } else { p.muted }));
+                                }
+                                let in_call = state.call_now.as_ref().filter(|c| c.session == session.id && c.peer == chat.jid);
+                                if let Some(at) = in_call.and_then(|c| c.connected_at) {
+                                    let secs = at.elapsed().as_secs();
+                                    let label = crate::trf!("In call · {}:{:02}", "Dalam panggilan · {}:{:02}", secs / 60, secs % 60);
+                                    ui.label(rich(&label, 11.5, Weight::SemiBold, p.accent_text));
+                                }
+                            });
+                        });
+                        return;
+                    }
                     // The name gives way ("…") so the number chip after it still shows.
                     let room = (ui.available_width() - if several { 200.0 } else { 40.0 }).max(80.0);
                     let name = ui
@@ -244,11 +336,14 @@ pub fn show(
                     let searching = state.msg_search.is_some();
                     search_clicked = widgets::icon_button(ui, "search", 32.0, searching).on_hover_text(tr("Search in chat (Ctrl+F)", "Cari di chat (Ctrl+F)")).clicked();
                     ui.add_space(4.0);
-                    if widgets::icon_button(ui, "panel-right", 32.0, state.contact_panel).clicked() {
-                        state.contact_panel = !state.contact_panel;
-                        state.contact_page = state.contact_panel;
+                    // Mint opens the details from the picture and the name instead.
+                    if !theme::mint() {
+                        if widgets::icon_button(ui, "panel-right", 32.0, state.contact_panel).clicked() {
+                            state.contact_panel = !state.contact_panel;
+                            state.contact_page = state.contact_panel;
+                        }
+                        ui.add_space(4.0);
                     }
-                    ui.add_space(4.0);
                     call_buttons(ui, &p, call_on, session, chat, 40.0, &mut commands);
                     // A group only while a mention waits: marking it done clears the `@`.
                     if !chat.is_group() || chat.mention_pending() || chat.is_done() {
@@ -263,14 +358,22 @@ pub fn show(
                     }
                 },
             );
+            if back_clicked {
+                state.chat_selected = None;
+            }
             if info_clicked {
-                state.contact_panel = true;
-                state.contact_page = true;
+                let open = !(theme::mint() && state.contact_panel);
+                state.contact_panel = open;
+                state.contact_page = open;
             }
             if search_clicked {
                 toggle_msg_search(state, &session.id, &chat.jid);
             }
         });
+    // Mint's composer floats over the thread: the messages run to the bottom
+    // of the column and pass behind it. Elsewhere it is a panel under them.
+    let floating = theme::mint();
+    if !floating {
     Panel::bottom(panel_id(state, "composer"))
         .resizable(false)
         .frame(Frame::NONE.fill(surface).corner_radius(theme::bottom_corners()).inner_margin(Margin { left: 32, right: 32, top: 8, bottom: 20 }))
@@ -287,13 +390,19 @@ pub fn show(
                 None => {}
             }
         });
+    }
     CentralPanel::default()
         .frame(Frame::NONE)
         .show(ui, |ui| {
-            widgets::wallpaper(ui, ui.max_rect(), &session.id);
-            Frame::NONE.inner_margin(Margin { left: 32, right: 24, top: 0, bottom: 8 }).show(ui, |ui| {
+            let thread = ui.max_rect();
+            widgets::wallpaper(ui, thread, &session.id);
+            // The floating composer's height is known from the frame before; the
+            // thread leaves that much room under its last message.
+            let composer_h: f32 = if floating { ui.data(|d| d.get_temp(floating_composer_id())).unwrap_or(124.0) } else { 0.0 };
+            ui.data_mut(|d| d.insert_temp(thread_tail_id(), if floating { composer_h + FLOAT_BOTTOM + 12.0 } else { 0.0 }));
+            Frame::NONE.inner_margin(Margin { left: 32, right: 24, top: 0, bottom: if floating { 0 } else { 8 } }).show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                if several {
+                if several && !theme::mint() {
                     bound_banner(ui, &p, session);
                 }
                 if crate::ui::privacy::blur_chat() {
@@ -315,9 +424,43 @@ pub fn show(
                 delete_dialog(ui.ctx(), state, &mut commands);
                 contact_dialog(ui.ctx(), state, session, &mut commands);
             });
+            if floating {
+                // Drawn after the thread, so on top of it; only the box itself takes clicks.
+                let rect = Rect::from_min_max(pos2(thread.left() + 32.0, thread.bottom() - FLOAT_BOTTOM - composer_h), pos2(thread.right() - 32.0, thread.bottom() - FLOAT_BOTTOM));
+                let mut over = ui.new_child(egui::UiBuilder::new().max_rect(rect).layout(Layout::top_down(Align::Min)));
+                let to = super::chat_title(&book, chat);
+                let (id, jid) = (session.id.clone(), chat.jid.clone());
+                reply_bar(&mut over, &p, state, &id, &jid);
+                match composer(&mut over, &p, state, &to, &jid, session, &book, several, false) {
+                    Some(Outgoing::Text(text, mentions)) => commands.push(text_command(state, id, jid, text, mentions)),
+                    Some(Outgoing::File(path, caption)) => commands.push(Command::SendFile { id, chat: jid, path, caption }),
+                    Some(Outgoing::Sticker(path)) => commands.push(Command::SendSticker { id, chat: jid, path }),
+                    Some(Outgoing::Voice { session, chat, path }) => commands.push(Command::SendVoice { id: session, chat, path }),
+                    None => {}
+                }
+                let used = over.min_rect().height();
+                if (used - composer_h).abs() > 0.5 {
+                    ui.data_mut(|d| d.insert_temp(floating_composer_id(), used));
+                    ui.ctx().request_repaint();
+                }
+            }
         });
     });
     commands
+}
+
+/// Space under Mint's floating composer.
+const FLOAT_BOTTOM: f32 = 20.0;
+
+/// Where the height of Mint's floating composer is kept from one frame to the next.
+fn floating_composer_id() -> egui::Id {
+    egui::Id::unique("mint_composer_height")
+}
+
+/// Where the room the thread leaves under its last message is kept: the
+/// floating composer and the space around it, or nothing.
+fn thread_tail_id() -> egui::Id {
+    egui::Id::unique("mint_thread_tail")
 }
 
 /// While typing, "sedang mengetik" is said again this often (the contact's
@@ -449,6 +592,12 @@ fn typing_color(p: &Palette) -> Color32 {
 /// `Ref · Chat lengkap`), laid out right to left. Off while the number is not
 /// connected or another call is on; video also without ffmpeg.
 fn call_buttons(ui: &mut Ui, p: &Palette, call_on: bool, session: &SessionView, chat: &Chat, size: f32, commands: &mut Vec<Command>) {
+    call_buttons_as(ui, p, call_on, session, chat, size, commands, false);
+}
+
+/// The call buttons; `merged` folds voice and video into one button with a menu.
+#[allow(clippy::too_many_arguments)]
+fn call_buttons_as(ui: &mut Ui, p: &Palette, call_on: bool, session: &SessionView, chat: &Chat, size: f32, commands: &mut Vec<Command>, merged: bool) {
     if chat.is_group() {
         return;
     }
@@ -463,11 +612,34 @@ fn call_buttons(ui: &mut Ui, p: &Palette, call_on: bool, session: &SessionView, 
         (true, "video", free && ffmpeg, if !free { busy } else if !ffmpeg { tr("Video calls need ffmpeg installed", "Video call butuh ffmpeg terpasang") } else { tr("Video call", "Video call") }),
         (false, "phone", free, if free { tr("Voice call", "Panggilan suara") } else { busy }),
     ];
+    // Mint: the buttons take the control colour, thinned, not the green of its markers.
+    let soft = if theme::mint() { p.primary.gamma_multiply(0.12) } else { p.accent_soft };
+    if merged {
+        // Mint's phone header: voice and video behind one button.
+        ui.add_space(4.0);
+        let any = buttons.iter().any(|b| b.2);
+        let (rect, response) = ui.allocate_exact_size(vec2(size + 16.0, size), Sense::click());
+        ui.painter().rect_filled(rect, size / 2.0, if any { soft } else { p.raised });
+        let color = if any { p.primary } else { p.muted };
+        icons::paint(ui, Rect::from_center_size(pos2(rect.left() + size * 0.5, rect.center().y), vec2(size * 0.45, size * 0.45)), "phone", size * 0.45, color);
+        icons::paint(ui, Rect::from_center_size(pos2(rect.right() - 12.0, rect.center().y), vec2(12.0, 12.0)), "chevron-down", 12.0, color);
+        let response = response.on_hover_text(tr("Call", "Panggilan")).on_hover_cursor(CursorIcon::PointingHand);
+        egui::Popup::menu(&response).show(|ui| {
+            ui.set_min_width(190.0);
+            for (video, _, enabled, hint) in buttons.into_iter().rev() {
+                let label = if video { tr("Video call", "Video call") } else { tr("Voice call", "Panggilan suara") };
+                if ui.add_enabled(enabled, egui::Button::new(label)).on_disabled_hover_text(hint).clicked() {
+                    commands.push(Command::PlaceCall { id: session.id.clone(), chat: chat.jid.clone(), video });
+                }
+            }
+        });
+        return;
+    }
     for (video, icon, enabled, hint) in buttons {
         ui.add_space(4.0);
         let (rect, response) = ui.allocate_exact_size(vec2(size, size), if enabled { Sense::click() } else { Sense::hover() });
         let lift = ui.ctx().animate_bool_with_time(response.id, enabled && response.hovered(), 0.12);
-        let fill = if enabled { p.accent_soft } else { p.raised };
+        let fill = if enabled { soft } else { p.raised };
         ui.painter().circle_filled(rect.center(), size / 2.0 + lift, fill);
         icons::paint(ui, rect, icon, size * 0.45, if enabled { p.primary } else { p.muted });
         let response = response.on_hover_text(hint);
@@ -501,7 +673,13 @@ fn reply_badge(ui: &mut Ui, p: &Palette) {
     let text = tr("Not replied", "Belum dibalas");
     let galley = ui.painter().layout_no_wrap(text.to_owned(), fonts::ui(12.0, Weight::SemiBold), theme::FOREST_ORANGE);
     let (rect, _) = ui.allocate_exact_size(vec2(galley.size().x + 20.0, 24.0), Sense::hover());
-    let (fill, color) = if theme::template().top_nav() { (p.orange_soft, theme::FOREST_ORANGE) } else { (p.raised, p.amber) };
+    let (fill, color) = if theme::template().top_nav() {
+        (p.orange_soft, theme::FOREST_ORANGE)
+    } else if theme::mint() {
+        (p.amber.gamma_multiply(0.14), p.amber)
+    } else {
+        (p.raised, p.amber)
+    };
     ui.painter().rect_filled(rect, 12.0, fill);
     widgets::paint_text(ui, rect, text, fonts::ui(12.0, Weight::SemiBold), color, Align::Center);
 }
@@ -526,6 +704,18 @@ fn older_bar(ui: &mut Ui, p: &Palette, state: &State, session: &SessionView, cha
                 Weight::Regular,
                 p.muted,
             ));
+        } else if session.status == Status::Connected && theme::mint() {
+            // Rarely used, so it reads as a quiet link that turns into a pill under the pointer.
+            let text = tr("Load older messages from phone", "Muat pesan lama dari HP");
+            let galley = ui.painter().layout_no_wrap(text.to_owned(), fonts::ui(12.0, Weight::Medium), p.muted);
+            let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 44.0, 28.0), Sense::click());
+            let color = if response.hovered() { p.text } else { p.muted };
+            if response.hovered() {
+                ui.painter().rect_filled(rect, 14.0, p.raised);
+            }
+            icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 19.0, rect.center().y), vec2(14.0, 14.0)), "download", 14.0, color);
+            ui.painter().galley(pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0), galley, color);
+            clicked = response.on_hover_cursor(CursorIcon::PointingHand).clicked();
         } else if session.status == Status::Connected {
             clicked = widgets::button(ui, Some("download"), tr("Load older messages from phone", "Muat pesan lama dari HP"), Kind::Secondary).clicked();
         }
@@ -585,7 +775,12 @@ fn chat_list(
         None if state.inbox_grouped && several => tr("By number", "Per nomor").to_owned(),
         None => tr("All numbers", "Semua nomor").to_owned(),
     };
+    // Mint's head is three rows: the number chips, the tabs, and the search
+    // with "split by number" as an icon beside it. The scope reads off the
+    // chips and the counts off the tabs, so the title and its line are gone.
+    let mint = theme::mint();
     ui.add_space(12.0);
+    if !mint {
     ui.horizontal(|ui| {
         ui.add_space(8.0);
         ui.vertical(|ui| {
@@ -612,11 +807,12 @@ fn chat_list(
         });
     });
     ui.add_space(6.0);
+    }
     if several {
         number_chips(ui, p, state, sessions);
         ui.add_space(6.0);
     }
-    if combined {
+    if combined && !mint {
         ui.horizontal(|ui| {
             ui.add_space(6.0);
             let mut mode = usize::from(state.inbox_grouped);
@@ -646,7 +842,18 @@ fn chat_list(
         widgets::hline(ui, ui.max_rect(), ui.cursor().top() - 2.0, p.border);
     }
     ui.add_space(6.0);
-    widgets::search(ui, &mut state.chat_search, tr("Search name or number", "Cari nama atau nomor"), ui.available_width(), false);
+    if mint && combined {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            widgets::search(ui, &mut state.chat_search, tr("Search name or number", "Cari nama atau nomor"), ui.available_width() - 38.0, false);
+            let hint = if state.inbox_grouped { tr("All numbers together", "Gabung semua nomor") } else { tr("Split by number", "Pisah per nomor") };
+            if widgets::icon_button(ui, "columns-2", 34.0, state.inbox_grouped).on_hover_text(hint).clicked() {
+                state.inbox_grouped = !state.inbox_grouped;
+            }
+        });
+    } else {
+        widgets::search(ui, &mut state.chat_search, tr("Search name or number", "Cari nama atau nomor"), ui.available_width(), false);
+    }
     ui.add_space(4.0);
 
     let lines = lines_for(state, &scoped, state.chat_tab, combined && state.inbox_grouped);
@@ -1105,14 +1312,14 @@ fn chat_row(
         // "@": a mention is waiting; sits before the unread count.
         let x = right - if chat.unread > 0 { 26.0 + 18.0 } else { 18.0 };
         let badge = Rect::from_min_size(pos2(x, bottom.center().y - 9.0), vec2(18.0, 18.0));
-        ui.painter().rect_filled(badge, 9.0, p.primary);
-        widgets::paint_text(ui, badge, "@", fonts::ui(11.0, Weight::SemiBold), p.on_primary, Align::Center);
+        ui.painter().rect_filled(badge, 9.0, p.hl);
+        widgets::paint_text(ui, badge, "@", fonts::ui(11.0, Weight::SemiBold), p.on_hl, Align::Center);
     }
     if chat.unread > 0 {
         let badge = Rect::from_min_size(pos2(right - 22.0, bottom.center().y - 9.0), vec2(22.0, 18.0));
-        ui.painter().rect_filled(badge, 9.0, p.primary);
+        ui.painter().rect_filled(badge, 9.0, p.hl);
         let count = if chat.unread > 99 { "99+".to_owned() } else { chat.unread.to_string() };
-        widgets::paint_text(ui, badge, &count, fonts::ui(11.0, Weight::SemiBold), p.on_primary, Align::Center);
+        widgets::paint_text(ui, badge, &count, fonts::ui(11.0, Weight::SemiBold), p.on_hl, Align::Center);
     }
     if let Some(session) = via {
         let label = ui.painter().layout_no_wrap(tr("to", "masuk ke").to_owned(), fonts::ui(11.0, Weight::Regular), p.muted);
@@ -1168,7 +1375,9 @@ fn paint_member_face(ui: &Ui, rect: Rect, initials: &str, picture: Option<&std::
         widgets::paint_avatar(ui, rect, initials, picture, false);
         return;
     }
-    ui.painter().rect_filled(rect, R_MD, color.gamma_multiply(0.18));
+    // A rounded square, or a circle in Mint (like every other picture there).
+    let radius = if theme::mint() { (rect.height() / 2.0).min(127.0) as u8 } else { R_MD };
+    ui.painter().rect_filled(rect, radius, color.gamma_multiply(0.18));
     widgets::paint_text(ui, rect, initials, fonts::ui(rect.height() * 0.38, Weight::SemiBold), color, Align::Center);
 }
 
@@ -1184,7 +1393,7 @@ fn tick(p: &Palette, status: &Delivery, grey: Color32, dark: bool) -> Option<(&'
     let blue = if dark && theme::template() == theme::Template::Forest {
         // Pego `Status pesan keluar`: read is two lime ticks on the forest bubble.
         p.accent
-    } else if dark || !is_dark(p.bg) {
+    } else if dark || (!is_dark(p.bg) && !theme::mint()) {
         READ_BLUE
     } else {
         Color32::from_rgb(0x1E, 0x88, 0xE5)
@@ -1234,6 +1443,12 @@ fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, siz
     }
     let text = book.with_mention_names(&m.text, &m.mentions);
     widgets::paint_text(ui, rect, &text.replace('\n', " "), fonts::ui(size, Weight::Regular), color, Align::Min);
+}
+
+/// Whether `m` is drawn as our own bubble: inverted, on the primary colour.
+/// Mint draws every bubble alike and tells ours by its side alone.
+fn own_look(m: &ChatMsg) -> bool {
+    m.from_me && !theme::mint()
 }
 
 /// What a message deleted for everyone shows instead of its text (#72).
@@ -1493,11 +1708,11 @@ fn paint_call_log(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media) 
     icons::paint(ui, Rect::from_center_size(center, vec2(16.0, 16.0)), icon, 16.0, glyph);
     let label = crate::backend::call::call_label(out, video, seconds);
     let title = label.trim_start_matches('[').trim_end_matches(']');
-    let fg = if m.from_me { p.on_primary } else { p.text };
+    let fg = if own_look(m) { p.on_primary } else { p.text };
     let text = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top() + 2.0), pos2(rect.right(), rect.top() + 22.0));
     widgets::paint_text(ui, text, title, fonts::ui(13.5, Weight::SemiBold), fg, Align::Min);
     let when = Rect::from_min_max(pos2(rect.left() + 46.0, rect.top() + 22.0), pos2(rect.right(), rect.bottom()));
-    let sub = if mine { p.on_primary_muted } else { p.muted };
+    let sub = if own_look(m) { p.on_primary_muted } else { p.muted };
     widgets::paint_text(ui, when, &time::clock(m.ts), fonts::ui(12.0, Weight::Regular), sub, Align::Min);
     // "Call back" after one we missed, "Call again" otherwise (Pego `FM/Call/LogBubble`).
     let label = match (!mine && matches!(out, "missed" | "declined"), video) {
@@ -1572,7 +1787,7 @@ fn clock_of(seconds: f32) -> String {
 fn paint_voice(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, downloads: &Downloads) -> Option<MediaClick> {
     use crate::backend::player;
     let forest = theme::template().top_nav();
-    let (button, glyph, played, rest, sub) = if m.from_me {
+    let (button, glyph, played, rest, sub) = if own_look(m) {
         let button = if forest { p.accent } else { p.on_primary };
         (button, p.primary, button, p.on_primary_muted, p.on_primary_muted)
     } else {
@@ -1644,12 +1859,12 @@ fn paint_voice(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, dow
     let mut speed_clicked = false;
     if let Some(s) = status {
         let label = if s.speed == 1.0 { "1×".to_owned() } else { format!("{}×", s.speed).replace('.', if crate::i18n::indonesian() { "," } else { "." }) };
-        let galley = ui.painter().layout_no_wrap(label, fonts::ui(11.0, Weight::SemiBold), if m.from_me { p.on_primary } else { p.text });
+        let galley = ui.painter().layout_no_wrap(label, fonts::ui(11.0, Weight::SemiBold), if own_look(m) { p.on_primary } else { p.text });
         let chip = Rect::from_center_size(pos2(bars_rect.center().x, row_y), vec2(galley.size().x + 14.0, 16.0));
         let chip_response = ui.interact(chip, ui.scope_id().with(("voice_speed", &m.id)), Sense::click());
-        let fill = if m.from_me { p.on_primary_muted.gamma_multiply(0.35) } else { p.raised };
+        let fill = if own_look(m) { p.on_primary_muted.gamma_multiply(0.35) } else { p.raised };
         ui.painter().rect_filled(chip, 8.0, fill);
-        ui.painter().galley(chip.center() - galley.size() / 2.0, galley, if m.from_me { p.on_primary } else { p.text });
+        ui.painter().galley(chip.center() - galley.size() / 2.0, galley, if own_look(m) { p.on_primary } else { p.text });
         speed_clicked = chip_response
             .on_hover_text(tr("Playback speed", "Kecepatan putar"))
             .on_hover_cursor(CursorIcon::PointingHand)
@@ -1754,10 +1969,10 @@ fn file_label(media: &Media) -> Option<String> {
 /// the name and the detail line, and a round download button while the file
 /// isn't saved yet.
 fn paint_card(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, detail: &str, state: MediaState) {
-    let (fg, sub) = if m.from_me { (p.on_primary, p.on_primary_muted) } else { (p.text, p.muted) };
-    let back = if m.from_me { p.on_primary_muted.gamma_multiply(0.25) } else { p.panel };
+    let (fg, sub) = if own_look(m) { (p.on_primary, p.on_primary_muted) } else { (p.text, p.muted) };
+    let back = if own_look(m) { p.on_primary_muted.gamma_multiply(0.25) } else { p.panel };
     ui.painter().rect_filled(rect, 10.0, back);
-    let (icon, fill, glyph) = file_tile(p, file_type(media), m.from_me);
+    let (icon, fill, glyph) = file_tile(p, file_type(media), own_look(m));
     let tile = Rect::from_min_size(pos2(rect.left() + 6.0, rect.center().y - 20.0), vec2(40.0, 40.0));
     ui.painter().rect_filled(tile, 4.0, fill);
     icons::paint(ui, tile, icon, 20.0, glyph);
@@ -1772,7 +1987,7 @@ fn paint_card(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, deta
         let center = pos2(rect.right() - 22.0, rect.center().y);
         let hovered = ui.rect_contains_pointer(rect);
         let radius = if hovered { 16.8 } else { 16.0 };
-        let (disc, mark) = if m.from_me { (p.primary, p.on_primary) } else { (p.bubble_in, p.primary) };
+        let (disc, mark) = if own_look(m) { (p.primary, p.on_primary) } else { (p.bubble_in, p.primary) };
         ui.painter().circle_filled(center, radius, disc);
         let at = Rect::from_center_size(center, vec2(16.0, 16.0));
         match state {
@@ -2630,6 +2845,8 @@ fn messages(
     let group = chat.is_group();
     let wrap = (ui.available_width() * 0.7).min(420.0);
     let dark = is_dark(p.bubble_in);
+    // Mint's bubbles are rounder (16) than Classic's and Forest's (12).
+    let bubble_r = if theme::mint() { 16 } else { R_LG };
     let mut start = chat.messages.len().saturating_sub(SHOWN);
     // A search match older than that is drawn too, with a little before it (#143).
     if search.is_some() {
@@ -2700,7 +2917,7 @@ fn messages(
         let lead = if new_run && prev.is_some() && group { RUN_GAP } else { 0.0 };
         prev = Some(who.clone());
         // A failed message shows it with the red mark; the time keeps its colour.
-        let (fg, meta_color, code_bg) = if m.from_me {
+        let (fg, meta_color, code_bg) = if own_look(m) {
             (p.on_primary, p.on_primary_muted, p.on_primary_muted.gamma_multiply(0.35))
         } else {
             (p.text, p.muted, p.border)
@@ -2714,7 +2931,7 @@ fn messages(
         let meta_color = if sticker { p.muted } else { meta_color };
         let caption = caption(m);
         let mentions = mention_refs(book, m, own.0, own.1);
-        let accent = if m.from_me { fg } else { p.accent_text };
+        let accent = if own_look(m) { fg } else { p.accent_text };
         let text = if m.deleted {
             Some(deleted_galley(ui, m, meta_color))
         } else {
@@ -2727,7 +2944,7 @@ fn messages(
             })
         };
         let meta = time::clock(m.ts);
-        let tick = if m.from_me { tick(p, &m.status, meta_color, !sticker && is_dark(p.primary)) } else { None };
+        let tick = if m.from_me { tick(p, &m.status, meta_color, !sticker && is_dark(if theme::mint() { p.bubble_in } else { p.primary })) } else { None };
         let meta = if m.edited { crate::trf!("Edited · {meta}", "Diedit · {meta}") } else { meta };
         let meta = if m.forwarded { crate::trf!("Forwarded · {meta}", "Diteruskan · {meta}") } else { meta };
         let head = who.filter(|_| group && new_run).map(|jid| {
@@ -2772,6 +2989,9 @@ fn messages(
             Item::Typing(_) => TYPING_ROW + GAP,
         })
         .sum();
+    // Mint's desktop composer floats over the thread: the last message stops above it.
+    let tail: f32 = if theme::mint() && !crate::ui::compact::is_compact(ui.ctx()) { ui.data(|d| d.get_temp(thread_tail_id())).unwrap_or(0.0) } else { 0.0 };
+    let content = content + tail;
 
     let output = ScrollArea::vertical()
         .stick_to_bottom(true)
@@ -2807,11 +3027,22 @@ fn messages(
                     }
                     Item::Unread(count) => {
                         let label = if count == 1 { tr("1 unread message", "1 pesan belum dibaca").to_owned() } else { crate::trf!("{count} unread messages", "{count} pesan belum dibaca") };
+                        if theme::mint() {
+                            // Mint: a thin line across the thread with the label in its gap,
+                            // so the place to read on from is found at a glance.
+                            let galley = painter.layout_no_wrap(label, fonts::ui(11.5, Weight::SemiBold), p.accent_text);
+                            let (w, cy, cx) = (galley.size().x, y + DIVIDER / 2.0, area.center().x);
+                            let line = Stroke::new(1.0, p.hl.gamma_multiply(0.35));
+                            painter.hline(area.left()..=cx - w / 2.0 - 12.0, cy, line);
+                            painter.hline(cx + w / 2.0 + 12.0..=area.right(), cy, line);
+                            painter.galley(pos2(cx - w / 2.0, cy - galley.size().y / 2.0), galley, p.accent_text);
+                        } else {
                         let galley = painter.layout_no_wrap(label, fonts::ui(12.0, Weight::Medium), p.accent_text);
                         let (w, cy, cx) = (galley.size().x, y + DIVIDER / 2.0, area.center().x);
                         let pill = Rect::from_center_size(pos2(cx, cy), vec2(w + 24.0, 24.0));
                         painter.rect(pill, 12.0, p.accent_soft, Stroke::new(1.0, p.border), StrokeKind::Inside);
                         painter.galley(pos2(cx - w / 2.0, cy - galley.size().y / 2.0), galley, p.accent_text);
+                        }
                         if std::mem::take(&mut scroll_unread) {
                             ui.scroll_to_rect(Rect::from_min_size(pos2(area.left(), y), vec2(area.width(), DIVIDER)), Some(Align::TOP));
                         }
@@ -2819,11 +3050,18 @@ fn messages(
                     }
                     Item::Day(label) => {
                         // A pill, so it reads on the wallpaper (Pego m5/Chat "Hari ini").
-                        let galley = painter.layout_no_wrap(label, fonts::ui(12.0, Weight::Medium), p.text_2);
+                        // Mint: a quiet label without an outline, so it is not taken for a bubble.
+                        let mint = theme::mint();
+                        let (font, color) = if mint { (fonts::ui(11.5, Weight::Medium), p.muted) } else { (fonts::ui(12.0, Weight::Medium), p.text_2) };
+                        let galley = painter.layout_no_wrap(label, font, color);
                         let (w, cy, cx) = (galley.size().x, y + DIVIDER / 2.0, area.center().x);
-                        let pill = Rect::from_center_size(pos2(cx, cy), vec2(w + 24.0, 24.0));
-                        painter.rect(pill, 12.0, p.bubble_in, Stroke::new(1.0, p.border), StrokeKind::Inside);
-                        painter.galley(pos2(cx - w / 2.0, cy - galley.size().y / 2.0), galley, p.text_2);
+                        if mint {
+                            painter.rect_filled(Rect::from_center_size(pos2(cx, cy), vec2(w + 20.0, 22.0)), 11.0, p.raised);
+                        } else {
+                            let pill = Rect::from_center_size(pos2(cx, cy), vec2(w + 24.0, 24.0));
+                            painter.rect(pill, 12.0, p.bubble_in, Stroke::new(1.0, p.border), StrokeKind::Inside);
+                        }
+                        painter.galley(pos2(cx - w / 2.0, cy - galley.size().y / 2.0), galley, color);
                         y += DIVIDER;
                     }
                     Item::Bubble(Bubble { m, media, text, tick, quote, meta, head, lead, size, foot }) => {
@@ -2835,7 +3073,7 @@ fn messages(
                             ui.multiply_opacity(0.7);
                             painter.set_opacity(ui.opacity());
                         }
-                        let (fill, stroke) = if m.from_me {
+                        let (fill, stroke) = if own_look(m) {
                             (p.primary, Stroke::NONE)
                         } else {
                             (p.bubble_in, Stroke::new(1.0, p.border))
@@ -2847,7 +3085,7 @@ fn messages(
                         };
                         let rect = Rect::from_min_size(pos2(left, y), size);
                         if !matches!(media, Some((_, MediaBox::Sticker(_)))) {
-                            painter.rect(rect, R_LG, fill, stroke, StrokeKind::Inside);
+                            painter.rect(rect, bubble_r, fill, stroke, StrokeKind::Inside);
                         }
                         // Created before the media's own click area, so media keeps its primary click.
                         let bubble = ui.interact(rect, ui.scope_id().with(("bubble", &m.id)), Sense::click());
@@ -2870,15 +3108,15 @@ fn messages(
                             ui.ctx().request_repaint();
                         }
                         if flash.as_deref() == Some(m.id.as_str()) {
-                            painter.rect_stroke(rect.expand(2.0), R_LG, Stroke::new(2.0, p.primary), StrokeKind::Outside);
+                            painter.rect_stroke(rect.expand(2.0), bubble_r, Stroke::new(2.0, p.primary), StrokeKind::Outside);
                         }
                         let mut at = rect.min + vec2(14.0, 10.0);
                         // Anti-peek: frosted until the cursor is on this bubble, then outlined.
                         let veiled = crate::ui::privacy::blur_chat() && !ui.rect_contains_pointer(rect);
                         if crate::ui::privacy::blur_chat() && !veiled {
-                            painter.rect_stroke(rect.expand(1.0), R_LG, Stroke::new(1.5, p.primary), StrokeKind::Outside);
+                            painter.rect_stroke(rect.expand(1.0), bubble_r, Stroke::new(1.5, p.primary), StrokeKind::Outside);
                         }
-                        let frost = if m.from_me { p.on_primary_muted.gamma_multiply(0.55) } else { p.border_strong.gamma_multiply(0.45) };
+                        let frost = if own_look(m) { p.on_primary_muted.gamma_multiply(0.55) } else { p.border_strong.gamma_multiply(0.45) };
                         if let Some((name, jid, color)) = head {
                             let face = Rect::from_min_size(pos2(area.left(), y), vec2(FACE, FACE));
                             match avatars.get(&jid) {
@@ -2898,7 +3136,7 @@ fn messages(
                         }
                         if let Some(quote) = quote {
                             let boxed = Rect::from_min_size(at, vec2(size.x - 28.0, quote.size().y + 10.0));
-                            let (fill, bar) = if m.from_me { (Color32::from_white_alpha(28), p.on_primary_muted) } else { (p.raised, p.primary) };
+                            let (fill, bar) = if own_look(m) { (Color32::from_white_alpha(28), p.on_primary_muted) } else { (p.raised, p.primary) };
                             painter.rect_filled(boxed, R_MD, fill);
                             painter.rect_filled(Rect::from_min_size(boxed.min, vec2(3.0, boxed.height())), egui::CornerRadius { nw: R_MD, sw: R_MD, ne: 0, se: 0 }, bar);
                             if veiled {
@@ -2916,7 +3154,7 @@ fn messages(
                             }
                             // Pictures, stickers and document pages go under a cover (voice notes show nothing).
                             if veiled && !matches!(shown, MediaBox::Voice(_)) {
-                                painter.rect_filled(media_rect, R_MD, if m.from_me { p.primary } else { p.raised });
+                                painter.rect_filled(media_rect, R_MD, if own_look(m) { p.primary } else { p.raised });
                                 icons::paint(ui, Rect::from_center_size(media_rect.center(), vec2(22.0, 22.0)), "eye-off", 22.0, frost);
                             }
                             at.y += media_size.y + 8.0;
@@ -2983,7 +3221,7 @@ fn messages(
         let seen = ui.data_mut(|d| *d.get_temp_mut_or_insert_with(memo_id, || chat.messages.len()));
         let fresh = chat.messages.get(seen..).map_or(0, |new| new.iter().filter(|m| !m.from_me).count());
         let size = 40.0;
-        let at = output.inner_rect.right_bottom() - vec2(size + 16.0, size + 16.0);
+        let at = output.inner_rect.right_bottom() - vec2(size + 16.0, size + 16.0 + tail);
         egui::Area::new(ui.scope_id().with(("chat_to_bottom", &chat.jid)))
             .order(egui::Order::Foreground)
             .fixed_pos(at)
@@ -2994,10 +3232,10 @@ fn messages(
                 icons::paint(ui, rect, "chevron-down", 20.0, p.text_2);
                 if fresh > 0 {
                     let label = if fresh > 99 { "99+".to_owned() } else { fresh.to_string() };
-                    let galley = ui.painter().layout_no_wrap(label, fonts::ui(11.0, Weight::Medium), p.on_primary);
+                    let galley = ui.painter().layout_no_wrap(label, fonts::ui(11.0, Weight::Medium), p.on_hl);
                     let badge = Rect::from_center_size(rect.center_top() + vec2(0.0, 2.0), vec2((galley.size().x + 10.0).max(18.0), 18.0));
-                    ui.painter().rect_filled(badge, 9.0, p.primary);
-                    ui.painter().galley(badge.center() - galley.size() / 2.0, galley, p.on_primary);
+                    ui.painter().rect_filled(badge, 9.0, p.hl);
+                    ui.painter().galley(badge.center() - galley.size() / 2.0, galley, p.on_hl);
                 }
                 if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
                     ui.data_mut(|d| d.insert_temp(bottom_id, true));
@@ -3967,10 +4205,18 @@ fn composer(
             ui.label(rich(&crate::trf!("{} is not connected, messages cannot be sent yet", "{} tidak terhubung, pesan belum bisa dikirim", session.name), 12.0, Weight::Regular, p.red_text));
         }
     } else {
+    // Mint: the box floats over the thread, a little see-through. egui cannot
+    // blur what is behind it, so it stays opaque enough to read on.
+    let (fill, shadow) = if theme::mint() {
+        (p.panel.gamma_multiply(0.92), egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(22) })
+    } else {
+        (p.panel, egui::Shadow::NONE)
+    };
     Frame::NONE
-        .fill(p.panel)
+        .fill(fill)
+        .shadow(shadow)
         .stroke(Stroke::new(1.0, border))
-        .corner_radius(R_LG)
+        .corner_radius(if theme::mint() { 18 } else { R_LG })
         .inner_margin(Margin { left: 14, right: 12, top: 12, bottom: 10 })
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -4012,7 +4258,10 @@ fn composer(
                     let sticker = widgets::icon_button(ui, "sticker", 28.0, false).on_hover_text(tr("Sticker", "Stiker"));
                     sticker_sent = stickers::picker(ui, &sticker, book, connected);
                     ui.add_space(8.0);
-                    let note = if connected && several {
+                    // Mint names the number in a chip beside the send button instead.
+                    let note = if connected && several && theme::mint() {
+                        String::new()
+                    } else if connected && several {
                         crate::trf!(
                             "Replying from {} · locked to the recipient's number",
                             "Membalas dari {} · dikunci ke nomor penerima",
@@ -4040,6 +4289,24 @@ fn composer(
                         send |= connected && button.inner.clicked();
                     }
                     ui.add_space(8.0);
+                    if theme::mint() {
+                        // The number the reply goes out from, as a chip; the queue only while it holds something.
+                        if several {
+                            let width = ui.painter().layout_no_wrap(super::devices::chip_label(session), fonts::ui(11.0, Weight::Medium), p.text_2).size().x + 38.0;
+                            let (rect, chip) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
+                            number_chip(ui, p, rect.min, session);
+                            chip.on_hover_text(crate::trf!(
+                                "Replying from {} · locked to the recipient's number",
+                                "Membalas dari {} · dikunci ke nomor penerima",
+                                super::devices::chip_label(session)
+                            ));
+                        }
+                        if session.queue > 0 {
+                            ui.label(rich(&crate::trf!("Queued {}", "Antre {}", session.queue), 12.0, Weight::Regular, p.muted))
+                                .on_hover_text(tr("Messages waiting to go out, about 4 s apart", "Pesan yang menunggu dikirim, berjarak ± 4 dtk"));
+                        }
+                        return;
+                    }
                     let queue = if session.queue == 0 {
                         tr("Queued 0", "Antre 0").to_owned()
                     } else {
@@ -4377,6 +4644,21 @@ fn group_details(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &A
 fn contact(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars, webhook: &str) {
     ui.spacing_mut().item_spacing.y = 20.0;
     let title = super::chat_title(book, chat);
+    let mint = theme::mint();
+    if mint {
+        // Mint: the picture large and centred, the name and number under it.
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(&title) };
+            let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
+            let (face, _) = ui.allocate_exact_size(vec2(72.0, 72.0), Sense::hover());
+            widgets::paint_avatar(ui, face, &initials, picture, false);
+            photo_target(ui, face, None, &chat.jid, &title, picture);
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(rich(&title, 17.0, Weight::SemiBold, p.text)).truncate());
+            ui.label(rich_mono(&super::chat_subtitle(chat), 12.0, p.muted));
+        });
+    } else {
     ui.vertical(|ui| {
         ui.spacing_mut().item_spacing.y = 10.0;
         let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(&title) };
@@ -4390,13 +4672,17 @@ fn contact(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars
             ui.label(rich_mono(&super::chat_subtitle(chat), 12.0, p.muted));
         });
     });
+    }
 
     let total = chat.messages.len();
     let mine = chat.messages.iter().filter(|m| m.from_me).count();
     let since = chat.messages.first().map(|m| time::day_label(m.ts)).unwrap_or_else(|| "-".to_owned());
     let (strip, _) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::hover());
-    ui.painter()
-        .rect_stroke(strip, R_MD, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    if mint {
+        ui.painter().rect_filled(strip, 14.0, p.raised);
+    } else {
+        ui.painter().rect_stroke(strip, R_MD, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    }
     let cells = widgets::columns(strip, &[None; 3], 0.0);
     let values = [(total.to_string(), tr("messages", "pesan")), (mine.to_string(), tr("from you", "dari Anda")), (since, tr("since", "sejak"))];
     for (i, (cell, (value, key))) in cells.iter().zip(values).enumerate() {
@@ -4406,8 +4692,9 @@ fn contact(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars
         }
         let inner = cell.shrink2(vec2(12.0, 8.0));
         let (top, bottom) = inner.split_top_bottom_at_fraction(0.55);
-        widgets::paint_text(ui, top, &value, fonts::ui(15.0, Weight::SemiBold), p.text, Align::Min);
-        widgets::paint_text(ui, bottom, key, fonts::ui(12.0, Weight::Regular), p.muted, Align::Min);
+        let align = if mint { Align::Center } else { Align::Min };
+        widgets::paint_text(ui, top, &value, fonts::ui(15.0, Weight::SemiBold), p.text, align);
+        widgets::paint_text(ui, bottom, key, fonts::ui(12.0, Weight::Regular), p.muted, align);
     }
 
     ui.vertical(|ui| {
@@ -4506,17 +4793,29 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
             if several {
                 ui.add_space(14.0);
                 // "Gabung semua" / "Per nomor" as two halves of one track.
-                let (track, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
-                ui.painter().rect_filled(track, 22.0, if forest { p.panel } else { p.raised });
+                let mint = theme::mint();
+                let track_h = if mint { 38.0 } else { 44.0 };
+                let (track, _) = ui.allocate_exact_size(vec2(ui.available_width(), track_h), Sense::hover());
+                ui.painter().rect_filled(track, if mint { 12.0 } else { 22.0 }, if forest { p.panel } else { p.raised });
                 for (i, (icon, label)) in [("layers", tr("All together", "Gabung semua")), ("columns-2", tr("By number", "Per nomor"))].into_iter().enumerate() {
-                    let half = Rect::from_min_size(pos2(track.left() + i as f32 * track.width() / 2.0, track.top()), vec2(track.width() / 2.0, 44.0));
+                    let half = Rect::from_min_size(pos2(track.left() + i as f32 * track.width() / 2.0, track.top()), vec2(track.width() / 2.0, track_h));
                     let active = state.inbox_grouped == (i == 1);
                     let response = ui.interact(half, ui.scope_id().with(("m_mode", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if active {
+                    // Mint: the half in use is a raised light tile, so it does not
+                    // compete with the dark chip of the number filter under it.
+                    if active && mint {
+                        ui.painter().rect(half.shrink(3.0), 9.0, p.bg, Stroke::new(1.0, p.border), StrokeKind::Inside);
+                    } else if active {
                         ui.painter().rect_filled(half.shrink(4.0), 18.0, p.primary);
                     }
-                    let color = if active { p.on_primary } else { p.text_2 };
-                    let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(15.0, Weight::SemiBold), color);
+                    let color = match (active, mint) {
+                        (true, true) => p.text,
+                        (true, false) => p.on_primary,
+                        (false, true) => p.muted,
+                        (false, false) => p.text_2,
+                    };
+                    let (size, weight) = if mint { (14.0, if active { Weight::SemiBold } else { Weight::Medium }) } else { (15.0, Weight::SemiBold) };
+                    let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(size, weight), color);
                     let total = galley.size().x + 24.0;
                     let left = half.center().x - total / 2.0;
                     icons::paint(ui, Rect::from_center_size(pos2(left + 8.0, half.center().y), vec2(16.0, 16.0)), icon, 16.0, color);
@@ -4553,7 +4852,7 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
     let archived = scoped.iter().map(|s| s.book.chats.iter().filter(|c| c.archived).count()).sum::<usize>();
     let lines = lines_for(state, &scoped, if archived_view { TAB_ARCHIVED } else { TAB_ALL }, combined && state.inbox_grouped);
     let via = combined && !state.inbox_grouped;
-    CentralPanel::default().frame(Frame::NONE.fill(p.panel)).show(ui, |ui| {
+    CentralPanel::default().frame(Frame::NONE.fill(if theme::mint() { p.bg } else { p.panel })).show(ui, |ui| {
         ui.painter().hline(ui.max_rect().x_range(), ui.max_rect().top(), Stroke::new(1.0, p.border));
         if archived_view || archived > 0 {
             let label = if archived_view {
@@ -4684,15 +4983,15 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     if at {
         let x = right - if chat.unread > 0 { unread_w + 6.0 + 20.0 } else { 20.0 };
         let badge = Rect::from_min_size(pos2(x, line.center().y - 10.0), vec2(20.0, 20.0));
-        ui.painter().rect_filled(badge, 10.0, p.primary);
-        widgets::paint_text(ui, badge, "@", fonts::ui(11.0, Weight::SemiBold), p.on_primary, Align::Center);
+        ui.painter().rect_filled(badge, 10.0, p.hl);
+        widgets::paint_text(ui, badge, "@", fonts::ui(11.0, Weight::SemiBold), p.on_hl, Align::Center);
     }
     if chat.unread > 0 {
         let count = if chat.unread > 99 { "99+".to_owned() } else { chat.unread.to_string() };
         let w = if chat.unread > 9 { 28.0 } else { 20.0 };
         let badge = Rect::from_min_size(pos2(right - w, line.center().y - 10.0), vec2(w, 20.0));
-        ui.painter().rect_filled(badge, 10.0, p.primary);
-        widgets::paint_text(ui, badge, &count, fonts::ui(11.0, Weight::SemiBold), p.on_primary, Align::Center);
+        ui.painter().rect_filled(badge, 10.0, p.hl);
+        widgets::paint_text(ui, badge, &count, fonts::ui(11.0, Weight::SemiBold), p.on_hl, Align::Center);
     }
     if let Some(session) = via {
         let y = row.top() + 58.0;
@@ -4785,7 +5084,7 @@ fn compact_chat(
                 },
                 |ui| {
                     let menu = widgets::icon_button(ui, "ellipsis-vertical", 36.0, false);
-                    call_buttons(ui, &p, call_on, session, chat, 36.0, &mut commands);
+                    call_buttons_as(ui, &p, call_on, session, chat, 36.0, &mut commands, theme::mint());
                     egui::Popup::menu(&menu).show(|ui| {
                         ui.set_min_width(200.0);
                         if ui.button(tr("Load older messages from phone", "Muat pesan lama dari HP")).clicked() {
@@ -4838,12 +5137,22 @@ fn compact_chat(
     Panel::bottom(panel_id(state, "m_composer"))
         .resizable(false)
         .show_separator_line(false)
-        .frame(Frame::NONE.fill(p.panel).inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 10 }))
+        .frame(Frame::NONE.fill(if theme::mint() { p.bg } else { p.panel }).inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 10 }))
         .show(ui, |ui| {
             let bar = ui.max_rect().expand2(vec2(12.0, 10.0));
             ui.painter().hline(bar.x_range(), bar.top() + 0.5, Stroke::new(1.0, p.border));
             if several {
                 // "Membalas dari CS Utama · 4410": replies are bound to this number.
+                if theme::mint() {
+                    // Mint: a small quiet line over the field, not a chip of its own.
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 5.0;
+                        ui.add_space(8.0);
+                        icons::show(ui, "lock", 12.0, p.muted);
+                        ui.label(rich(&crate::trf!("Replying from {}", "Membalas dari {}", super::devices::chip_label(session)), 11.5, Weight::Medium, p.muted));
+                    });
+                    ui.add_space(4.0);
+                } else {
                 ui.vertical_centered(|ui| {
                     let forest = theme::template().top_nav();
                     let (fill, color) = if forest { (p.accent_soft, p.accent_text) } else { (p.raised, p.text_2) };
@@ -4856,6 +5165,7 @@ fn compact_chat(
                     });
                 });
                 ui.add_space(8.0);
+                }
             }
             let (id, jid) = (session.id.clone(), chat.jid.clone());
             reply_bar(ui, &p, state, &id, &jid);

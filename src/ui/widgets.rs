@@ -207,10 +207,13 @@ pub fn nav_item(ui: &mut Ui, icon: &str, label: &str, count: Option<&str>, selec
     let p = theme::palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
     if selected || response.hovered() {
-        ui.painter().rect_filled(rect, R_SM, p.raised);
+        let (fill, stroke) = theme::sidebar_selected(ui.ctx(), selected);
+        ui.painter().rect(rect, theme::r_control(), fill, stroke, StrokeKind::Inside);
     }
     let icon_rect = Rect::from_min_size(pos2(rect.left() + 10.0, rect.center().y - 8.0), Vec2::splat(16.0));
-    icons::paint(ui, icon_rect, icon, 16.0, if selected { p.text } else { p.muted });
+    // Mint marks the page it is on with the highlight colour.
+    let icon_color = if !selected { p.muted } else if theme::mint() { p.hl } else { p.text };
+    icons::paint(ui, icon_rect, icon, 16.0, icon_color);
     let (weight, color) = if selected {
         (Weight::SemiBold, p.text)
     } else {
@@ -232,15 +235,17 @@ pub fn nav_icon(ui: &mut Ui, icon: &str, label: &str, count: Option<&str>, selec
     let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
     let tile = Rect::from_center_size(row.center(), Vec2::splat(40.0));
     if selected || response.hovered() {
-        ui.painter().rect_filled(tile, R_SM, p.raised);
+        let (fill, stroke) = theme::sidebar_selected(ui.ctx(), selected);
+        ui.painter().rect(tile, theme::r_control(), fill, stroke, StrokeKind::Inside);
     }
-    icons::paint(ui, Rect::from_center_size(tile.center(), Vec2::splat(18.0)), icon, 18.0, if selected { p.text } else { p.muted });
+    let icon_color = if !selected { p.muted } else if theme::mint() { p.hl } else { p.text };
+    icons::paint(ui, Rect::from_center_size(tile.center(), Vec2::splat(18.0)), icon, 18.0, icon_color);
     if let Some(count) = count {
-        let galley = ui.painter().layout_no_wrap(count.to_owned(), fonts::ui(9.5, Weight::SemiBold), p.on_primary);
+        let galley = ui.painter().layout_no_wrap(count.to_owned(), fonts::ui(9.5, Weight::SemiBold), p.on_hl);
         let size = vec2((galley.size().x + 8.0).max(15.0), 15.0);
         let badge = Rect::from_min_size(pos2(tile.right() - size.x + 2.0, tile.top() - 1.0), size);
-        ui.painter().rect_filled(badge, 7.5, p.primary);
-        ui.painter().galley(badge.center() - galley.size() / 2.0, galley, p.on_primary);
+        ui.painter().rect_filled(badge, 7.5, p.hl);
+        ui.painter().galley(badge.center() - galley.size() / 2.0, galley, p.on_hl);
     }
     let hint = match count {
         Some(count) => format!("{label} · {count}"),
@@ -269,7 +274,7 @@ pub fn tab(ui: &mut Ui, label: &str, active: bool) -> Response {
     );
     if active {
         let line = Rect::from_min_max(pos2(rect.left(), rect.bottom() - 2.0), rect.max);
-        ui.painter().rect_filled(line, 0.0, p.text);
+        ui.painter().rect_filled(line, 0.0, if theme::mint() { p.hl } else { p.text });
     }
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
@@ -413,9 +418,9 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
             ui.spacing_mut().item_spacing.x = 10.0;
             let (rect, switch) = ui.allocate_exact_size(vec2(34.0, 20.0), Sense::click());
             let t = ui.ctx().animate_bool(switch.id, *on);
-            ui.painter().rect_filled(rect, 10.0, if *on { p.primary } else { p.border_strong });
+            ui.painter().rect_filled(rect, 10.0, if *on { p.hl } else { p.border_strong });
             let x = egui::lerp(rect.left() + 10.0..=rect.right() - 10.0, t);
-            let knob = if *on { p.on_primary } else { p.text_2 };
+            let knob = if *on { p.on_hl } else { p.text_2 };
             ui.painter().circle_filled(pos2(x, rect.center().y), 7.0, knob);
             let text = ui.add(egui::Label::new(rich(label, 13.0, Weight::Regular, p.text)).sense(Sense::click()));
             switch | text
@@ -487,18 +492,20 @@ fn clear_button(ui: &mut Ui, p: &theme::Palette) -> bool {
 /// The profile picture when cached, else the initials tile.
 pub fn paint_avatar(ui: &Ui, rect: Rect, initials: &str, picture: Option<&Path>, filled: bool) {
     let p = theme::palette(ui.ctx());
+    // A rounded square, or a circle in Mint.
+    let radius = if theme::mint() { (rect.height() / 2.0).min(127.0) as u8 } else { R_MD };
     if let Some(uri) = picture.and_then(|path| picture_uri(ui.ctx(), path)) {
         egui::Image::from_uri(uri)
-            .corner_radius(R_MD)
+            .corner_radius(radius)
             .fit_to_exact_size(rect.size())
             .paint_at(ui, rect);
         ui.painter()
-            .rect_stroke(rect, R_MD, Stroke::new(1.0, p.border), StrokeKind::Inside);
+            .rect_stroke(rect, radius, Stroke::new(1.0, p.border), StrokeKind::Inside);
         return;
     }
     ui.painter().rect(
         rect,
-        R_MD,
+        radius,
         if filled { p.border } else { p.raised },
         Stroke::new(1.0, p.border),
         StrokeKind::Inside,
@@ -704,10 +711,57 @@ pub fn wallpaper(ui: &Ui, rect: Rect, session: &str) {
                 painter.rect_filled(rect, 0.0, p.chat_bg.gamma_multiply(dim));
             }
         }
+        // Mint's own backdrop is what `auto` means there; a picked wallpaper still wins.
+        "auto" if theme::mint() => mint_backdrop(&painter, rect, dark),
         key => {
             let wall = WALLPAPERS.iter().find(|w| w.key == key).unwrap_or_else(|| auto_wallpaper(dark));
             paint_tiles(ui, &painter, rect, wall);
         }
+    }
+}
+
+/// Mint's chat background: a soft green glow from the top right corner under
+/// a faint dot grid. The grid stands still while the messages scroll.
+fn mint_backdrop(painter: &egui::Painter, rect: Rect, dark: bool) {
+    // The glow: an ellipse 75% of the width by 85% of the height around the
+    // top right corner, strongest there. egui has no gradients, so it is a
+    // mesh with a colour per vertex.
+    let (glow, strength) = if dark { (theme::MINT_GLOW.1, 0.16) } else { (theme::MINT_GLOW.0, 1.0) };
+    const CELLS: usize = 24;
+    let mut mesh = egui::Mesh::default();
+    for row in 0..=CELLS {
+        for col in 0..=CELLS {
+            let (u, v) = (col as f32 / CELLS as f32, row as f32 / CELLS as f32);
+            let d = (((1.0 - u) / 0.75).powi(2) + (v / 0.85).powi(2)).sqrt();
+            // 100% at the corner, 45% a third of the way out, gone at three quarters.
+            let alpha = if d < 0.35 { egui::lerp(1.0..=0.45, d / 0.35) } else { egui::lerp(0.45..=0.0, ((d - 0.35) / 0.4).min(1.0)) };
+            let at = pos2(rect.left() + u * rect.width(), rect.top() + v * rect.height());
+            mesh.colored_vertex(at, glow.gamma_multiply(alpha * strength));
+        }
+    }
+    let stride = (CELLS + 1) as u32;
+    for row in 0..CELLS as u32 {
+        for col in 0..CELLS as u32 {
+            let i = row * stride + col;
+            mesh.add_triangle(i, i + 1, i + stride);
+            mesh.add_triangle(i + 1, i + stride + 1, i + stride);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    // The grid: a dot every 28 px.
+    let dot = if dark { Color32::from_white_alpha(18) } else { Color32::from_black_alpha(20) };
+    const STEP: f32 = 28.0;
+    let clip = painter.clip_rect();
+    let mut y = rect.top() + STEP / 2.0;
+    while y < rect.bottom() {
+        if y >= clip.top() - 2.0 && y <= clip.bottom() + 2.0 {
+            let mut x = rect.left() + STEP / 2.0;
+            while x < rect.right() {
+                painter.circle_filled(pos2(x, y), 1.0, dot);
+                x += STEP;
+            }
+        }
+        y += STEP;
     }
 }
 
