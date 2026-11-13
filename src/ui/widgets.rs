@@ -427,6 +427,8 @@ pub fn toggle(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     response.on_hover_cursor(CursorIcon::PointingHand)
 }
 
+/// A search box. While it has text, an × at its end (or Esc) clears it and
+/// keeps the focus in the box (#141).
 pub fn search(ui: &mut Ui, text: &mut String, hint: &str, width: f32, kbd: bool) {
     let p = theme::palette(ui.ctx());
     Frame::NONE
@@ -443,14 +445,22 @@ pub fn search(ui: &mut Ui, text: &mut String, hint: &str, width: f32, kbd: bool)
             ui.allocate_ui_with_layout(vec2(inner, 22.0), ltr, |ui| {
                 ui.set_width(inner);
                 icons::show(ui, "search", 15.0, p.muted);
+                let room_for_clear = if text.is_empty() { 0.0 } else { 24.0 };
                 let edit = egui::TextEdit::singleline(text)
                     .frame(Frame::NONE)
                     .hint_text(rich(hint, 13.0, Weight::Regular, p.muted))
                     .font(fonts::ui(13.0, Weight::Regular))
                     .align(egui::Align2::LEFT_CENTER)
-                    // Whatever is left after the icon, minus room for the Ctrl K hint.
-                    .desired_width((ui.available_width() - if kbd { 54.0 } else { 0.0 }).max(0.0));
-                ui.add(edit);
+                    // Whatever is left after the icon, minus room for the Ctrl K hint
+                    // and the clear button.
+                    .desired_width((ui.available_width() - if kbd { 54.0 } else { 0.0 } - room_for_clear).max(0.0));
+                let field = ui.add(edit);
+                // Esc takes the focus away from a text box; with text, it clears it.
+                let esc = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape));
+                if !text.is_empty() && (esc || clear_button(ui, &p)) {
+                    text.clear();
+                    field.request_focus();
+                }
                 if kbd {
                     Frame::NONE
                         .fill(p.border)
@@ -464,6 +474,15 @@ pub fn search(ui: &mut Ui, text: &mut String, hint: &str, width: f32, kbd: bool)
         });
 }
 
+
+/// The round × at the end of a search box with text; true when clicked.
+fn clear_button(ui: &mut Ui, p: &theme::Palette) -> bool {
+    let (rect, response) = ui.allocate_exact_size(vec2(20.0, 20.0), Sense::click());
+    let fill = if response.hovered() { p.border_strong } else { p.border };
+    ui.painter().circle_filled(rect.center(), 9.0, fill);
+    icons::paint(ui, rect.shrink(5.0), "x", 10.0, p.text_2);
+    response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(crate::i18n::tr("Clear search", "Hapus pencarian")).clicked()
+}
 
 /// The profile picture when cached, else the initials tile.
 pub fn paint_avatar(ui: &Ui, rect: Rect, initials: &str, picture: Option<&Path>, filled: bool) {
