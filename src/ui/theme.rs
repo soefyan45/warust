@@ -1,7 +1,8 @@
 //! Color tokens and page templates from the Pego design (project `warust`).
 //! Classic: v4 dark (`d-*`) and v3 light (`m-*`), sidebar layout. Forest: v5
 //! (`f-*`, page "App v5 · Forest"), top navigation and white cards on a warm
-//! background; light only, as designed.
+//! background; light only, as designed. Mint ("Warust Mint", v6): Classic's
+//! sidebar layout on neutral greys with a green highlight, dark and light.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -15,16 +16,18 @@ use crate::i18n::tr;
 pub enum Template {
     Classic,
     Forest,
+    Mint,
 }
 
 impl Template {
-    pub const ALL: [Template; 2] = [Template::Classic, Template::Forest];
+    pub const ALL: [Template; 3] = [Template::Classic, Template::Forest, Template::Mint];
 
     /// Name in `settings.json`.
     pub fn key(self) -> &'static str {
         match self {
             Template::Classic => "classic",
             Template::Forest => "forest",
+            Template::Mint => "mint",
         }
     }
 
@@ -36,6 +39,7 @@ impl Template {
         match self {
             Template::Classic => tr("Classic (v4)", "Klasik (v4)"),
             Template::Forest => "Forest (v5)",
+            Template::Mint => "Warust Mint (v6)",
         }
     }
 
@@ -43,12 +47,13 @@ impl Template {
         match self {
             Template::Classic => tr("Left sidebar, monochrome, dark and light mode.", "Sidebar kiri, monokrom, mode gelap dan terang."),
             Template::Forest => tr("Top navigation, white cards, green-lime accent. Light only.", "Navigasi atas, kartu putih, aksen hijau-lime. Terang saja."),
+            Template::Mint => tr("Left sidebar, neutral greys, green highlight. Dark and light mode.", "Sidebar kiri, abu netral, aksen hijau. Mode gelap dan terang."),
         }
     }
 
     /// Whether the dark/light toggle applies.
     pub fn has_dark(self) -> bool {
-        self == Template::Classic
+        self != Template::Forest
     }
 
     /// Navigation along the top instead of the sidebar.
@@ -62,6 +67,7 @@ static ACTIVE: AtomicU8 = AtomicU8::new(0);
 pub fn template() -> Template {
     match ACTIVE.load(Ordering::Relaxed) {
         1 => Template::Forest,
+        2 => Template::Mint,
         _ => Template::Classic,
     }
 }
@@ -69,11 +75,13 @@ pub fn template() -> Template {
 /// Switches the template; Forest also switches to light.
 pub fn set_template(ctx: &Context, template: Template) {
     ACTIVE.store(template as u8, Ordering::Relaxed);
-    let light = match template {
-        Template::Classic => &LIGHT,
-        Template::Forest => &FOREST,
+    let (light, dark) = match template {
+        Template::Classic => (&LIGHT, &DARK),
+        Template::Forest => (&FOREST, &DARK),
+        Template::Mint => (&MINT_LIGHT, &MINT_DARK),
     };
     ctx.set_visuals_of(Theme::Light, visuals(Visuals::light(), light));
+    ctx.set_visuals_of(Theme::Dark, visuals(Visuals::dark(), dark));
     if !template.has_dark() {
         ctx.set_theme(ThemePreference::Light);
     }
@@ -113,6 +121,11 @@ pub struct Palette {
     /// Behind the bubbles of an open chat, and incoming bubbles.
     pub chat_bg: Color32,
     pub bubble_in: Color32,
+    /// Marker colour (unread badges, the active tab's line, switches) and what
+    /// sits on it. The same as `primary` in Classic and Forest; green in Mint,
+    /// where `primary` stays neutral.
+    pub hl: Color32,
+    pub on_hl: Color32,
 }
 
 const fn hex(rgb: u32) -> Color32 {
@@ -148,6 +161,8 @@ pub const DARK: Palette = Palette {
     selected: hex(0x19191C),
     chat_bg: hex(0x0B0B0C),
     bubble_in: hex(0x19191C),
+    hl: hex(0xEDEDEF),
+    on_hl: hex(0x0B0B0C),
 };
 
 pub const LIGHT: Palette = Palette {
@@ -179,6 +194,8 @@ pub const LIGHT: Palette = Palette {
     selected: hex(0xF4F4F5),
     chat_bg: hex(0xFFFFFF),
     bubble_in: hex(0xF4F4F5),
+    hl: hex(0x0A0A0A),
+    on_hl: hex(0xFFFFFF),
 };
 
 /// v5 "Forest" (`f-*` variables).
@@ -211,7 +228,85 @@ pub const FOREST: Palette = Palette {
     selected: hex(0xE8F6CF),
     chat_bg: hex(0xF5F3EF),
     bubble_in: hex(0xFFFFFF),
+    hl: hex(0x1D5A3F),
+    on_hl: hex(0xFFFFFF),
 };
+
+/// v6 "Warust Mint", light: neutral greys, charcoal controls, green markers.
+pub const MINT_LIGHT: Palette = Palette {
+    bg: hex(0xFFFFFF),
+    panel: hex(0xFAFAFA),
+    raised: hex(0xF4F4F5),
+    border: hex(0xE8E8EA),
+    border_strong: hex(0xD1D1D6),
+    text: hex(0x18181B),
+    text_2: hex(0x3F3F46),
+    muted: hex(0x71717A),
+    primary: hex(0x27272A),
+    on_primary: hex(0xFFFFFF),
+    on_primary_muted: hex(0xD4D4D8),
+    green: hex(0x1FA855),
+    amber: hex(0xD97706),
+    red: hex(0xDC2626),
+    red_text: hex(0xB91C1C),
+    gray: hex(0xA1A1AA),
+    bar: hex(0xD1D1D6),
+    bar_hi: hex(0x27272A),
+    accent: hex(0x27272A),
+    accent_soft: hex(0xE6F5EC),
+    accent_text: hex(0x0F6B48),
+    blue: hex(0x3F3F46),
+    blue_soft: hex(0xF4F4F5),
+    orange_soft: hex(0xF4F4F5),
+    red_soft: hex(0xF4F4F5),
+    selected: hex(0xEFEFF1),
+    chat_bg: hex(0xFFFFFF),
+    bubble_in: hex(0xFFFFFF),
+    hl: hex(0x12855A),
+    on_hl: hex(0xFFFFFF),
+};
+
+/// v6 "Warust Mint", dark.
+pub const MINT_DARK: Palette = Palette {
+    bg: hex(0x0B0B0C),
+    panel: hex(0x111113),
+    raised: hex(0x19191C),
+    border: hex(0x26262A),
+    border_strong: hex(0x3A3A40),
+    text: hex(0xEDEDEF),
+    text_2: hex(0xC4C4CA),
+    muted: hex(0x8E8E96),
+    primary: hex(0xE4E4E7),
+    on_primary: hex(0x18181B),
+    on_primary_muted: hex(0x71717A),
+    green: hex(0x22C55E),
+    amber: hex(0xF59E0B),
+    red: hex(0xEF4444),
+    red_text: hex(0xF87171),
+    gray: hex(0x71717A),
+    bar: hex(0x3A3A40),
+    bar_hi: hex(0xEDEDEF),
+    accent: hex(0xE4E4E7),
+    accent_soft: hex(0x10261C),
+    accent_text: hex(0x6EE7B0),
+    blue: hex(0xC4C4CA),
+    blue_soft: hex(0x19191C),
+    orange_soft: hex(0x19191C),
+    red_soft: hex(0x19191C),
+    selected: hex(0x1D1D21),
+    chat_bg: hex(0x0B0B0C),
+    bubble_in: hex(0x19191C),
+    hl: hex(0x3ECF8E),
+    on_hl: hex(0x06281A),
+};
+
+/// Mint's frame (sidebar) and what sits on it: its fill, the fields and the
+/// selected row on it, and its lines. `(light, dark)`.
+pub const MINT_SIDEBAR: (Color32, Color32) = (hex(0xF5F5F6), hex(0x131315));
+pub const MINT_SIDEBAR_SELECTED: (Color32, Color32) = (hex(0xFFFFFF), hex(0x242428));
+pub const MINT_SIDEBAR_LINE: (Color32, Color32) = (hex(0xE4E4E7), hex(0x26262A));
+/// The soft glow in the top right of Mint's chat background.
+pub const MINT_GLOW: (Color32, Color32) = (hex(0xD5F2E3), hex(0x34D399));
 
 /// Forest's dark green surfaces (hero cards) and what sits on them.
 pub const FOREST_2: Color32 = hex(0x2A6B4E);
@@ -229,6 +324,7 @@ pub fn r_card() -> u8 {
     match template() {
         Template::Classic => R_LG,
         Template::Forest => 24,
+        Template::Mint => 16,
     }
 }
 
@@ -237,6 +333,7 @@ pub fn r_control() -> u8 {
     match template() {
         Template::Classic => R_SM,
         Template::Forest => 16,
+        Template::Mint => 10,
     }
 }
 
@@ -245,12 +342,15 @@ pub fn r_inner() -> u8 {
     match template() {
         Template::Classic => R_MD,
         Template::Forest => 14,
+        Template::Mint => 10,
     }
 }
 
 pub fn palette(ctx: &Context) -> Palette {
     match (template(), ctx.theme()) {
         (Template::Forest, _) => FOREST,
+        (Template::Mint, Theme::Dark) => MINT_DARK,
+        (Template::Mint, Theme::Light) => MINT_LIGHT,
         (_, Theme::Dark) => DARK,
         (_, Theme::Light) => LIGHT,
     }
@@ -264,7 +364,7 @@ pub const GAP: i8 = 12;
 pub fn pane(ctx: &Context, classic_fill: Color32, inner: Margin) -> Frame {
     let p = palette(ctx);
     match template() {
-        Template::Classic => Frame::NONE.fill(classic_fill).inner_margin(inner),
+        Template::Classic | Template::Mint => Frame::NONE.fill(classic_fill).inner_margin(inner),
         Template::Forest => Frame::NONE
             .fill(p.panel)
             .corner_radius(r_card())
@@ -277,7 +377,7 @@ pub fn pane(ctx: &Context, classic_fill: Color32, inner: Margin) -> Frame {
 pub fn pane_bg(ctx: &Context) -> Color32 {
     let p = palette(ctx);
     match template() {
-        Template::Classic => p.bg,
+        Template::Classic | Template::Mint => p.bg,
         Template::Forest => p.panel,
     }
 }
@@ -285,14 +385,14 @@ pub fn pane_bg(ctx: &Context) -> Color32 {
 /// Rounded top corners of a pane's first part (none in Classic).
 pub fn top_corners() -> CornerRadius {
     match template() {
-        Template::Classic => CornerRadius::ZERO,
+        Template::Classic | Template::Mint => CornerRadius::ZERO,
         Template::Forest => CornerRadius { nw: r_card(), ne: r_card(), sw: 0, se: 0 },
     }
 }
 
 pub fn bottom_corners() -> CornerRadius {
     match template() {
-        Template::Classic => CornerRadius::ZERO,
+        Template::Classic | Template::Mint => CornerRadius::ZERO,
         Template::Forest => CornerRadius { nw: 0, ne: 0, sw: r_card(), se: r_card() },
     }
 }
@@ -301,7 +401,7 @@ pub fn bottom_corners() -> CornerRadius {
 pub fn card(ctx: &Context) -> Frame {
     let p = palette(ctx);
     match template() {
-        Template::Classic => Frame::NONE.stroke(Stroke::new(1.0, p.border)).corner_radius(R_LG),
+        Template::Classic | Template::Mint => Frame::NONE.stroke(Stroke::new(1.0, p.border)).corner_radius(r_card()),
         Template::Forest => Frame::NONE.fill(p.panel).corner_radius(r_card()),
     }
 }
@@ -310,7 +410,7 @@ pub fn card(ctx: &Context) -> Frame {
 /// Forest, so panes line up with the navigation's left edge.
 pub fn root_margin() -> Margin {
     match template() {
-        Template::Classic => Margin::ZERO,
+        Template::Classic | Template::Mint => Margin::ZERO,
         Template::Forest => Margin { left: 20, right: 20, top: 0, bottom: 20 },
     }
 }
@@ -320,7 +420,7 @@ pub fn page(ctx: &Context) -> Frame {
     let p = palette(ctx);
     match template() {
         _ if ctx.content_rect().width() < super::compact::WIDTH => Frame::NONE.fill(p.bg).inner_margin(Margin::symmetric(16, 12)),
-        Template::Classic => Frame::NONE.fill(p.bg).inner_margin(Margin::symmetric(40, 28)),
+        Template::Classic | Template::Mint => Frame::NONE.fill(p.bg).inner_margin(Margin::symmetric(40, 28)),
         Template::Forest => Frame::NONE.fill(p.bg).inner_margin(Margin { left: 12, right: 12, top: 8, bottom: 12 }),
     }
 }
@@ -330,7 +430,7 @@ pub fn page(ctx: &Context) -> Frame {
 pub fn surface(ctx: &Context) -> Frame {
     let p = palette(ctx);
     match template() {
-        Template::Classic => Frame::NONE,
+        Template::Classic | Template::Mint => Frame::NONE,
         Template::Forest => Frame::NONE.fill(p.panel).corner_radius(r_card()).inner_margin(Margin::same(20)),
     }
 }
@@ -378,4 +478,34 @@ fn visuals(mut v: Visuals, p: &Palette) -> Visuals {
     v.widgets.active.bg_fill = p.border_strong;
     v.widgets.active.weak_bg_fill = p.border_strong;
     v
+}
+
+/// Whether Mint is the active template: where a screen draws Mint's own
+/// shapes (round avatars, the dot grid) instead of Classic's.
+pub fn mint() -> bool {
+    template() == Template::Mint
+}
+
+/// One of Mint's `(light, dark)` pairs for the current mode.
+pub fn mint_pair(ctx: &Context, pair: (Color32, Color32)) -> Color32 {
+    if ctx.theme() == Theme::Dark { pair.1 } else { pair.0 }
+}
+
+/// Fill of the sidebar: the panel colour, or Mint's own frame grey.
+pub fn sidebar_fill(ctx: &Context) -> Color32 {
+    if mint() { mint_pair(ctx, MINT_SIDEBAR) } else { palette(ctx).panel }
+}
+
+/// Fill and outline of the selected (or hovered) item in the sidebar. Mint's
+/// sidebar is grey already, so its selected item is a lighter field with a line.
+pub fn sidebar_selected(ctx: &Context, selected: bool) -> (Color32, Stroke) {
+    if !mint() {
+        return (palette(ctx).raised, Stroke::NONE);
+    }
+    let fill = mint_pair(ctx, MINT_SIDEBAR_SELECTED);
+    if selected {
+        (fill, Stroke::new(1.0, mint_pair(ctx, MINT_SIDEBAR_LINE)))
+    } else {
+        (fill.gamma_multiply(0.6), Stroke::NONE)
+    }
 }

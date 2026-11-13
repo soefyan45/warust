@@ -579,7 +579,9 @@ impl App {
     }
 
     fn sidebar(&mut self, ui: &mut Ui) {
-        if self.settings.nav_icons_only {
+        // Mint folds the sidebar into the rail by itself in a narrow window.
+        let narrow = theme::mint() && ui.ctx().content_rect().width() < compact::MINT_RAIL;
+        if self.settings.nav_icons_only || narrow {
             self.sidebar_rail(ui);
             return;
         }
@@ -590,7 +592,7 @@ impl App {
             .resizable(true)
             .frame(
                 Frame::NONE
-                    .fill(p.panel)
+                    .fill(theme::sidebar_fill(ui.ctx()))
                     .inner_margin(Margin::symmetric(12, 14)),
             )
             .show(ui, |ui| {
@@ -640,6 +642,10 @@ impl App {
                 }
 
                 // Pinned to the bottom of the sidebar.
+                if theme::mint() {
+                    self.mint_sidebar_foot(ui, panel);
+                    return;
+                }
                 let status = egui::Rect::from_min_max(
                     egui::pos2(panel.left(), panel.bottom() - 60.0),
                     panel.max,
@@ -680,10 +686,11 @@ impl App {
     /// Navigation → Icons only. Labels move to the hints, counts to badges.
     fn sidebar_rail(&mut self, ui: &mut Ui) {
         let p = theme::palette(ui.ctx());
+        // Mint's rail is 80 wide, so macOS's window buttons (to x = 70) fit above it.
         Panel::left("sidebar_rail")
-            .exact_size(64.0)
+            .exact_size(if theme::mint() { 80.0 } else { 64.0 })
             .resizable(false)
-            .frame(Frame::NONE.fill(p.panel).inner_margin(Margin::symmetric(8, 14)))
+            .frame(Frame::NONE.fill(theme::sidebar_fill(ui.ctx())).inner_margin(Margin::symmetric(8, 14)))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 4.0;
                 let panel = ui.max_rect();
@@ -710,6 +717,14 @@ impl App {
                         self.screen = screen;
                     }
                 }
+                // Mint: Anti-peek and the theme, above the gateway's dot.
+                if theme::mint() {
+                    let foot = egui::Rect::from_min_max(egui::pos2(panel.left(), panel.bottom() - 24.0 - 36.0 - 4.0 - 36.0 - 6.0), egui::pos2(panel.right(), panel.bottom() - 24.0 - 6.0));
+                    let mut foot_ui = widgets::child(ui, foot, egui::Layout::top_down(egui::Align::Center));
+                    foot_ui.spacing_mut().item_spacing.y = 4.0;
+                    self.privacy_pill(&mut foot_ui, true);
+                    self.theme_button(&mut foot_ui, 36.0);
+                }
                 // The gateway's state as a dot at the bottom, its words in the hint.
                 let connected = self.sessions.iter().filter(|s| s.status == Status::Connected).count();
                 let spot = egui::Rect::from_center_size(egui::pos2(panel.center().x, panel.bottom() - 12.0), egui::vec2(panel.width(), 24.0));
@@ -724,8 +739,25 @@ impl App {
             });
     }
 
+    /// Mint moves the breadcrumb's job to the sidebar and Anti-peek and the
+    /// theme button to its foot, so its top bar only shows where something
+    /// still needs it: a page with buttons of its own, or the window buttons
+    /// (Windows and Linux draw theirs in it).
+    fn wants_topbar(&self, ctx: &egui::Context) -> bool {
+        // The phone version of Nomor, shown beside the rail in a narrow window,
+        // has "add a number" of its own.
+        let narrow = ctx.content_rect().width() < compact::WIDTH;
+        let own_buttons = match self.screen {
+            Screen::Nomor => !narrow,
+            Screen::Pairing | Screen::Log => true,
+            _ => false,
+        };
+        !theme::mint() || !window::NATIVE || own_buttons
+    }
+
     fn topbar(&mut self, ui: &mut Ui) {
         let p = theme::palette(ui.ctx());
+        let mint = theme::mint();
         let (parent, current) = match self.screen {
             Screen::Ringkasan => ("Gateway", tr("Overview", "Ringkasan")),
             Screen::Nomor => ("Gateway", tr("Numbers", "Nomor")),
@@ -750,14 +782,17 @@ impl App {
                 // The topbar is also the window's title bar.
                 window::drag_area(ui, ui.max_rect().expand2(egui::vec2(10.0, 0.0)), "topbar");
                 ui.horizontal_centered(|ui| {
-                    let parent_label = ui
-                        .label(rich(parent, 13.0, Weight::Regular, p.muted))
-                        .interact(egui::Sense::click())
-                        .on_hover_cursor(CursorIcon::PointingHand);
-                    if parent_label.clicked() && self.screen == Screen::Pairing {
-                        self.screen = Screen::Nomor;
+                    // Mint names the page alone; the sidebar shows where it is.
+                    if !mint || self.screen == Screen::Pairing {
+                        let parent_label = ui
+                            .label(rich(parent, 13.0, Weight::Regular, p.muted))
+                            .interact(egui::Sense::click())
+                            .on_hover_cursor(CursorIcon::PointingHand);
+                        if parent_label.clicked() && self.screen == Screen::Pairing {
+                            self.screen = Screen::Nomor;
+                        }
+                        ui.label(rich("/", 13.0, Weight::Regular, p.muted));
                     }
-                    ui.label(rich("/", 13.0, Weight::Regular, p.muted));
                     ui.label(rich(current, 13.0, Weight::Medium, p.text));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         window::controls(ui);
@@ -769,17 +804,122 @@ impl App {
                             ui.painter().rect_filled(sep, 0.0, p.border);
                             ui.add_space(6.0);
                         }
-                        let dark = ui.ctx().theme() == Theme::Dark;
-                        let toggle = widgets::icon_button(ui, if dark { "sun" } else { "moon" }, 32.0, false)
-                            .on_hover_text(if dark { tr("Light theme", "Tema terang") } else { tr("Dark theme", "Tema gelap") });
-                        if toggle.clicked() {
-                            self.toggle_theme(dark);
+                        // In Mint these two sit at the foot of the sidebar.
+                        if !mint {
+                            self.theme_button(ui, 32.0);
+                            self.privacy_pill(ui, false);
                         }
-                        self.privacy_pill(ui, false);
                         self.topbar_actions(ui, false);
                     });
                 });
             });
+    }
+
+    /// The dark/light switch.
+    fn theme_button(&mut self, ui: &mut Ui, size: f32) {
+        let dark = ui.ctx().theme() == Theme::Dark;
+        let toggle = widgets::icon_button(ui, if dark { "sun" } else { "moon" }, size, false)
+            .on_hover_text(if dark { tr("Light theme", "Tema terang") } else { tr("Dark theme", "Tema gelap") });
+        if toggle.clicked() {
+            self.toggle_theme(dark);
+        }
+    }
+
+    /// The foot of Mint's sidebar: its numbers in one card (how many are
+    /// connected, each number with its state and unread count, the REST API
+    /// and the version), then Anti-peek and the theme button. The numbers
+    /// stand in for the Devices panel: a click scopes the Inbox to one.
+    fn mint_sidebar_foot(&mut self, ui: &mut Ui, panel: egui::Rect) {
+        let p = theme::palette(ui.ctx());
+        let line = theme::mint_pair(ui.ctx(), theme::MINT_SIDEBAR_LINE);
+        const ROW: f32 = 28.0;
+        let foot_h = 36.0;
+        // In a short window the card gives way before it runs into the menu:
+        // first its list of numbers goes, then the card itself.
+        let room = panel.bottom() - foot_h - 8.0 - (ui.cursor().top() + 8.0);
+        let height_with = |rows: f32| 10.0 + 22.0 + 6.0 + rows * ROW + 6.0 + 18.0 + 18.0 + 10.0;
+        let listed = if height_with(self.sessions.len() as f32) <= room { self.sessions.len() } else { 0 };
+        let rows = listed as f32;
+        let card_h = height_with(rows);
+        if card_h > room {
+            self.mint_sidebar_buttons(ui, panel, foot_h);
+            return;
+        }
+        let top = panel.bottom() - foot_h - 8.0 - card_h;
+        let card = egui::Rect::from_min_max(egui::pos2(panel.left(), top), egui::pos2(panel.right(), top + card_h));
+        // The card wears the chat background: its glow, without the dots.
+        ui.painter().rect_filled(card, 14.0, p.bg);
+        widgets::mint_glow(ui.painter(), card, ui.ctx().theme() == egui::Theme::Dark, 14.0);
+        ui.painter().rect_stroke(card, 14.0, Stroke::new(1.0, line), egui::StrokeKind::Inside);
+        let inner = card.shrink2(egui::vec2(10.0, 10.0));
+        // Head: how many are connected, and "link a number".
+        let connected = self.sessions.iter().filter(|s| s.status == Status::Connected).count();
+        let head = egui::Rect::from_min_size(inner.min, egui::vec2(inner.width(), 22.0));
+        let text = crate::trf!("{connected} of {} connected", "{connected} dari {} terhubung", self.sessions.len());
+        widgets::paint_text(ui, head, &text, fonts::ui(12.0, Weight::Medium), p.text, egui::Align::Min);
+        let plus = egui::Rect::from_center_size(egui::pos2(head.right() - 10.0, head.center().y), egui::Vec2::splat(20.0));
+        let add = ui.interact(plus, ui.scope_id().with("mint_add_number"), egui::Sense::click());
+        if add.hovered() {
+            ui.painter().rect_filled(plus, 6.0, p.raised);
+        }
+        icons::paint(ui, plus, "plus", 14.0, if add.hovered() { p.text } else { p.muted });
+        if add.on_hover_text(tr("Link a number", "Tautkan nomor")).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+            self.add_number();
+        }
+        // The numbers.
+        let list_top = head.bottom() + 6.0;
+        let rule = egui::Rangef::new(card.left() + 4.0, card.right() - 6.0);
+        ui.painter().hline(rule, list_top - 3.0, Stroke::new(1.0, line));
+        let mut scope = None;
+        for (i, session) in self.sessions.iter().take(listed).enumerate() {
+            let row = egui::Rect::from_min_size(egui::pos2(card.left() + 4.0, list_top + i as f32 * ROW), egui::vec2(card.width() - 8.0, ROW));
+            let response = ui.interact(row, ui.scope_id().with(("mint_number", &session.id)), egui::Sense::click());
+            let selected = self.screen == Screen::Inbox && self.state.inbox_scope.as_deref() == Some(session.id.as_str());
+            if selected || response.hovered() {
+                ui.painter().rect_filled(row.shrink2(egui::vec2(0.0, 1.0)), 8.0, if selected { p.selected } else { p.raised });
+            }
+            let up = session.status == Status::Connected;
+            ui.painter().circle_filled(egui::pos2(row.left() + 12.0, row.center().y), 3.5, screens::devices::status_dot(&p, &session.status));
+            let name = egui::Rect::from_min_max(egui::pos2(row.left() + 24.0, row.top()), egui::pos2(row.right() - 30.0, row.bottom()));
+            let weight = if selected { Weight::SemiBold } else { Weight::Medium };
+            widgets::paint_text(ui, name, &session.name, fonts::ui(13.0, weight), if up { p.text_2 } else { p.muted }, egui::Align::Min);
+            let end = egui::Rect::from_min_max(egui::pos2(row.right() - 30.0, row.top()), egui::pos2(row.right() - 8.0, row.bottom()));
+            if up {
+                let unread: u32 = session.book.chats.iter().filter(|c| !c.archived).map(|c| c.unread).sum();
+                if unread > 0 {
+                    widgets::paint_text(ui, end, &unread.to_string(), fonts::ui(12.0, Weight::Medium), p.muted, egui::Align::Max);
+                }
+            } else {
+                icons::paint(ui, egui::Rect::from_center_size(egui::pos2(end.right() - 7.0, end.center().y), egui::Vec2::splat(14.0)), "unlink", 14.0, p.red_text);
+            }
+            if response.on_hover_text(screens::devices::chip_label(session)).on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                scope = Some(session.id.clone());
+            }
+        }
+        if let Some(id) = scope {
+            // A second click on the number in scope goes back to all numbers.
+            let again = self.screen == Screen::Inbox && self.state.inbox_scope.as_deref() == Some(id.as_str());
+            self.state.inbox_scope = if again { None } else { Some(id) };
+            self.screen = Screen::Inbox;
+        }
+        // Foot of the card: the REST API and the version.
+        let list_bottom = list_top + rows * ROW;
+        ui.painter().hline(rule, list_bottom + 3.0, Stroke::new(1.0, line));
+        let last = egui::Rect::from_min_size(egui::pos2(inner.left(), list_bottom + 6.0), egui::vec2(inner.width(), 18.0));
+        let api = if matches!(self.api, backend::ApiState::Listening(_)) { tr("REST API running", "REST API berjalan") } else { tr("REST API not active", "REST API belum aktif") };
+        widgets::paint_text(ui, last, api, fonts::ui(11.5, Weight::Regular), p.muted, egui::Align::Min);
+        let version = last.translate(egui::vec2(0.0, 18.0));
+        widgets::paint_text(ui, version, concat!("v", env!("CARGO_PKG_VERSION")), fonts::mono(11.5), p.muted, egui::Align::Min);
+        self.mint_sidebar_buttons(ui, panel, foot_h);
+    }
+
+    /// Anti-peek and the theme button along the bottom of Mint's sidebar.
+    fn mint_sidebar_buttons(&mut self, ui: &mut Ui, panel: egui::Rect, height: f32) {
+        let foot = egui::Rect::from_min_max(egui::pos2(panel.left(), panel.bottom() - height), panel.max);
+        let mut foot_ui = widgets::child(ui, foot, egui::Layout::left_to_right(egui::Align::Center));
+        foot_ui.spacing_mut().item_spacing.x = 6.0;
+        self.privacy_pill(&mut foot_ui, false);
+        foot_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| self.theme_button(ui, 32.0));
     }
 
     /// The update bar under the top bar (#93): a new release to download
@@ -1624,6 +1764,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        dev_shot(ui.ctx());
         // Drawn again, so on screen again: also after a click on the Dock
         // icon, which shows the window without going through `show_window`.
         // Not in the frame that closes it: `logic` has just hidden it.
@@ -1691,6 +1832,9 @@ impl eframe::App for App {
                 self.screen = Screen::Ringkasan;
             }
             theme::set_template(ui.ctx(), template);
+            if template == theme::Template::Mint {
+                self.state.contact_panel = false;
+            }
             self.applied_template = Some(self.settings.template.clone());
             // The theme is applied again on top of the new template.
             self.applied_theme = None;
@@ -1752,7 +1896,9 @@ impl eframe::App for App {
             self.topnav(ui);
         } else {
             self.sidebar(ui);
-            self.topbar(ui);
+            if self.wants_topbar(ui.ctx()) {
+                self.topbar(ui);
+            }
         }
         self.update_banner(ui);
         // Heights of compact::title_bar, topnav and the sidebar/topbar row.
@@ -1777,22 +1923,26 @@ impl eframe::App for App {
             })
             .count();
         let margin = if compact { Margin::ZERO } else { theme::root_margin() };
+        // Mint keeps its sidebar down to 500 px, but the desktop pages need about
+        // 1100: between the two, the pages that have a phone version show it
+        // beside the rail, and the others wrap their text.
+        let narrow = compact || (theme::mint() && ui.ctx().content_rect().width() < compact::WIDTH);
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(p.bg).inner_margin(margin))
             .show(ui, |ui| {
                 // Desktop pages in a phone window: text wraps instead of
                 // widening the page past the window.
-                if compact {
+                if narrow {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                 }
                 match self.screen {
-                Screen::Ringkasan if compact => summary_action = screens::ringkasan::compact(ui, &self.sessions, &self.webhooks, self.settings.main_number.as_deref()),
+                Screen::Ringkasan if narrow => summary_action = screens::ringkasan::compact(ui, &self.sessions, &self.webhooks, self.settings.main_number.as_deref()),
                 Screen::Ringkasan => summary_action = screens::ringkasan::show(ui, &mut self.state, &self.sessions, &self.webhooks),
-                Screen::Nomor if compact => action = screens::devices::compact(ui, &self.sessions, self.settings.main_number.as_deref()),
+                Screen::Nomor if narrow => action = screens::devices::compact(ui, &self.sessions, self.settings.main_number.as_deref()),
                 Screen::Nomor => action = screens::nomor::show(ui, &mut self.state, &self.sessions),
                 Screen::More => more_action = compact::more(ui, api_on, failed_hooks),
                 Screen::Status => {
-                    let shown = if compact {
+                    let shown = if narrow {
                         screens::status::compact(ui, &mut self.state, &self.sessions, &self.avatars, &self.downloads)
                     } else {
                         screens::status::page(ui, &mut self.state, &self.sessions, &self.avatars, &self.downloads)
@@ -1995,4 +2145,24 @@ mod lock_choice_tests {
         // A value from an edited settings file shows as the default.
         assert_eq!(LOCK_MINUTES[lock_choice(3)], 2);
     }
+}
+
+/// Dev aid: WARUST_SHOT=/path/shot.png saves the window as a PNG once it has
+/// drawn for a moment, then quits. For checking a design where the screen
+/// cannot be grabbed.
+fn dev_shot(ctx: &egui::Context) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static FRAMES: AtomicU32 = AtomicU32::new(0);
+    let Some(path) = std::env::var_os("WARUST_SHOT") else { return };
+    if FRAMES.fetch_add(1, Ordering::Relaxed) == 90 {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |shot: std::sync::Arc<egui::ColorImage>| {
+            let [w, h] = shot.size;
+            let bytes: Vec<u8> = shot.pixels.iter().flat_map(|c| c.to_array()).collect();
+            if let Err(e) = image::save_buffer(&path, &bytes, w as u32, h as u32, image::ColorType::Rgba8) {
+                log::error!("cannot save the screenshot: {e}");
+            }
+            std::process::exit(0);
+        })));
+    }
+    ctx.request_repaint();
 }

@@ -92,8 +92,8 @@ fn item(
         let label = if badge > 99 { "99+".to_owned() } else { badge.to_string() };
         let w = if badge > 9 { 28.0 } else { 20.0 };
         let b = Rect::from_center_size(pos2(rect.right() - 10.0 - w / 2.0, rect.center().y), vec2(w, 20.0));
-        ui.painter().rect_filled(b, 10.0, p.primary);
-        widgets::paint_text(ui, b, &label, fonts::ui(11.0, Weight::SemiBold), p.on_primary, Align::Center);
+        ui.painter().rect_filled(b, 10.0, p.hl);
+        widgets::paint_text(ui, b, &label, fonts::ui(11.0, Weight::SemiBold), p.on_hl, Align::Center);
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }

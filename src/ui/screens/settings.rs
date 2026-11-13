@@ -151,6 +151,7 @@ fn template_option(ui: &mut Ui, p: &theme::Palette, template: Template, active: 
     let swatches = match template {
         Template::Classic => [theme::DARK.bg, theme::DARK.raised, theme::LIGHT.bg, theme::LIGHT.text],
         Template::Forest => [theme::FOREST.bg, theme::FOREST.primary, theme::FOREST.accent, theme::FOREST.panel],
+        Template::Mint => [theme::MINT_LIGHT.bg, theme::MINT_SIDEBAR.0, theme::MINT_LIGHT.primary, theme::MINT_LIGHT.hl],
     };
     for (i, color) in swatches.iter().enumerate() {
         let swatch = egui::Rect::from_min_size(rect.min + egui::vec2(14.0 + i as f32 * 26.0, 14.0), egui::vec2(20.0, 20.0));
