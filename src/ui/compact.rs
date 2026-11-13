@@ -71,6 +71,15 @@ fn tab_of(screen: Screen) -> usize {
     }
 }
 
+/// Room Mint's chat list leaves under its last row for the floating tab bar.
+pub const TAB_BAR_ROOM: f32 = 86.0;
+
+/// Whether the tab bar floats over `screen` (Mint's Inbox) instead of
+/// taking a strip of its own under it.
+pub fn floats(screen: Screen) -> bool {
+    theme::mint() && screen == Screen::Inbox
+}
+
 /// Beranda, Inbox, Status, Perangkat, Lainnya. Returns the screen picked.
 pub fn tab_bar(ui: &mut Ui, screen: Screen, unread: u32, unseen: usize) -> Option<Screen> {
     let p = theme::palette(ui.ctx());
@@ -87,14 +96,14 @@ pub fn tab_bar(ui: &mut Ui, screen: Screen, unread: u32, unseen: usize) -> Optio
         // Mint: a capsule with room around it; the tab it is on is a raised
         // tile around the icon and its label together.
         let line = theme::mint_pair(ui.ctx(), theme::MINT_SIDEBAR_LINE);
-        Panel::bottom("m_tabbar")
-            .exact_size(82.0)
-            .resizable(false)
-            .show_separator_line(false)
-            .frame(Frame::NONE.fill(p.bg))
-            .show(ui, |ui| {
-                let bar = Rect::from_min_max(ui.max_rect().min + vec2(12.0, 8.0), ui.max_rect().max - vec2(12.0, 12.0));
-                ui.painter().rect(bar, bar.height() / 2.0, theme::sidebar_fill(ui.ctx()), Stroke::new(1.0, line), egui::StrokeKind::Inside);
+        let mut draw = |ui: &mut Ui, bar: Rect, floating: bool| {
+                // Floating, it casts a soft shadow. It stays opaque: without a blur,
+                // the rows passing behind would show through its labels.
+                let fill = theme::sidebar_fill(ui.ctx());
+                if floating {
+                    ui.painter().add(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(28) }.as_shape(bar, bar.height() / 2.0));
+                }
+                ui.painter().rect(bar, bar.height() / 2.0, fill, Stroke::new(1.0, line), egui::StrokeKind::Inside);
                 let inner = bar.shrink2(vec2(6.0, 0.0));
                 let w = inner.width() / items.len() as f32;
                 for (i, (target, icon, label, badge)) in items.into_iter().enumerate() {
@@ -124,7 +133,30 @@ pub fn tab_bar(ui: &mut Ui, screen: Screen, unread: u32, unseen: usize) -> Optio
                         picked = Some(target);
                     }
                 }
-            });
+        };
+        if floats(screen) {
+            // Over the Inbox the capsule floats: the chat list runs behind it
+            // (and leaves `TAB_BAR_ROOM` under its last row).
+            let screen_rect = ui.ctx().content_rect();
+            let size = vec2(screen_rect.width() - 24.0, 62.0);
+            egui::Area::new(egui::Id::unique("m_tabbar_float"))
+                .order(egui::Order::Middle)
+                .fixed_pos(pos2(screen_rect.left() + 12.0, screen_rect.bottom() - 12.0 - size.y))
+                .show(ui.ctx(), |ui| {
+                    let (bar, _) = ui.allocate_exact_size(size, Sense::hover());
+                    draw(ui, bar, true);
+                });
+        } else {
+            Panel::bottom("m_tabbar")
+                .exact_size(82.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(Frame::NONE.fill(p.bg))
+                .show(ui, |ui| {
+                    let bar = Rect::from_min_max(ui.max_rect().min + vec2(12.0, 8.0), ui.max_rect().max - vec2(12.0, 12.0));
+                    draw(ui, bar, false);
+                });
+        }
         return picked;
     }
     Panel::bottom("m_tabbar")

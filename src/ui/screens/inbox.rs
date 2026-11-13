@@ -4886,7 +4886,9 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
             Line::Chat(..) if via => M_ROW_VIA,
             Line::Chat(..) => M_ROW,
         };
-        let total: f32 = lines.iter().map(height).sum();
+        // Mint's tab bar floats over the list: the last row stops above it.
+        let tail = if theme::mint() { crate::ui::compact::TAB_BAR_ROOM } else { 0.0 };
+        let total: f32 = lines.iter().map(height).sum::<f32>() + tail;
         ScrollArea::vertical().auto_shrink(false).show_viewport(ui, |ui, viewport| {
             ui.set_height(total);
             let origin = ui.max_rect().min;
