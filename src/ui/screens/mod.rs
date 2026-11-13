@@ -32,6 +32,30 @@ pub fn page_head(ui: &mut Ui, title: &str, desc: &str) {
     });
 }
 
+/// The widest the column of a settings page gets (Pengaturan, Webhook & API).
+const COLUMN: f32 = 880.0;
+
+/// Where a page's column goes in the space `free`: in the middle, at most
+/// `COLUMN` wide, on whole pixels so text stays sharp. A narrower window is
+/// filled as it is.
+fn column_rect(free: egui::Rect) -> egui::Rect {
+    let width = free.width().min(COLUMN);
+    let left = free.left() + ((free.width() - width) / 2.0).floor();
+    egui::Rect::from_min_max(egui::pos2(left, free.top()), egui::pos2(left + width, free.bottom()))
+}
+
+/// The column a settings page is laid out in: in the middle of a wide
+/// window, while the scroll area around it keeps the full width. Ended with
+/// `end_column`.
+pub fn column(page: &mut Ui) -> Ui {
+    page.new_child(egui::UiBuilder::new().max_rect(column_rect(page.available_rect_before_wrap())))
+}
+
+/// Gives the page the room its `column` took.
+pub fn end_column(page: &mut Ui, column: &Ui) {
+    page.allocate_rect(column.min_rect(), egui::Sense::hover());
+}
+
 /// Where a number's webhook events go: the URL's host, or "Tidak diatur".
 pub fn webhook_label(state: &super::State, session: &str) -> String {
     match state.settings.webhook.url_for(session) {
@@ -117,4 +141,20 @@ pub fn initials(title: &str) -> String {
         .take(2)
         .collect();
     if letters.is_empty() { "?".to_owned() } else { letters.to_uppercase() }
+}
+
+#[cfg(test)]
+mod column_tests {
+    use super::*;
+
+    #[test]
+    fn the_column_is_centred_in_a_wide_page() {
+        let page = |width: f32| egui::Rect::from_min_size(egui::pos2(40.0, 28.0), egui::vec2(width, f32::INFINITY));
+        let wide = column_rect(page(1321.0));
+        assert_eq!(wide.width(), COLUMN);
+        assert_eq!((wide.left() - 40.0, 40.0 + 1321.0 - wide.right()), (220.0, 221.0), "equal sides, on whole pixels");
+        assert_eq!(wide.top(), 28.0);
+        // A window narrower than the column is filled, as before.
+        assert_eq!(column_rect(page(500.0)), page(500.0));
+    }
 }

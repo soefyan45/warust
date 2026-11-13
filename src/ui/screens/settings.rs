@@ -348,6 +348,16 @@ pub fn forget_custom(file: &str) {
     crate::backend::settings::forget_wallpaper(&crate::platform::data_dir(), file);
 }
 
+/// The small print of a toggle, under its label rather than under its switch.
+fn hint(ui: &mut Ui, p: &theme::Palette, text: &str) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        // The switch (34) and the gap to its label (10), as in `widgets::toggle`.
+        ui.add_space(44.0);
+        ui.vertical(|ui| ui.label(rich(text, 12.0, Weight::Regular, p.muted)));
+    });
+}
+
 fn line(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     let p = theme::palette(ui.ctx());
     // Wrapped, so the note after the field moves down in a narrow window.
@@ -359,18 +369,6 @@ fn line(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// The widest the page's column gets.
-const COLUMN: f32 = 760.0;
-
-/// Where the page's column goes in the space `free`: in the middle, at most
-/// `COLUMN` wide, on whole pixels so text stays sharp. A narrower window is
-/// filled as it is.
-fn column_rect(free: egui::Rect) -> egui::Rect {
-    let width = free.width().min(COLUMN);
-    let left = free.left() + ((free.width() - width) / 2.0).floor();
-    egui::Rect::from_min_max(egui::pos2(left, free.top()), egui::pos2(left + width, free.bottom()))
-}
-
 pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Command> {
     let p = theme::palette(ui.ctx());
     let mut commands = Vec::new();
@@ -379,10 +377,8 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
         .frame(theme::page(ui.ctx()))
         .show(ui, |ui| {
             ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
-                // The page's column sits in the middle of a wide window; the
-                // scroll area keeps the full width.
                 let page = ui;
-                let mut column = page.new_child(egui::UiBuilder::new().max_rect(column_rect(page.available_rect_before_wrap())));
+                let mut column = super::column(page);
                 let ui = &mut column;
                 ui.spacing_mut().item_spacing.y = 20.0;
                 super::page_head(
@@ -390,213 +386,221 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                     tr("Settings", "Pengaturan"),
                     tr("Appearance, sending speed, media, and where the app keeps its data.", "Tampilan, kecepatan kirim, media, dan lokasi data aplikasi."),
                 );
+                ui.vertical(|ui| {
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    widgets::tabs(ui, &[tr("Appearance", "Tampilan"), tr("Messages", "Pesan"), tr("App", "Aplikasi")], &mut state.settings_tab);
+                    // Classic tabs sit on a rule; Forest's pills need none.
+                    if !theme::template().top_nav() {
+                        widgets::hline(ui, ui.max_rect(), ui.cursor().top() - 0.5, p.border);
+                    }
+                });
+                let tab = state.settings_tab;
                 let form = &mut state.settings_form;
                 form.sync(saved);
 
-                super::card(
-                    ui,
-                    tr("Appearance", "Tampilan"),
-                    tr(
-                        "The template sets the page layout and colours; data and features are the same in every template.",
-                        "Template mengatur susunan halaman dan warna; data dan fitur sama di semua template.",
-                    ),
-                    |ui| {
-                        let draft = form.draft.as_mut().expect("synced");
-                        ui.label(rich(tr("Page template", "Template halaman"), 13.0, Weight::Medium, p.text_2));
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
-                            for template in Template::ALL {
-                                if template_option(ui, &p, template, draft.template == template.key()).clicked() {
-                                    draft.template = template.key().to_owned();
-                                }
-                            }
-                        });
-                        // Named in both languages, so either can find it.
-                        let mut language = usize::from(draft.language == crate::i18n::ID);
-                        line(ui, "Language / Bahasa", |ui| widgets::tabs(ui, &["English", "Bahasa Indonesia"], &mut language));
-                        draft.language = if language == 1 { crate::i18n::ID } else { crate::i18n::EN }.to_owned();
-                        if Template::from_key(&draft.template).has_dark() {
-                            let mut tab = usize::from(draft.theme == "light");
-                            line(ui, tr("Theme", "Tema"), |ui| widgets::tabs(ui, &[tr("Dark", "Gelap"), tr("Light", "Terang")], &mut tab));
-                            draft.theme = if tab == 1 { "light" } else { "dark" }.to_owned();
-                        } else {
-                            ui.label(rich(tr("This template only has a light mode.", "Template ini hanya punya mode terang."), 12.0, Weight::Regular, p.muted));
-                        }
-                        // Forest's top pills, or Classic's sidebar as a rail of icons.
-                        let mut nav = usize::from(draft.nav_icons_only);
-                        line(ui, tr("Navigation", "Navigasi"), |ui| widgets::tabs(ui, &[tr("Icons and labels", "Ikon dan label"), tr("Icons only", "Ikon saja")], &mut nav));
-                        draft.nav_icons_only = nav == 1;
-                        let dark = ui.ctx().theme() == egui::Theme::Dark;
-                        wallpaper_picker(
+                if tab == 0 {
+                    super::card(
                         ui,
-                        &p,
-                        WallDraft { key: &mut draft.wallpaper, file: &mut draft.wallpaper_file, dim: &mut draft.wallpaper_dim },
-                        &mut state.wallpaper_picking,
-                        dark,
-                        None,
-                    );
-                    },
-                );
-
-                super::card(
-                    ui,
-                    tr("Sending (anti-ban)", "Pengiriman (anti-ban)"),
-                    tr(
-                        "Gap between messages per number, including messages from the REST API. A short gap raises the risk of the number being restricted by WhatsApp.",
-                        "Jeda antar pesan per nomor, termasuk pesan dari REST API. Jeda pendek menaikkan risiko nomor dibatasi WhatsApp.",
-                    ),
-                    |ui| {
-                        line(ui, tr("Minimum gap (seconds)", "Jeda minimal (detik)"), |ui| {
-                            widgets::field(ui, &mut form.gap, "4", 90.0, true);
-                            ui.label(rich(&crate::trf!("minimum {}", "minimal {}", Sending::MIN_GAP), 12.0, Weight::Regular, p.muted));
-                        });
-                        line(ui, tr("Random jitter (seconds)", "Jitter acak (detik)"), |ui| {
-                            widgets::field(ui, &mut form.jitter, "2", 90.0, true);
-                            ui.label(rich(tr("random extra 0–N seconds, 0–30", "tambahan acak 0–N detik, 0–30"), 12.0, Weight::Regular, p.muted));
-                        });
-                    },
-                );
-
-                super::card(ui, "Media", "", |ui| {
-                    let draft = form.draft.as_mut().expect("synced");
-                    widgets::toggle(ui, &mut draft.auto_stickers, tr("Download stickers automatically when they show in a chat", "Unduh stiker otomatis saat terlihat di chat"));
-                    ui.label(rich(
-                        tr("Photos, videos, and documents are still downloaded on click.", "Foto, video, dan dokumen tetap diunduh saat diklik."),
-                        12.0,
-                        Weight::Regular,
-                        p.muted,
-                    ));
-                });
-
-                super::card(ui, tr("Privacy", "Privasi"), "", |ui| {
-                    let draft = form.draft.as_mut().expect("synced");
-                    widgets::toggle(ui, &mut draft.send_read, tr("Send read receipts", "Kirim tanda dibaca"));
-                    ui.label(rich(
+                        tr("Appearance", "Tampilan"),
                         tr(
-                            "On: opening a chat sends blue ticks to the sender and marks the chat as read on the phone. It is off by default, so only the badge here goes away.",
-                            "Menyala: membuka chat mengirim centang biru ke pengirim dan menandai chat dibaca di HP. Bawaannya mati, jadi hanya badge di sini yang hilang.",
+                            "The template sets the page layout and colours; data and features are the same in every template.",
+                            "Template mengatur susunan halaman dan warna; data dan fitur sama di semua template.",
                         ),
-                        12.0,
-                        Weight::Regular,
-                        p.muted,
-                    ));
-                    ui.add_space(6.0);
-                    widgets::toggle(ui, &mut draft.share_online, tr("Show when you are online", "Tampilkan saat Anda online"));
-                    ui.label(rich(
-                        tr(
-                            "On: contacts see your number online while a warust window is in front, and you see when they are online. This applies to every linked number. Off: neither, as on WhatsApp.",
-                            "Menyala: kontak melihat nomor Anda online selama jendela warust di depan, dan Anda melihat saat mereka online. Berlaku untuk semua nomor yang tertaut. Mati: keduanya tidak, seperti di WhatsApp.",
-                        ),
-                        12.0,
-                        Weight::Regular,
-                        p.muted,
-                    ));
-                    ui.add_space(6.0);
-                    widgets::toggle(ui, &mut draft.typing, tr("Show \"typing\" to the other person while replying", "Tampilkan \"sedang mengetik\" ke lawan chat saat membalas"));
-                    ui.label(rich(
-                        tr("Status seen receipts are set per number on the Status page.", "Tanda dilihat status diatur per nomor di halaman Status."),
-                        12.0,
-                        Weight::Regular,
-                        p.muted,
-                    ));
-                });
-
-                super::card(
-                    ui,
-                    tr("Notifications", "Notifikasi"),
-                    tr("Incoming messages show as desktop notifications; click to open the chat.", "Pesan masuk muncul di notifikasi desktop; klik untuk membuka chatnya."),
-                    |ui| {
-                        let notify = &mut form.draft.as_mut().expect("synced").notify;
-                        widgets::toggle(ui, &mut notify.enabled, tr("Show notifications for incoming messages", "Tampilkan notifikasi pesan masuk"));
-                        ui.add_enabled_ui(notify.enabled, |ui| {
-                            ui.spacing_mut().item_spacing.y = 14.0;
-                            widgets::toggle(ui, &mut notify.groups, tr("Include group messages", "Termasuk pesan grup"));
-                            widgets::toggle(ui, &mut notify.preview, tr("Show the message text (turn off to show only the sender name)", "Tampilkan isi pesan (matikan agar hanya nama pengirim)"));
-                            widgets::toggle(ui, &mut notify.sound, tr("Play a message sound", "Bunyikan suara pesan"));
-                        });
-                        ui.label(rich(
-                            tr("The chat open in the active window is not notified.", "Chat yang sedang terbuka di jendela aktif tidak dinotifikasi."),
-                            12.0,
-                            Weight::Regular,
-                            p.muted,
-                        ));
-                    },
-                );
-
-                super::card(ui, tr("Updates", "Pembaruan"), tr("warust looks for new releases on GitHub. Nothing else is sent.", "warust mencari rilis baru di GitHub. Tidak ada data lain yang dikirim."), |ui| {
-                    use crate::backend::update::{UpdateState, current};
-                    let draft = form.draft.as_mut().expect("synced");
-                    line(ui, tr("Version", "Versi"), |ui| {
-                        ui.label(rich_mono(&format!("warust {}", current()), 12.0, p.text));
-                    });
-                    widgets::toggle(ui, &mut draft.updates.auto_check, tr("Check for updates automatically (on start and once a day)", "Cek pembaruan otomatis (saat dibuka dan sekali sehari)"));
-                    ui.add_enabled_ui(draft.updates.auto_check, |ui| {
-                        widgets::toggle(
+                        |ui| {
+                            let draft = form.draft.as_mut().expect("synced");
+                            ui.label(rich(tr("Page template", "Template halaman"), 13.0, Weight::Medium, p.text_2));
+                            ui.horizontal_wrapped(|ui| {
+                                ui.spacing_mut().item_spacing = egui::vec2(12.0, 12.0);
+                                for template in Template::ALL {
+                                    if template_option(ui, &p, template, draft.template == template.key()).clicked() {
+                                        draft.template = template.key().to_owned();
+                                    }
+                                }
+                            });
+                            // Named in both languages, so either can find it.
+                            let mut language = usize::from(draft.language == crate::i18n::ID);
+                            line(ui, "Language / Bahasa", |ui| widgets::tabs(ui, &["English", "Bahasa Indonesia"], &mut language));
+                            draft.language = if language == 1 { crate::i18n::ID } else { crate::i18n::EN }.to_owned();
+                            if Template::from_key(&draft.template).has_dark() {
+                                let mut tab = usize::from(draft.theme == "light");
+                                line(ui, tr("Theme", "Tema"), |ui| widgets::tabs(ui, &[tr("Dark", "Gelap"), tr("Light", "Terang")], &mut tab));
+                                draft.theme = if tab == 1 { "light" } else { "dark" }.to_owned();
+                            } else {
+                                ui.label(rich(tr("This template only has a light mode.", "Template ini hanya punya mode terang."), 12.0, Weight::Regular, p.muted));
+                            }
+                            // Forest's top pills, or Classic's sidebar as a rail of icons.
+                            let mut nav = usize::from(draft.nav_icons_only);
+                            line(ui, tr("Navigation", "Navigasi"), |ui| widgets::tabs(ui, &[tr("Icons and labels", "Ikon dan label"), tr("Icons only", "Ikon saja")], &mut nav));
+                            draft.nav_icons_only = nav == 1;
+                            let dark = ui.ctx().theme() == egui::Theme::Dark;
+                            wallpaper_picker(
                             ui,
-                            &mut draft.updates.auto_install,
-                            tr("Install updates automatically, then restart (checked against the release's SHA-256)", "Pasang pembaruan otomatis lalu mulai ulang (dicek dengan SHA-256 rilis)"),
+                            &p,
+                            WallDraft { key: &mut draft.wallpaper, file: &mut draft.wallpaper_file, dim: &mut draft.wallpaper_dim },
+                            &mut state.wallpaper_picking,
+                            dark,
+                            None,
                         );
-                    });
-                    ui.horizontal(|ui| {
-                        let checking = state.update == UpdateState::Checking;
-                        let clicked = ui.add_enabled_ui(!checking, |ui| widgets::button(ui, Some("rotate-cw"), tr("Check now", "Cek sekarang"), Kind::Secondary)).inner.clicked();
-                        if clicked && !checking {
-                            commands.push(Command::CheckUpdate);
-                        }
-                        let (text, color) = match &state.update {
-                            UpdateState::Idle => (String::new(), p.muted),
-                            UpdateState::Checking => (tr("Checking…", "Mengecek…").to_owned(), p.muted),
-                            UpdateState::UpToDate => (tr("You have the latest version.", "Anda memakai versi terbaru.").to_owned(), p.muted),
-                            UpdateState::Available(r) => (crate::trf!("warust {} is available.", "warust {} sudah tersedia.", r.version), p.accent_text),
-                            UpdateState::Downloading(r) => (crate::trf!("Downloading warust {}…", "Mengunduh warust {}…", r.version), p.accent_text),
-                            UpdateState::Ready(r) => (crate::trf!("warust {} is ready; it installs once warust is idle.", "warust {} siap; dipasang saat warust sedang tidak dipakai.", r.version), p.accent_text),
-                            UpdateState::Installing(r) => (crate::trf!("Installing warust {}…", "Memasang warust {}…", r.version), p.accent_text),
-                            UpdateState::Restarting => (tr("Restarting…", "Memulai ulang…").to_owned(), p.accent_text),
-                            UpdateState::Failed(e) => (crate::trf!("Could not check: {e}", "Tidak bisa mengecek: {e}"), p.red_text),
-                        };
-                        ui.label(rich(&text, 12.0, Weight::Regular, color));
-                    });
-                    if let UpdateState::Available(r) = &state.update {
-                        if widgets::button(ui, Some("download"), tr("Download", "Unduh"), Kind::Primary).clicked() {
-                            crate::platform::open_url(&r.download);
-                        }
-                    }
-                });
+                        },
+                    );
+                }
 
-                super::card(
-                    ui,
-                    tr("Window", "Jendela"),
-                    tr(
-                        "In the tray, numbers stay connected and the API, webhooks and notifications keep working. The tray icon opens warust again or quits it.",
-                        "Di tray, nomor tetap tersambung dan API, webhook, serta notifikasi tetap jalan. Ikon tray membuka warust lagi atau mengeluarkannya.",
-                    ),
-                    |ui| {
+                if tab == 1 {
+                    super::card(
+                        ui,
+                        tr("Sending (anti-ban)", "Pengiriman (anti-ban)"),
+                        tr(
+                            "Gap between messages per number, including messages from the REST API. A short gap raises the risk of the number being restricted by WhatsApp.",
+                            "Jeda antar pesan per nomor, termasuk pesan dari REST API. Jeda pendek menaikkan risiko nomor dibatasi WhatsApp.",
+                        ),
+                        |ui| {
+                            line(ui, tr("Minimum gap (seconds)", "Jeda minimal (detik)"), |ui| {
+                                widgets::field(ui, &mut form.gap, "4", 90.0, true);
+                                ui.label(rich(&crate::trf!("minimum {}", "minimal {}", Sending::MIN_GAP), 12.0, Weight::Regular, p.muted));
+                            });
+                            line(ui, tr("Random jitter (seconds)", "Jitter acak (detik)"), |ui| {
+                                widgets::field(ui, &mut form.jitter, "2", 90.0, true);
+                                ui.label(rich(tr("random extra 0–N seconds, 0–30", "tambahan acak 0–N detik, 0–30"), 12.0, Weight::Regular, p.muted));
+                            });
+                        },
+                    );
+
+                    super::card(ui, "Media", "", |ui| {
                         let draft = form.draft.as_mut().expect("synced");
-                        widgets::toggle(ui, &mut draft.close_to_tray, tr("Closing the window keeps warust running in the tray", "Menutup jendela membuat warust tetap jalan di tray"));
-                    },
-                );
-
-                super::card(ui, "Data", tr("Sessions, chats, media, and settings are stored on this computer.", "Sesi, chat, media, dan pengaturan disimpan di komputer ini."), |ui| {
-                    line(ui, tr("Data folder", "Folder data"), |ui| {
-                        ui.add(egui::Label::new(rich_mono(&data_dir.display().to_string(), 12.0, p.text)).truncate());
+                        widgets::toggle(ui, &mut draft.auto_stickers, tr("Download stickers automatically when they show in a chat", "Unduh stiker otomatis saat terlihat di chat"));
+                        hint(ui, &p, tr("Photos, videos, and documents are still downloaded on click.", "Foto, video, dan dokumen tetap diunduh saat diklik."));
                     });
-                    ui.horizontal(|ui| {
-                        if widgets::button(ui, Some("arrow-up-right"), tr("Open folder", "Buka folder"), Kind::Secondary).clicked() {
-                            crate::platform::open(data_dir);
-                        }
+
+                    super::card(ui, tr("Privacy", "Privasi"), "", |ui| {
+                        let draft = form.draft.as_mut().expect("synced");
+                        widgets::toggle(ui, &mut draft.send_read, tr("Send read receipts", "Kirim tanda dibaca"));
+                        hint(
+                            ui,
+                            &p,
+                            tr(
+                                "On: opening a chat sends blue ticks to the sender and marks the chat as read on the phone. It is off by default, so only the badge here goes away.",
+                                "Menyala: membuka chat mengirim centang biru ke pengirim dan menandai chat dibaca di HP. Bawaannya mati, jadi hanya badge di sini yang hilang.",
+                            ),
+                        );
+                        ui.add_space(6.0);
+                        widgets::toggle(ui, &mut draft.share_online, tr("Show when you are online", "Tampilkan saat Anda online"));
+                        hint(
+                            ui,
+                            &p,
+                            tr(
+                                "On: contacts see your number online while a warust window is in front, and you see when they are online. This applies to every linked number. Off: neither, as on WhatsApp.",
+                                "Menyala: kontak melihat nomor Anda online selama jendela warust di depan, dan Anda melihat saat mereka online. Berlaku untuk semua nomor yang tertaut. Mati: keduanya tidak, seperti di WhatsApp.",
+                            ),
+                        );
+                        ui.add_space(6.0);
+                        widgets::toggle(ui, &mut draft.typing, tr("Show \"typing\" to the other person while replying", "Tampilkan \"sedang mengetik\" ke lawan chat saat membalas"));
                         ui.label(rich(
-                            tr("Do not share the sessions/ folder: it holds your numbers' login keys.", "Jangan bagikan folder sessions/: isinya kunci login nomor Anda."),
+                            tr("Status seen receipts are set per number on the Status page.", "Tanda dilihat status diatur per nomor di halaman Status."),
                             12.0,
                             Weight::Regular,
                             p.muted,
                         ));
                     });
-                });
+
+                    super::card(
+                        ui,
+                        tr("Notifications", "Notifikasi"),
+                        tr("Incoming messages show as desktop notifications; click to open the chat.", "Pesan masuk muncul di notifikasi desktop; klik untuk membuka chatnya."),
+                        |ui| {
+                            let notify = &mut form.draft.as_mut().expect("synced").notify;
+                            widgets::toggle(ui, &mut notify.enabled, tr("Show notifications for incoming messages", "Tampilkan notifikasi pesan masuk"));
+                            ui.add_enabled_ui(notify.enabled, |ui| {
+                                ui.spacing_mut().item_spacing.y = 14.0;
+                                widgets::toggle(ui, &mut notify.groups, tr("Include group messages", "Termasuk pesan grup"));
+                                widgets::toggle(ui, &mut notify.preview, tr("Show the message text (turn off to show only the sender name)", "Tampilkan isi pesan (matikan agar hanya nama pengirim)"));
+                                widgets::toggle(ui, &mut notify.sound, tr("Play a message sound", "Bunyikan suara pesan"));
+                            });
+                            ui.label(rich(
+                                tr("The chat open in the active window is not notified.", "Chat yang sedang terbuka di jendela aktif tidak dinotifikasi."),
+                                12.0,
+                                Weight::Regular,
+                                p.muted,
+                            ));
+                        },
+                    );
+                }
+
+                if tab == 2 {
+                    super::card(ui, tr("Updates", "Pembaruan"), tr("warust looks for new releases on GitHub. Nothing else is sent.", "warust mencari rilis baru di GitHub. Tidak ada data lain yang dikirim."), |ui| {
+                        use crate::backend::update::{UpdateState, current};
+                        let draft = form.draft.as_mut().expect("synced");
+                        line(ui, tr("Version", "Versi"), |ui| {
+                            ui.label(rich_mono(&format!("warust {}", current()), 12.0, p.text));
+                        });
+                        widgets::toggle(ui, &mut draft.updates.auto_check, tr("Check for updates automatically (on start and once a day)", "Cek pembaruan otomatis (saat dibuka dan sekali sehari)"));
+                        ui.add_enabled_ui(draft.updates.auto_check, |ui| {
+                            widgets::toggle(
+                                ui,
+                                &mut draft.updates.auto_install,
+                                tr("Install updates automatically, then restart (checked against the release's SHA-256)", "Pasang pembaruan otomatis lalu mulai ulang (dicek dengan SHA-256 rilis)"),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            let checking = state.update == UpdateState::Checking;
+                            let clicked = ui.add_enabled_ui(!checking, |ui| widgets::button(ui, Some("rotate-cw"), tr("Check now", "Cek sekarang"), Kind::Secondary)).inner.clicked();
+                            if clicked && !checking {
+                                commands.push(Command::CheckUpdate);
+                            }
+                            let (text, color) = match &state.update {
+                                UpdateState::Idle => (String::new(), p.muted),
+                                UpdateState::Checking => (tr("Checking…", "Mengecek…").to_owned(), p.muted),
+                                UpdateState::UpToDate => (tr("You have the latest version.", "Anda memakai versi terbaru.").to_owned(), p.muted),
+                                UpdateState::Available(r) => (crate::trf!("warust {} is available.", "warust {} sudah tersedia.", r.version), p.accent_text),
+                                UpdateState::Downloading(r) => (crate::trf!("Downloading warust {}…", "Mengunduh warust {}…", r.version), p.accent_text),
+                                UpdateState::Ready(r) => (crate::trf!("warust {} is ready; it installs once warust is idle.", "warust {} siap; dipasang saat warust sedang tidak dipakai.", r.version), p.accent_text),
+                                UpdateState::Installing(r) => (crate::trf!("Installing warust {}…", "Memasang warust {}…", r.version), p.accent_text),
+                                UpdateState::Restarting => (tr("Restarting…", "Memulai ulang…").to_owned(), p.accent_text),
+                                UpdateState::Failed(e) => (crate::trf!("Could not check: {e}", "Tidak bisa mengecek: {e}"), p.red_text),
+                            };
+                            ui.label(rich(&text, 12.0, Weight::Regular, color));
+                        });
+                        if let UpdateState::Available(r) = &state.update {
+                            if widgets::button(ui, Some("download"), tr("Download", "Unduh"), Kind::Primary).clicked() {
+                                crate::platform::open_url(&r.download);
+                            }
+                        }
+                    });
+
+                    super::card(
+                        ui,
+                        tr("Window", "Jendela"),
+                        tr(
+                            "In the tray, numbers stay connected and the API, webhooks and notifications keep working. The tray icon opens warust again or quits it.",
+                            "Di tray, nomor tetap tersambung dan API, webhook, serta notifikasi tetap jalan. Ikon tray membuka warust lagi atau mengeluarkannya.",
+                        ),
+                        |ui| {
+                            let draft = form.draft.as_mut().expect("synced");
+                            widgets::toggle(ui, &mut draft.close_to_tray, tr("Closing the window keeps warust running in the tray", "Menutup jendela membuat warust tetap jalan di tray"));
+                        },
+                    );
+
+                    super::card(ui, "Data", tr("Sessions, chats, media, and settings are stored on this computer.", "Sesi, chat, media, dan pengaturan disimpan di komputer ini."), |ui| {
+                        line(ui, tr("Data folder", "Folder data"), |ui| {
+                            ui.add(egui::Label::new(rich_mono(&data_dir.display().to_string(), 12.0, p.text)).truncate());
+                        });
+                        ui.horizontal(|ui| {
+                            if widgets::button(ui, Some("arrow-up-right"), tr("Open folder", "Buka folder"), Kind::Secondary).clicked() {
+                                crate::platform::open(data_dir);
+                            }
+                            ui.label(rich(
+                                tr("Do not share the sessions/ folder: it holds your numbers' login keys.", "Jangan bagikan folder sessions/: isinya kunci login nomor Anda."),
+                                12.0,
+                                Weight::Regular,
+                                p.muted,
+                            ));
+                        });
+                    });
+                }
 
                 if let Some(settings) = save_bar(ui, form) {
                     commands.push(Command::SaveSettings(settings));
                 }
-                page.allocate_rect(column.min_rect(), egui::Sense::hover());
+                super::end_column(page, &column);
             });
         });
     commands
@@ -605,17 +609,6 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_column_is_centred_in_a_wide_page() {
-        let page = |width: f32| egui::Rect::from_min_size(egui::pos2(40.0, 28.0), egui::vec2(width, f32::INFINITY));
-        let wide = column_rect(page(1321.0));
-        assert_eq!(wide.width(), COLUMN);
-        assert_eq!((wide.left() - 40.0, 40.0 + 1321.0 - wide.right()), (280.0, 281.0), "equal sides, on whole pixels");
-        assert_eq!(wide.top(), 28.0);
-        // A window narrower than the column is filled, as before.
-        assert_eq!(column_rect(page(500.0)), page(500.0));
-    }
 
     #[test]
     fn form_validates_and_tracks_edits() {

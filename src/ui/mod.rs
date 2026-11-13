@@ -250,6 +250,8 @@ pub struct State {
     pub summary_tab: usize,
     /// Webhook & API: 0 = REST API, 1 = Webhook, 2 = Pemicu.
     pub integrations_tab: usize,
+    /// The tab open on the settings screen.
+    pub settings_tab: usize,
     /// Pemicu: the rule open in the editor, and the editor's test message.
     pub rule_selected: Option<usize>,
     pub rule_test: String,
