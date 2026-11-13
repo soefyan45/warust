@@ -1759,6 +1759,7 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
+        dev_shot(ui.ctx());
         // Drawn again, so on screen again: also after a click on the Dock
         // icon, which shows the window without going through `show_window`.
         // Not in the frame that closes it: `logic` has just hidden it.
@@ -2139,4 +2140,24 @@ mod lock_choice_tests {
         // A value from an edited settings file shows as the default.
         assert_eq!(LOCK_MINUTES[lock_choice(3)], 2);
     }
+}
+
+/// Dev aid: WARUST_SHOT=/path/shot.png saves the window as a PNG once it has
+/// drawn for a moment, then quits. For checking a design where the screen
+/// cannot be grabbed.
+fn dev_shot(ctx: &egui::Context) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static FRAMES: AtomicU32 = AtomicU32::new(0);
+    let Some(path) = std::env::var_os("WARUST_SHOT") else { return };
+    if FRAMES.fetch_add(1, Ordering::Relaxed) == 90 {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |shot: std::sync::Arc<egui::ColorImage>| {
+            let [w, h] = shot.size;
+            let bytes: Vec<u8> = shot.pixels.iter().flat_map(|c| c.to_array()).collect();
+            if let Err(e) = image::save_buffer(&path, &bytes, w as u32, h as u32, image::ColorType::Rgba8) {
+                log::error!("cannot save the screenshot: {e}");
+            }
+            std::process::exit(0);
+        })));
+    }
+    ctx.request_repaint();
 }
