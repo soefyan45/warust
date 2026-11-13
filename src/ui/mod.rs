@@ -196,6 +196,8 @@ pub struct State {
     /// Chat whose older messages were just requested, and when.
     pub older_asked: Option<(String, std::time::Instant)>,
     pub contact_panel: bool,
+    /// Searching the open chat's messages (#143).
+    pub msg_search: Option<screens::inbox::MsgSearch>,
     /// The details were asked for (the chat's name or the panel button), so
     /// they may take the chat's place as a page when there is no room beside
     /// it; a chat just opened shows the chat (#91).

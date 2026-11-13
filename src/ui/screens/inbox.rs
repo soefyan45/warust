@@ -192,6 +192,7 @@ pub fn show(
         .show(ui, |ui| {
             let call_on = state.call_now.is_some();
             let mut info_clicked = false;
+            let mut search_clicked = false;
             // Short of room, the right side gets smaller so the name stays readable.
             let narrow = ui.available_width() < 860.0;
             let group_text = chat.is_group().then(|| group_label(state, &session.id, chat));
@@ -240,6 +241,9 @@ pub fn show(
                     }
                 },
                 |ui| {
+                    let searching = state.msg_search.is_some();
+                    search_clicked = widgets::icon_button(ui, "search", 32.0, searching).on_hover_text(tr("Search in chat (Ctrl+F)", "Cari di chat (Ctrl+F)")).clicked();
+                    ui.add_space(4.0);
                     if widgets::icon_button(ui, "panel-right", 32.0, state.contact_panel).clicked() {
                         state.contact_panel = !state.contact_panel;
                         state.contact_page = state.contact_panel;
@@ -262,6 +266,9 @@ pub fn show(
             if info_clicked {
                 state.contact_panel = true;
                 state.contact_page = true;
+            }
+            if search_clicked {
+                toggle_msg_search(state, &session.id, &chat.jid);
             }
         });
     Panel::bottom(panel_id(state, "composer"))
@@ -292,14 +299,15 @@ pub fn show(
                 if crate::ui::privacy::blur_chat() {
                     privacy_banner(ui, &p);
                 }
-                if older_bar(ui, &p, state, session, chat) {
+                if msg_search_bar(ui, &p, state, session, chat) || older_bar(ui, &p, state, session, chat) {
                     state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                     commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
                 }
                 pinned_bar(ui, &p, chat);
                 let mut want = Vec::new();
                 let own = (session.own_number.as_deref(), session.own_lid.as_deref());
-                let event = messages(ui, &p, &book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), own, &mut state.unread_anchor);
+                let query = search_query(state, &session.id, &chat.jid);
+                let event = messages(ui, &p, &book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref());
                 ask_avatars(state, &mut commands, &session.id, want);
                 if let Some(event) = event {
                     on_message_event(event, state, session, chat, &mut commands);
@@ -2102,6 +2110,213 @@ fn group_label(state: &State, session: &str, chat: &Chat) -> String {
     }
 }
 
+/// Searching the open chat's messages (#143): what is searched and which
+/// match is shown (0 = the newest).
+pub struct MsgSearch {
+    session: String,
+    chat: String,
+    query: String,
+    at: usize,
+    /// The match last scrolled to, so each one is jumped to once.
+    shown: Option<String>,
+    focus: bool,
+}
+
+/// The marker behind matching words while a search is open.
+const SEARCH_HIT: Color32 = Color32::from_rgba_premultiplied(110, 92, 0, 110);
+
+/// Opens the search for this chat, or closes it when it is open (#143).
+fn toggle_msg_search(state: &mut State, session: &str, chat: &str) {
+    let open_here = state.msg_search.as_ref().is_some_and(|s| s.session == session && s.chat == chat);
+    state.msg_search = (!open_here).then(|| MsgSearch { session: session.to_owned(), chat: chat.to_owned(), query: String::new(), at: 0, shown: None, focus: true });
+}
+
+/// The search of this chat, trimmed, while it has text.
+fn search_query(state: &State, session: &str, chat: &str) -> Option<String> {
+    state
+        .msg_search
+        .as_ref()
+        .filter(|s| s.session == session && s.chat == chat)
+        .map(|s| s.query.trim().to_owned())
+        .filter(|q| !q.is_empty())
+}
+
+fn search_window_id(chat: &str) -> egui::Id {
+    egui::Id::unique("msg_search_window").with(chat)
+}
+
+/// Byte ranges of `text` that match `query`, ignoring case, not overlapping.
+fn match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    let lower = |c: char| c.to_lowercase().next().unwrap_or(c);
+    let wanted: Vec<char> = query.trim().chars().map(lower).collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut found = Vec::new();
+    let mut i = 0;
+    while i + wanted.len() <= chars.len() {
+        if chars[i..i + wanted.len()].iter().zip(&wanted).all(|((_, c), w)| lower(*c) == *w) {
+            let end = chars.get(i + wanted.len()).map_or(text.len(), |(at, _)| *at);
+            found.push(chars[i].0..end);
+            i += wanted.len();
+        } else {
+            i += 1;
+        }
+    }
+    found
+}
+
+/// Messages of `chat` whose text matches `query`, newest first: their index
+/// in the chat and id.
+fn search_hits(chat: &Chat, query: &str) -> Vec<(usize, String)> {
+    if query.trim().is_empty() {
+        return Vec::new();
+    }
+    chat.messages
+        .iter()
+        .enumerate()
+        .rev()
+        .filter(|(_, m)| !m.deleted && !match_ranges(&caption(m), query).is_empty())
+        .map(|(i, m)| (i, m.id.clone()))
+        .collect()
+}
+
+/// Marks the parts of `job` that match `query` with `color` behind them.
+fn highlight(job: &mut egui::text::LayoutJob, query: &str, color: Color32) {
+    let hits = match_ranges(&job.text, query);
+    if hits.is_empty() {
+        return;
+    }
+    let mut sections = Vec::with_capacity(job.sections.len() + hits.len() * 2);
+    for section in job.sections.drain(..) {
+        let range = section.byte_range.start.0..section.byte_range.end.0;
+        let mut cuts: Vec<usize> = hits.iter().flat_map(|h| [h.start, h.end]).filter(|b| *b > range.start && *b < range.end).collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        cuts.push(range.end);
+        let mut from = range.start;
+        for to in cuts {
+            let mut format = section.format.clone();
+            if hits.iter().any(|h| h.start <= from && to <= h.end) {
+                format.background = color;
+            }
+            let leading_space = if from == range.start { section.leading_space } else { 0.0 };
+            sections.push(egui::text::LayoutSection { leading_space, byte_range: egui::text::ByteIndex(from)..egui::text::ByteIndex(to), format });
+            from = to;
+        }
+    }
+    job.sections = sections;
+}
+
+/// The search bar over the thread (#143): the query, "3 of 12", older and
+/// newer match, and close. Each match is scrolled to and flashed. True when
+/// "Load older messages" was asked for.
+fn msg_search_bar(ui: &mut Ui, p: &Palette, state: &mut State, session: &SessionView, chat: &Chat) -> bool {
+    // Ctrl+F searches the open chat.
+    if ui.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::F))) && state.msg_search.as_ref().is_none_or(|s| s.chat != chat.jid || s.session != session.id) {
+        toggle_msg_search(state, &session.id, &chat.jid);
+    }
+    // A search of another chat ends when this one is shown.
+    if state.msg_search.as_ref().is_some_and(|s| s.session != session.id || s.chat != chat.jid) {
+        state.msg_search = None;
+    }
+    let Some(search) = state.msg_search.as_mut() else {
+        return false;
+    };
+    let hits = search_hits(chat, &search.query);
+    search.at = search.at.min(hits.len().saturating_sub(1));
+    let (mut older, mut step_key, mut step_button) = (false, 0i32, 0i32);
+    let (mut close_key, mut close_button) = (false, false);
+    let at = search.at;
+    let count = match (search.query.trim().is_empty(), hits.len()) {
+        (true, _) => String::new(),
+        (false, 0) => tr("No matches", "Tidak ditemukan").to_owned(),
+        (false, n) => crate::trf!("{} of {n}", "{} dari {n}", at + 1),
+    };
+    ui.add_space(8.0);
+    Frame::NONE
+        .fill(p.panel)
+        .stroke(Stroke::new(1.0, p.border_strong))
+        .corner_radius(R_MD)
+        .inner_margin(Margin::symmetric(10, 4))
+        .show(ui, |ui| {
+            widgets::row(
+                ui,
+                30.0,
+                |ui| {
+                    icons::show(ui, "search", 15.0, p.muted);
+                    let field = ui.add(
+                        egui::TextEdit::singleline(&mut search.query)
+                            .frame(Frame::NONE)
+                            .hint_text(rich(tr("Search in this chat", "Cari di chat ini"), 13.0, Weight::Regular, p.muted))
+                            .font(fonts::ui(13.0, Weight::Regular))
+                            .desired_width(ui.available_width()),
+                    );
+                    if std::mem::take(&mut search.focus) {
+                        field.request_focus();
+                    }
+                    if field.changed() {
+                        search.at = 0;
+                        search.shown = None;
+                    }
+                    // Enter: the next older match; Shift+Enter: the newer one; Esc: close.
+                    if field.lost_focus() {
+                        if ui.input(|i| i.key_pressed(Key::Enter)) {
+                            step_key = if ui.input(|i| i.modifiers.shift) { -1 } else { 1 };
+                            field.request_focus();
+                        } else if ui.input(|i| i.key_pressed(Key::Escape)) {
+                            close_key = true;
+                        }
+                    }
+                },
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    close_button = widgets::icon_button(ui, "x", 26.0, false).on_hover_text(tr("Close search (Esc)", "Tutup pencarian (Esc)")).clicked();
+                    let newer = ui.add_enabled_ui(at > 0, |ui| widgets::icon_button(ui, "chevron-down", 26.0, false)).inner;
+                    if newer.on_hover_text(tr("Newer match (Shift+Enter)", "Hasil lebih baru (Shift+Enter)")).clicked() {
+                        step_button = -1;
+                    }
+                    let older_hit = ui.add_enabled_ui(at + 1 < hits.len(), |ui| widgets::icon_button(ui, "chevron-up", 26.0, false)).inner;
+                    if older_hit.on_hover_text(tr("Older match (Enter)", "Hasil lebih lama (Enter)")).clicked() {
+                        step_button = 1;
+                    }
+                    ui.label(rich(&count, 12.0, Weight::Medium, p.muted));
+                },
+            );
+        });
+    let (close, step) = (close_key || close_button, step_key + step_button);
+    if step > 0 && search.at + 1 < hits.len() {
+        search.at += 1;
+    } else if step < 0 && search.at > 0 {
+        search.at -= 1;
+    }
+    // Scrolls to the match shown, once; an old one widens the drawn thread.
+    if let Some((index, id)) = hits.get(search.at) {
+        if search.shown.as_deref() != Some(id.as_str()) {
+            ui.data_mut(|d| {
+                d.insert_temp(search_window_id(&chat.jid), *index);
+                d.insert_temp(jump_id(), id.clone());
+            });
+            search.shown = Some(id.clone());
+        }
+    }
+    // Past the oldest match, the phone may still have older messages.
+    let at_end = !search.query.trim().is_empty() && (hits.is_empty() || search.at + 1 == hits.len());
+    if at_end && session.status == Status::Connected {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(rich(tr("Older messages may still be on the phone.", "Pesan yang lebih lama mungkin masih ada di HP."), 12.0, Weight::Regular, p.muted));
+            older = ui.link(rich(tr("Load older messages", "Muat pesan lama"), 12.0, Weight::Medium, p.accent_text)).clicked();
+        });
+    }
+    if close {
+        state.msg_search = None;
+        ui.data_mut(|d| d.remove_temp::<usize>(search_window_id(&chat.jid)));
+    }
+    older
+}
+
 /// Room under a failed bubble for its "Not sent · Retry" line.
 const FAILED_FOOT: f32 = 22.0;
 
@@ -2403,6 +2618,7 @@ fn messages(
     typing: Option<&str>,
     own: (Option<&str>, Option<&str>),
     anchor: &mut Option<UnreadAnchor>,
+    search: Option<&str>,
 ) -> Option<MsgEvent> {
     const GAP: f32 = 6.0;
     /// Extra space before a group run from another member.
@@ -2414,7 +2630,13 @@ fn messages(
     let group = chat.is_group();
     let wrap = (ui.available_width() * 0.7).min(420.0);
     let dark = is_dark(p.bubble_in);
-    let start = chat.messages.len().saturating_sub(SHOWN);
+    let mut start = chat.messages.len().saturating_sub(SHOWN);
+    // A search match older than that is drawn too, with a little before it (#143).
+    if search.is_some() {
+        if let Some(index) = ui.data(|d| d.get_temp::<usize>(search_window_id(&chat.jid))) {
+            start = start.min(index.saturating_sub(10));
+        }
+    }
     let shown: &[ChatMsg] = &chat.messages[start..];
     let mut clicked = None;
     let now = time::now();
@@ -2496,7 +2718,13 @@ fn messages(
         let text = if m.deleted {
             Some(deleted_galley(ui, m, meta_color))
         } else {
-            (!caption.is_empty()).then(|| ui.painter().layout_job(markup::job_with_mentions(&caption, 14.0, fg, code_bg, wrap, &mentions, accent)))
+            (!caption.is_empty()).then(|| {
+                let mut job = markup::job_with_mentions(&caption, 14.0, fg, code_bg, wrap, &mentions, accent);
+                if let Some(query) = search {
+                    highlight(&mut job, query, SEARCH_HIT);
+                }
+                ui.painter().layout_job(job)
+            })
         };
         let meta = time::clock(m.ts);
         let tick = if m.from_me { tick(p, &m.status, meta_color, !sticker && is_dark(p.primary)) } else { None };
@@ -4506,6 +4734,7 @@ fn compact_chat(
             ui.painter().hline(bar.x_range(), bar.bottom() - 0.5, Stroke::new(1.0, p.border));
             let call_on = state.call_now.is_some();
             let mut info_clicked = false;
+            let mut search_clicked = false;
             widgets::row(
                 ui,
                 64.0,
@@ -4563,6 +4792,9 @@ fn compact_chat(
                             state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                             commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
                         }
+                        if ui.button(tr("Search in chat", "Cari di chat")).clicked() {
+                            search_clicked = true;
+                        }
                         if ui.button(tr("Copy number", "Salin nomor")).clicked() {
                             ui.ctx().copy_text(chat.jid.split('@').next().unwrap_or_default().to_owned());
                         }
@@ -4579,6 +4811,9 @@ fn compact_chat(
             if info_clicked {
                 state.contact_panel = true;
                 state.contact_page = true;
+            }
+            if search_clicked {
+                toggle_msg_search(state, &session.id, &chat.jid);
             }
         });
     // The contact or group details as a page of their own in place of the
@@ -4636,14 +4871,15 @@ fn compact_chat(
         widgets::wallpaper(ui, ui.max_rect(), &session.id);
         Frame::NONE.inner_margin(Margin { left: 12, right: 12, top: 0, bottom: 6 }).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            if older_bar(ui, &p, state, session, chat) {
+            if msg_search_bar(ui, &p, state, session, chat) || older_bar(ui, &p, state, session, chat) {
                 state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
                 commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
             }
             pinned_bar(ui, &p, chat);
             let mut want = Vec::new();
             let own = (session.own_number.as_deref(), session.own_lid.as_deref());
-            let event = messages(ui, &p, book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), own, &mut state.unread_anchor);
+            let query = search_query(state, &session.id, &chat.jid);
+            let event = messages(ui, &p, book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref());
             ask_avatars(state, &mut commands, &session.id, want);
             if let Some(event) = event {
                 on_message_event(event, state, session, chat, &mut commands);
@@ -5050,5 +5286,29 @@ mod picture_box_tests {
         let _ = std::fs::remove_file(&file);
         // 90x190 is tall: narrower, then capped like any tall picture.
         assert_eq!(size, vec2(PICTURE_MIN_W, PICTURE_MAX_H));
+    }
+}
+
+#[cfg(test)]
+mod msg_search_tests {
+    use super::*;
+
+    #[test]
+    fn matches_ignore_case_and_do_not_overlap() {
+        assert_eq!(match_ranges("Harga Rp500, harga naik", "HARGA"), vec![0..5, 13..18]);
+        assert_eq!(match_ranges("aaaa", "aa"), vec![0..2, 2..4]);
+        assert!(match_ranges("halo", "  ").is_empty());
+        // Multi-byte text keeps byte ranges on character boundaries.
+        assert_eq!(match_ranges("café Café", "CAFÉ"), vec![0..5, 6..11]);
+    }
+
+    #[test]
+    fn a_highlight_splits_sections_around_the_match() {
+        let mut job = egui::text::LayoutJob::simple("kirim ke alamat baru".to_owned(), egui::FontId::default(), Color32::WHITE, 300.0);
+        highlight(&mut job, "alamat", SEARCH_HIT);
+        let marked: Vec<&str> = job.sections.iter().filter(|s| s.format.background == SEARCH_HIT).map(|s| &job.text[s.byte_range.start.0..s.byte_range.end.0]).collect();
+        assert_eq!(marked, vec!["alamat"]);
+        let total: usize = job.sections.iter().map(|s| s.byte_range.end.0 - s.byte_range.start.0).sum();
+        assert_eq!(total, job.text.len());
     }
 }
