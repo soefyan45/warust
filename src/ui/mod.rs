@@ -1651,6 +1651,13 @@ impl eframe::App for App {
             self.set_main(id);
         }
         self.state.settings = self.settings.clone();
+        if self.screen != Screen::Settings {
+            // A number typed on the settings screen and left by going to
+            // another screen: saved now, as the screen no longer does it.
+            if let Some(settings) = self.state.settings_form.autosave(&self.settings, false) {
+                self.backend.send(Command::SaveSettings(settings));
+            }
+        }
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
         self.state.presence_now = snapshot.presence;
