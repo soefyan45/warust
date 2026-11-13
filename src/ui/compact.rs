@@ -236,11 +236,14 @@ pub fn device_row(ui: &mut Ui, session: &SessionView, divider: bool, main: bool)
     }
     let connected = session.status == Status::Connected;
     let tile = Rect::from_center_size(pos2(rect.left() + 22.0, rect.center().y), vec2(44.0, 44.0));
-    let fill = if connected && forest() { p.accent_soft } else { p.raised };
-    ui.painter().circle_filled(tile.center(), 22.0, fill);
-    let icon = if session.status == Status::Pairing { "qr-code" } else { "smartphone" };
-    let icon_color = if connected && forest() { p.accent_text } else { p.text_2 };
-    icons::paint(ui, Rect::from_center_size(tile.center(), vec2(20.0, 20.0)), icon, 20.0, icon_color);
+    if session.status == Status::Pairing {
+        let fill = if connected && forest() { p.accent_soft } else { p.raised };
+        ui.painter().circle_filled(tile.center(), 22.0, fill);
+        icons::paint(ui, Rect::from_center_size(tile.center(), vec2(20.0, 20.0)), "qr-code", 20.0, p.text_2);
+    } else {
+        // The number's own colour and icon (#142).
+        widgets::paint_number_tile(ui, tile, &session.id);
+    }
     let left = tile.right() + 14.0;
     let right = rect.right() - 110.0;
     widgets::paint_number_name(ui, Rect::from_min_max(pos2(left, rect.top() + 14.0), pos2(right, rect.top() + 36.0)), &session.name, fonts::ui(16.0, Weight::SemiBold), p.text, main);

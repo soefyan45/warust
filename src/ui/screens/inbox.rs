@@ -218,7 +218,7 @@ pub fn show(
                     if several {
                         // Which number the chat came in on, and so replies from.
                         ui.label(rich(tr("to", "masuk ke"), 12.0, Weight::Regular, p.muted));
-                        let width = ui.painter().layout_no_wrap(super::devices::chip_label(session), fonts::ui(11.0, Weight::Medium), p.text_2).size().x + 24.0;
+                        let width = ui.painter().layout_no_wrap(super::devices::chip_label(session), fonts::ui(11.0, Weight::Medium), p.text_2).size().x + 38.0;
                         let (rect, _) = ui.allocate_exact_size(vec2(width, 20.0), Sense::hover());
                         number_chip(ui, &p, rect.min, session);
                     } else if group_text.is_none() {
@@ -857,7 +857,7 @@ fn number_chips(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[Session
                 ui.add_space(6.0);
                 ui.spacing_mut().item_spacing.x = 6.0;
                 let total: usize = sessions.iter().map(|s| s.book.chats.iter().filter(|c| !c.archived).count()).sum();
-                if number_chip_button(ui, p, &crate::trf!("All · {total}", "Semua · {total}"), None, state.inbox_scope.is_none()).clicked() {
+                if number_chip_button(ui, p, &crate::trf!("All · {total}", "Semua · {total}"), None, None, state.inbox_scope.is_none()).clicked() {
                     state.inbox_scope = None;
                 }
                 for s in sessions {
@@ -867,7 +867,7 @@ fn number_chips(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[Session
                     let label = format!("{star}{} · {count}", super::devices::chip_label(s));
                     let dot = super::devices::status_dot(p, &s.status);
                     let active = state.inbox_scope.as_deref() == Some(s.id.as_str());
-                    let chip = number_chip_button(ui, p, &label, Some(dot), active);
+                    let chip = number_chip_button(ui, p, &label, Some(dot), Some(&s.id), active);
                     if chip.clicked() {
                         state.inbox_scope = Some(s.id.clone());
                     }
@@ -884,7 +884,7 @@ fn number_chips(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[Session
 
 /// One chip of `number_chips`: a pill, filled when active, with the
 /// number's status dot.
-fn number_chip_button(ui: &mut Ui, p: &Palette, label: &str, dot: Option<Color32>, active: bool) -> egui::Response {
+fn number_chip_button(ui: &mut Ui, p: &Palette, label: &str, dot: Option<Color32>, number: Option<&str>, active: bool) -> egui::Response {
     let forest = theme::template().top_nav();
     let (fill, color) = match (active, forest) {
         (true, true) => (p.accent, p.primary),
@@ -892,7 +892,7 @@ fn number_chip_button(ui: &mut Ui, p: &Palette, label: &str, dot: Option<Color32
         (false, _) => (p.panel, p.text_2),
     };
     let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(12.5, if active { Weight::SemiBold } else { Weight::Medium }), color);
-    let lead = if dot.is_some() { 22.0 } else { 12.0 };
+    let lead = if dot.is_some() { 22.0 } else { 12.0 } + if number.is_some() { 17.0 } else { 0.0 };
     let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + lead + 12.0, 28.0), Sense::click());
     ui.painter().rect_filled(rect, 14.0, if response.hovered() && !active { p.raised } else { fill });
     if !active {
@@ -900,6 +900,12 @@ fn number_chip_button(ui: &mut Ui, p: &Palette, label: &str, dot: Option<Color32
     }
     if let Some(dot) = dot {
         ui.painter().circle_filled(pos2(rect.left() + 13.0, rect.center().y), 3.5, dot);
+    }
+    // The number's own icon in its colour (#142).
+    if let Some(id) = number {
+        let (tint, icon) = widgets::number_look(id);
+        let tint = if active && !forest { p.on_primary } else { tint };
+        icons::paint(ui, Rect::from_center_size(pos2(rect.left() + lead - 10.0, rect.center().y), vec2(13.0, 13.0)), icon, 13.0, tint);
     }
     ui.painter().galley(pos2(rect.left() + lead, rect.center().y - galley.size().y / 2.0), galley, color);
     response.on_hover_cursor(CursorIcon::PointingHand)
@@ -1006,10 +1012,13 @@ fn bound_banner(ui: &mut Ui, p: &Palette, session: &SessionView) {
 pub fn number_chip(ui: &Ui, p: &Palette, at: egui::Pos2, session: &SessionView) -> f32 {
     let label = super::devices::chip_label(session);
     let galley = ui.painter().layout_no_wrap(label, fonts::ui(11.0, Weight::Medium), p.text_2);
-    let rect = Rect::from_min_size(at, vec2(galley.size().x + 24.0, 20.0));
-    ui.painter().rect_filled(rect, 10.0, p.raised);
+    // Tinted with the number's own colour, its icon before the name (#142).
+    let (tint, icon) = widgets::number_look(&session.id);
+    let rect = Rect::from_min_size(at, vec2(galley.size().x + 38.0, 20.0));
+    ui.painter().rect_filled(rect, 10.0, tint.gamma_multiply(0.16));
     ui.painter().circle_filled(pos2(rect.left() + 9.0, rect.center().y), 3.0, super::devices::status_dot(p, &session.status));
-    ui.painter().galley(pos2(rect.left() + 16.0, rect.center().y - galley.size().y / 2.0), galley, p.text_2);
+    icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 22.0, rect.center().y), vec2(11.0, 11.0)), icon, 11.0, tint);
+    ui.painter().galley(pos2(rect.left() + 30.0, rect.center().y - galley.size().y / 2.0), galley, p.text_2);
     rect.width()
 }
 

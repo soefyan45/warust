@@ -45,6 +45,8 @@ pub enum Action {
     Wallpaper(String),
     /// Make it the main number, or (`None`) have none (#138).
     Main(Option<String>),
+    /// Choose the number's colour and icon (#142).
+    Look(String),
 }
 
 pub fn show(ui: &mut Ui, state: &mut State, sessions: &[SessionView]) -> Option<Action> {
@@ -371,9 +373,7 @@ fn table(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) 
         let cols = widgets::columns(row.shrink2(vec2(12.0, 0.0)), &ROW_COLS, 16.0);
 
         let tile = Rect::from_min_size(pos2(cols[0].left(), row.center().y - 14.0), vec2(28.0, 28.0));
-        ui.painter()
-            .rect(tile, theme::R_SM, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
-        icons::paint(ui, tile, "smartphone", 14.0, p.text_2);
+        widgets::paint_number_tile(ui, tile, &session.id);
         let text_x = cols[0].left() + 40.0;
         let name = Rect::from_min_max(pos2(text_x, row.center().y - 18.0), pos2(cols[0].right(), row.center().y));
         let phone_rect = Rect::from_min_max(pos2(text_x, row.center().y), pos2(cols[0].right(), row.center().y + 16.0));
@@ -420,6 +420,9 @@ pub fn row_menu(anchor: &egui::Response, p: &Palette, session: &SessionView, mai
         }
         if ui.button(tr("Chat wallpaper…", "Wallpaper chat…")).clicked() {
             action = Some(Action::Wallpaper(session.id.clone()));
+        }
+        if ui.button(tr("Colour and icon…", "Warna dan ikon…")).clicked() {
+            action = Some(Action::Look(session.id.clone()));
         }
         if ui.button(if main { tr("Main number ✓", "Nomor utama ✓") } else { tr("Set as main number", "Jadikan nomor utama") }).clicked() {
             action = Some(Action::Main((!main).then(|| session.id.clone())));

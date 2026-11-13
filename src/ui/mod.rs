@@ -219,6 +219,8 @@ pub struct State {
     pub number_wallpaper: Option<NumberWallpaperEdit>,
     /// Asked from a menu: make this the main number, or have none (#138).
     pub set_main: Option<Option<String>>,
+    /// The "Colour and icon" dialog of this number is open (#142).
+    pub number_look: Option<String>,
     /// "Tautkan ulang" waiting for a yes: it deletes the number's keys.
     pub confirm_relink: Option<String>,
     /// The saved settings, for screens that show them (webhook per number).
@@ -949,6 +951,74 @@ fn lock_choice(minutes: u32) -> usize {
 impl App {
     /// Saved, so the next start opens in the same theme.
     /// Changes the anti-peek options and saves them at once.
+    /// "Colour and icon" of a number (#142): the colours and icons to pick
+    /// from, each choice saved at once and shown everywhere the number is.
+    fn number_look_dialog(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.state.number_look.clone().or_else(|| self.windows.iter_mut().find_map(|w| w.state.number_look.take())) else {
+            return;
+        };
+        let p = theme::palette(ctx);
+        let name = self.sessions.iter().find(|s| s.id == id).map(|s| s.name.clone()).unwrap_or_default();
+        let (color, icon) = (widgets::number_color_index(&id), widgets::number_look(&id).1);
+        let mut picked: Option<backend::settings::NumberLook> = None;
+        let mut close = false;
+        let modal = egui::Modal::new(egui::Id::unique("number_look"))
+            .frame(Frame::NONE.fill(p.panel).stroke(Stroke::new(1.0, p.border_strong)).corner_radius(theme::R_LG).inner_margin(Margin::same(24)))
+            .show(ctx, |ui| {
+                ui.set_width(340.0);
+                ui.spacing_mut().item_spacing.y = 12.0;
+                ui.label(rich(&crate::trf!("Colour and icon · {}", "Warna dan ikon · {}", name), 16.0, Weight::SemiBold, p.text));
+                ui.label(rich(tr("Colour", "Warna"), 13.0, Weight::Medium, p.text_2));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                    for (i, swatch) in widgets::NUMBER_COLORS.iter().enumerate() {
+                        let (rect, response) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), egui::Sense::click());
+                        ui.painter().circle_filled(rect.center(), 15.0, *swatch);
+                        if i == color {
+                            ui.painter().circle_stroke(rect.center(), 17.5, Stroke::new(2.0, p.text));
+                            icons::paint(ui, rect.shrink(8.0), "check", 14.0, egui::Color32::WHITE);
+                        }
+                        if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                            picked = Some(backend::settings::NumberLook { color: i as u8, icon: icon.to_owned() });
+                        }
+                    }
+                });
+                ui.label(rich(tr("Icon", "Ikon"), 13.0, Weight::Medium, p.text_2));
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                    for name in widgets::NUMBER_ICONS {
+                        let (rect, response) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::click());
+                        let tint = widgets::NUMBER_COLORS[color];
+                        let fill = if name == icon { tint.gamma_multiply(0.22) } else if response.hovered() { p.raised } else { p.panel };
+                        ui.painter().rect(rect, theme::R_MD, fill, Stroke::new(1.0, if name == icon { tint } else { p.border }), egui::StrokeKind::Inside);
+                        icons::paint(ui, rect.shrink(9.0), name, 18.0, if name == icon { tint } else { p.text_2 });
+                        if response.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                            picked = Some(backend::settings::NumberLook { color: color as u8, icon: name.to_owned() });
+                        }
+                    }
+                });
+                widgets::row(
+                    ui,
+                    32.0,
+                    |_| {},
+                    |ui| {
+                        close = widgets::button(ui, Some("check"), tr("Done", "Selesai"), Kind::Primary).clicked();
+                    },
+                );
+            });
+        if let Some(look) = picked {
+            let mut settings = (*self.settings).clone();
+            settings.number_looks.insert(id.clone(), look.clone());
+            if let Some(draft) = self.state.settings_form.draft.as_mut() {
+                draft.number_looks.insert(id.clone(), look);
+            }
+            widgets::set_number_looks(&settings);
+            self.settings = std::sync::Arc::new(settings.clone());
+            self.backend.send(Command::SaveSettings(settings));
+        }
+        self.state.number_look = if close || modal.should_close() { None } else { Some(id) };
+    }
+
     /// Makes `id` the main number, or (`None`) leaves none, and saves it (#138).
     fn set_main(&mut self, id: Option<String>) {
         let mut settings = (*self.settings).clone();
@@ -1609,6 +1679,7 @@ impl eframe::App for App {
             self.set_privacy(|p| p.enabled = !p.enabled);
         }
         widgets::set_wallpapers(&self.settings);
+        widgets::set_number_looks(&self.settings);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.
@@ -1806,6 +1877,7 @@ impl eframe::App for App {
                 self.state.rename = Some((id, name));
             }
             Some(screens::nomor::Action::Main(id)) => self.state.set_main = Some(id),
+            Some(screens::nomor::Action::Look(id)) => self.state.number_look = Some(id),
             Some(screens::nomor::Action::Wallpaper(id)) => {
                 if let Some(session) = self.sessions.iter().find(|s| s.id == id) {
                     self.state.number_wallpaper = Some(NumberWallpaperEdit::new(&self.settings, session));
@@ -1832,6 +1904,7 @@ impl eframe::App for App {
         self.confirm_remove(ui.ctx());
         self.rename_dialog(ui.ctx());
         self.number_wallpaper_dialog(ui.ctx());
+        self.number_look_dialog(ui.ctx());
         self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
         movie_view::show(ui.ctx(), &mut self.state.video_view);
