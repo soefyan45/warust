@@ -1,11 +1,14 @@
-//! Pengaturan: theme, send pacing, media, and where the data lives. Also the
-//! settings draft shared with the Webhook & API screen: edits stay local until
-//! "Simpan", then go to the backend as `Command::SaveSettings`.
+//! Pengaturan: theme, send pacing, media, and where the data lives. What is
+//! changed here is saved as it changes (`Form::autosave`). Also the settings
+//! draft shared with the Webhook & API screen, where edits stay local until
+//! "Simpan" and then go to the backend as `Command::SaveSettings`.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use egui::{CentralPanel, ScrollArea, Ui};
+
+use whatsapp_rust::serde_json::{self, Value};
 
 use crate::backend::settings::Sending;
 use crate::backend::{Command, Settings};
@@ -29,6 +32,9 @@ pub struct Form {
     pub show_secret: bool,
     /// Last "saved" or "copied" message and when.
     pub note: Option<(String, Instant)>,
+    /// Pengaturan screen: the draft before the first change it has not saved
+    /// yet (a number still being typed, a slider still held).
+    unsaved_from: Option<Settings>,
 }
 
 impl Form {
@@ -61,6 +67,51 @@ impl Form {
             && self.jitter == d.sending.jitter_secs.to_string()
     }
 
+    /// The gap and jitter typed in their fields, or why they are invalid.
+    fn pacing(&self) -> Result<(u64, u64), String> {
+        let gap = match self.gap.trim().parse::<u64>() {
+            Ok(gap) if (Sending::MIN_GAP..=120).contains(&gap) => gap,
+            _ => return Err(crate::trf!("Minimum gap must be {}–120 seconds", "Jeda minimal harus {}–120 detik", Sending::MIN_GAP)),
+        };
+        let jitter = match self.jitter.trim().parse::<u64>() {
+            Ok(jitter) if jitter <= 30 => jitter,
+            _ => return Err(tr("Jitter must be 0–30 seconds", "Jitter harus 0–30 detik").to_owned()),
+        };
+        Ok((gap, jitter))
+    }
+
+    /// Pengaturan screen, after its cards are drawn: notes what they changed
+    /// in the draft since `before`. A valid gap and jitter count as changes
+    /// of the draft; invalid ones are left out and shown as a problem.
+    fn track(&mut self, before: Option<Settings>) {
+        let pacing = self.pacing();
+        let Some(draft) = self.draft.as_mut() else { return };
+        if let Ok((gap, jitter)) = pacing {
+            draft.sending.gap_secs = gap;
+            draft.sending.jitter_secs = jitter;
+        }
+        if let Some(before) = before.filter(|b| b != draft) {
+            self.unsaved_from.get_or_insert(before);
+        }
+    }
+
+    /// What the Pengaturan screen has to save now: the saved settings with
+    /// the changes made on that screen, and nothing of what is still unsaved
+    /// on the Webhook & API screen. `hold` waits (a number is being typed, a
+    /// slider is held), so half a value is not saved.
+    pub fn autosave(&mut self, saved: &Settings, hold: bool) -> Option<Settings> {
+        if hold {
+            return None;
+        }
+        let from = self.unsaved_from.take()?;
+        let new = patched(saved, &from, self.draft.as_ref()?);
+        if new == *saved {
+            return None;
+        }
+        self.flash(tr("Saved", "Tersimpan"));
+        Some(new)
+    }
+
     /// The draft with the number fields applied, or why they are invalid.
     pub fn result(&self) -> Result<Settings, String> {
         let mut s = self.draft.clone().ok_or(tr("Not loaded yet", "Belum dimuat"))?;
@@ -68,14 +119,7 @@ impl Form {
             Ok(port) if port >= 1024 => port,
             _ => return Err(tr("Port must be a number from 1024 to 65535", "Port harus angka 1024–65535").to_owned()),
         };
-        s.sending.gap_secs = match self.gap.trim().parse::<u64>() {
-            Ok(gap) if (Sending::MIN_GAP..=120).contains(&gap) => gap,
-            _ => return Err(crate::trf!("Minimum gap must be {}–120 seconds", "Jeda minimal harus {}–120 detik", Sending::MIN_GAP)),
-        };
-        s.sending.jitter_secs = match self.jitter.trim().parse::<u64>() {
-            Ok(jitter) if jitter <= 30 => jitter,
-            _ => return Err(tr("Jitter must be 0–30 seconds", "Jitter harus 0–30 detik").to_owned()),
-        };
+        (s.sending.gap_secs, s.sending.jitter_secs) = self.pacing()?;
         if let Some(problem) = s.rules.iter().find_map(|r| r.problem()) {
             return Err(problem);
         }
@@ -93,6 +137,51 @@ impl Form {
     pub fn flash(&mut self, note: impl Into<String>) {
         self.note = Some((note.into(), Instant::now()));
     }
+}
+
+/// `saved` with what differs between `before` and `after` taken from `after`:
+/// one screen's edits, laid over whatever else was saved meanwhile.
+fn patched(saved: &Settings, before: &Settings, after: &Settings) -> Settings {
+    fn lay(target: &mut Value, before: &Value, after: &Value) {
+        match (target, before, after) {
+            (Value::Object(target), Value::Object(before), Value::Object(after)) => {
+                for (key, new) in after {
+                    match (target.get_mut(key), before.get(key)) {
+                        (_, Some(old)) if old == new => {}
+                        (Some(slot), Some(old)) => lay(slot, old, new),
+                        _ => {
+                            target.insert(key.clone(), new.clone());
+                        }
+                    }
+                }
+                target.retain(|key, _| after.contains_key(key) || !before.contains_key(key));
+            }
+            (target, _, after) => *target = after.clone(),
+        }
+    }
+    let values = (serde_json::to_value(saved), serde_json::to_value(before), serde_json::to_value(after));
+    let (Ok(mut target), Ok(before), Ok(new)) = values else { return after.clone() };
+    lay(&mut target, &before, &new);
+    serde_json::from_value(target).unwrap_or_else(|_| after.clone())
+}
+
+/// Pengaturan screen: says that changes save themselves, that one just was
+/// saved, or why a number field is not.
+fn save_status(ui: &mut Ui, form: &Form) {
+    let p = theme::palette(ui.ctx());
+    let (icon, text, color) = match (form.pacing(), &form.note) {
+        (Err(e), _) => ("triangle-alert", e, p.red_text),
+        (Ok(_), Some((note, at))) if at.elapsed().as_secs() < 6 => {
+            ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
+            ("check", note.clone(), p.text_2)
+        }
+        _ => ("check", tr("Changes are saved as you make them", "Perubahan tersimpan otomatis").to_owned(), p.muted),
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        icons::show(ui, icon, 14.0, color);
+        ui.label(rich(&text, 12.0, Weight::Regular, color));
+    });
 }
 
 /// "Simpan perubahan" and "Batalkan" with the validation message; returns
@@ -266,8 +355,8 @@ pub fn wallpaper_picker(
         tr("Used in this number's chats, here and in its own window, once saved.", "Dipakai di chat nomor ini, di sini dan di jendelanya sendiri, setelah disimpan.")
     } else {
         tr(
-            "Applies to every open chat once saved, except numbers with their own wallpaper. Bubbles and date pills keep their own background.",
-            "Berlaku untuk semua chat setelah disimpan, kecuali nomor yang punya wallpaper sendiri. Bubble dan label tanggal tetap punya latar sendiri.",
+            "Applies to every open chat, except numbers with their own wallpaper. Bubbles and date pills keep their own background.",
+            "Berlaku untuk semua chat yang terbuka, kecuali nomor yang punya wallpaper sendiri. Bubble dan label tanggal tetap punya latar sendiri.",
         )
     };
     ui.add(egui::Label::new(rich(note, 12.0, Weight::Regular, p.muted)).wrap());
@@ -376,6 +465,7 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                 );
                 let form = &mut state.settings_form;
                 form.sync(saved);
+                let before = form.draft.clone();
 
                 super::card(
                     ui,
@@ -577,9 +667,14 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                     });
                 });
 
-                if let Some(settings) = save_bar(ui, form) {
+                form.track(before);
+                // A number being typed or a slider being dragged is saved
+                // once it is let go.
+                let hold = ui.ctx().egui_wants_keyboard_input() || ui.ctx().input(|i| i.pointer.any_down());
+                if let Some(settings) = form.autosave(saved, hold) {
                     commands.push(Command::SaveSettings(settings));
                 }
+                save_status(ui, form);
             });
         });
     commands
@@ -616,5 +711,68 @@ mod tests {
         let after = Arc::new(saving.result().unwrap());
         saving.sync(&after);
         assert!(!saving.dirty());
+    }
+
+    /// One frame of the Pengaturan screen in which `edit` changes the form.
+    fn frame(form: &mut Form, saved: &Arc<Settings>, hold: bool, edit: impl FnOnce(&mut Form)) -> Option<Settings> {
+        form.sync(saved);
+        let before = form.draft.clone();
+        edit(form);
+        form.track(before);
+        form.autosave(saved, hold)
+    }
+
+    #[test]
+    fn a_change_on_the_settings_screen_saves_itself() {
+        let mut saved = Arc::new(Settings::default());
+        let mut form = Form::default();
+        assert_eq!(frame(&mut form, &saved, false, |_| ()), None, "nothing changed");
+        let new = frame(&mut form, &saved, false, |f| f.draft.as_mut().unwrap().send_read = true).expect("saved at once");
+        assert!(new.send_read);
+        saved = Arc::new(new);
+        assert_eq!(frame(&mut form, &saved, false, |_| ()), None, "saved once, not every frame");
+        assert!(!form.dirty());
+
+        // A number is saved when its field is left, and only a valid one.
+        assert_eq!(frame(&mut form, &saved, true, |f| f.gap = "1".to_owned()), None);
+        assert_eq!(frame(&mut form, &saved, true, |f| f.gap = "12".to_owned()), None, "still typing");
+        let new = frame(&mut form, &saved, false, |_| ()).expect("the field was left");
+        assert_eq!(new.sending.gap_secs, 12);
+        saved = Arc::new(new);
+        assert_eq!(frame(&mut form, &saved, false, |f| f.gap = "999".to_owned()), None, "out of range");
+        // The bad number holds back nothing else.
+        let new = frame(&mut form, &saved, false, |f| f.draft.as_mut().unwrap().typing = false).expect("the toggle is saved");
+        assert!(!new.typing);
+        assert_eq!(new.sending.gap_secs, 12);
+    }
+
+    #[test]
+    fn unsaved_webhook_edits_stay_out_of_an_autosave() {
+        let saved = Arc::new(Settings::default());
+        let mut form = Form::default();
+        form.sync(&saved);
+        // Typed on the Webhook & API screen, not saved there yet.
+        form.draft.as_mut().unwrap().webhook.url = "https://example.test/hook".to_owned();
+        form.port = "9000".to_owned();
+        let new = frame(&mut form, &saved, false, |f| f.draft.as_mut().unwrap().auto_stickers = false).expect("saved");
+        assert!(!new.auto_stickers);
+        assert_eq!(new.webhook.url, saved.webhook.url);
+        assert_eq!(new.api.port, saved.api.port);
+        // The webhook edit is still there to save or cancel on its own screen.
+        let saved = Arc::new(new);
+        form.sync(&saved);
+        assert!(form.dirty());
+        assert_eq!(form.result().unwrap().webhook.url, "https://example.test/hook");
+    }
+
+    #[test]
+    fn a_patch_keeps_what_was_saved_elsewhere() {
+        let before = Settings::default();
+        let after = Settings { theme: "light".to_owned(), ..before.clone() };
+        // Saved from somewhere else in the meantime (the sidebar, the API).
+        let saved = Settings { nav_icons_only: !before.nav_icons_only, ..before.clone() };
+        let new = patched(&saved, &before, &after);
+        assert_eq!(new.theme, "light");
+        assert_eq!(new.nav_icons_only, saved.nav_icons_only);
     }
 }
