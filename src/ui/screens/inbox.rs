@@ -525,6 +525,23 @@ fn older_bar(ui: &mut Ui, p: &Palette, state: &State, session: &SessionView, cha
     clicked
 }
 
+/// An empty chat list: with a search, what was searched and a way to clear it
+/// (#141); without one, `empty`.
+fn no_match_or(ui: &mut Ui, p: &Palette, state: &mut State, empty: &str, size: f32) {
+    let query = state.chat_search.trim().to_owned();
+    ui.vertical_centered(|ui| {
+        if query.is_empty() {
+            ui.label(rich(empty, size, Weight::Regular, p.muted));
+            return;
+        }
+        ui.add(egui::Label::new(rich(&crate::trf!("No chats match \"{query}\"", "Tidak ada chat yang cocok dengan \"{query}\""), size, Weight::Regular, p.muted)).wrap());
+        ui.add_space(8.0);
+        if widgets::button(ui, Some("x"), tr("Clear search", "Hapus pencarian"), Kind::Secondary).clicked() {
+            state.chat_search.clear();
+        }
+    });
+}
+
 /// A line of the chat list: a number's section header, or one chat.
 enum Line<'a> {
     Header(&'a SessionView, usize),
@@ -644,7 +661,7 @@ fn chat_list(
             TAB_ARCHIVED => tr("No archived chats yet.", "Belum ada chat yang diarsipkan."),
             _ => tr("No chats here.", "Tidak ada chat di sini."),
         };
-        ui.vertical_centered(|ui| ui.label(rich(empty, 13.0, Weight::Regular, p.muted)));
+        no_match_or(ui, p, state, empty, 13.0);
         return commands;
     }
     // Only the lines on screen are drawn, so hundreds of chats stay cheap.
@@ -4325,7 +4342,7 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
             } else {
                 tr("No chats here.", "Tidak ada chat di sini.")
             };
-            ui.vertical_centered(|ui| ui.label(rich(text, 14.0, Weight::Regular, p.muted)));
+            no_match_or(ui, &p, state, text, 14.0);
             return;
         }
         let height = |line: &Line| match line {
