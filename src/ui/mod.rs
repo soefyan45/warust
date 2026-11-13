@@ -837,7 +837,7 @@ impl App {
         // In a short window the card gives way before it runs into the menu:
         // first its list of numbers goes, then the card itself.
         let room = panel.bottom() - foot_h - 8.0 - (ui.cursor().top() + 8.0);
-        let height_with = |rows: f32| 10.0 + 22.0 + 6.0 + rows * ROW + 6.0 + 18.0 + 10.0;
+        let height_with = |rows: f32| 10.0 + 22.0 + 6.0 + rows * ROW + 6.0 + 18.0 + 18.0 + 10.0;
         let listed = if height_with(self.sessions.len() as f32) <= room { self.sessions.len() } else { 0 };
         let rows = listed as f32;
         let card_h = height_with(rows);
@@ -847,7 +847,10 @@ impl App {
         }
         let top = panel.bottom() - foot_h - 8.0 - card_h;
         let card = egui::Rect::from_min_max(egui::pos2(panel.left(), top), egui::pos2(panel.right(), top + card_h));
-        ui.painter().rect(card, 14.0, theme::mint_pair(ui.ctx(), theme::MINT_SIDEBAR_FIELD), Stroke::new(1.0, line), egui::StrokeKind::Inside);
+        // The card wears the chat background: its glow, without the dots.
+        ui.painter().rect_filled(card, 14.0, p.bg);
+        widgets::mint_glow(ui.painter(), card, ui.ctx().theme() == egui::Theme::Dark, 14.0);
+        ui.painter().rect_stroke(card, 14.0, Stroke::new(1.0, line), egui::StrokeKind::Inside);
         let inner = card.shrink2(egui::vec2(10.0, 10.0));
         // Head: how many are connected, and "link a number".
         let connected = self.sessions.iter().filter(|s| s.status == Status::Connected).count();
@@ -865,7 +868,8 @@ impl App {
         }
         // The numbers.
         let list_top = head.bottom() + 6.0;
-        ui.painter().hline(card.x_range().shrink(1.0), list_top - 3.0, Stroke::new(1.0, line));
+        let rule = egui::Rangef::new(card.left() + 4.0, card.right() - 6.0);
+        ui.painter().hline(rule, list_top - 3.0, Stroke::new(1.0, line));
         let mut scope = None;
         for (i, session) in self.sessions.iter().take(listed).enumerate() {
             let row = egui::Rect::from_min_size(egui::pos2(card.left() + 4.0, list_top + i as f32 * ROW), egui::vec2(card.width() - 8.0, ROW));
@@ -900,11 +904,12 @@ impl App {
         }
         // Foot of the card: the REST API and the version.
         let list_bottom = list_top + rows * ROW;
-        ui.painter().hline(card.x_range().shrink(1.0), list_bottom + 3.0, Stroke::new(1.0, line));
+        ui.painter().hline(rule, list_bottom + 3.0, Stroke::new(1.0, line));
         let last = egui::Rect::from_min_size(egui::pos2(inner.left(), list_bottom + 6.0), egui::vec2(inner.width(), 18.0));
         let api = if matches!(self.api, backend::ApiState::Listening(_)) { tr("REST API running", "REST API berjalan") } else { tr("REST API not active", "REST API belum aktif") };
         widgets::paint_text(ui, last, api, fonts::ui(11.5, Weight::Regular), p.muted, egui::Align::Min);
-        widgets::paint_text(ui, last, concat!("v", env!("CARGO_PKG_VERSION")), fonts::mono(11.5), p.muted, egui::Align::Max);
+        let version = last.translate(egui::vec2(0.0, 18.0));
+        widgets::paint_text(ui, version, concat!("v", env!("CARGO_PKG_VERSION")), fonts::mono(11.5), p.muted, egui::Align::Min);
         self.mint_sidebar_buttons(ui, panel, foot_h);
     }
 

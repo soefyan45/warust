@@ -723,31 +723,7 @@ pub fn wallpaper(ui: &Ui, rect: Rect, session: &str) {
 /// Mint's chat background: a soft green glow from the top right corner under
 /// a faint dot grid. The grid stands still while the messages scroll.
 fn mint_backdrop(painter: &egui::Painter, rect: Rect, dark: bool) {
-    // The glow: an ellipse 75% of the width by 85% of the height around the
-    // top right corner, strongest there. egui has no gradients, so it is a
-    // mesh with a colour per vertex.
-    let (glow, strength) = if dark { (theme::MINT_GLOW.1, 0.16) } else { (theme::MINT_GLOW.0, 1.0) };
-    const CELLS: usize = 24;
-    let mut mesh = egui::Mesh::default();
-    for row in 0..=CELLS {
-        for col in 0..=CELLS {
-            let (u, v) = (col as f32 / CELLS as f32, row as f32 / CELLS as f32);
-            let d = (((1.0 - u) / 0.75).powi(2) + (v / 0.85).powi(2)).sqrt();
-            // 100% at the corner, 45% a third of the way out, gone at three quarters.
-            let alpha = if d < 0.35 { egui::lerp(1.0..=0.45, d / 0.35) } else { egui::lerp(0.45..=0.0, ((d - 0.35) / 0.4).min(1.0)) };
-            let at = pos2(rect.left() + u * rect.width(), rect.top() + v * rect.height());
-            mesh.colored_vertex(at, glow.gamma_multiply(alpha * strength));
-        }
-    }
-    let stride = (CELLS + 1) as u32;
-    for row in 0..CELLS as u32 {
-        for col in 0..CELLS as u32 {
-            let i = row * stride + col;
-            mesh.add_triangle(i, i + 1, i + stride);
-            mesh.add_triangle(i + 1, i + stride + 1, i + stride);
-        }
-    }
-    painter.add(egui::Shape::mesh(mesh));
+    mint_glow(painter, rect, dark, 0.0);
     // The grid: a dot every 28 px.
     let dot = if dark { Color32::from_white_alpha(18) } else { Color32::from_black_alpha(20) };
     const STEP: f32 = 28.0;
@@ -763,6 +739,48 @@ fn mint_backdrop(painter: &egui::Painter, rect: Rect, dark: bool) {
         }
         y += STEP;
     }
+}
+
+/// The glow of Mint's chat background alone, over whatever `rect` is filled
+/// with; `radius` rounds its corners, for a card.
+pub fn mint_glow(painter: &egui::Painter, rect: Rect, dark: bool, radius: f32) {
+    // The glow: an ellipse 75% of the width by 85% of the height around the
+    // top right corner, strongest there. egui has no gradients, so it is a
+    // mesh with a colour per vertex.
+    let (glow, strength) = if dark { (theme::MINT_GLOW.1, 0.16) } else { (theme::MINT_GLOW.0, 1.0) };
+    const CELLS: usize = 24;
+    let mut mesh = egui::Mesh::default();
+    for row in 0..=CELLS {
+        for col in 0..=CELLS {
+            let (u, v) = (col as f32 / CELLS as f32, row as f32 / CELLS as f32);
+            let d = (((1.0 - u) / 0.75).powi(2) + (v / 0.85).powi(2)).sqrt();
+            // 100% at the corner, 45% a third of the way out, gone at three quarters.
+            let alpha = if d < 0.35 { egui::lerp(1.0..=0.45, d / 0.35) } else { egui::lerp(0.45..=0.0, ((d - 0.35) / 0.4).min(1.0)) };
+            let at = pos2(rect.left() + u * rect.width(), rect.top() + v * rect.height());
+            mesh.colored_vertex(rounded(rect, radius, at), glow.gamma_multiply(alpha * strength));
+        }
+    }
+    let stride = (CELLS + 1) as u32;
+    for row in 0..CELLS as u32 {
+        for col in 0..CELLS as u32 {
+            let i = row * stride + col;
+            mesh.add_triangle(i, i + 1, i + stride);
+            mesh.add_triangle(i + 1, i + stride + 1, i + stride);
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+}
+
+/// `at` pulled onto the nearest corner arc of `rect` rounded by `radius`,
+/// when it lies in the part a rounded corner cuts off.
+fn rounded(rect: Rect, radius: f32, at: egui::Pos2) -> egui::Pos2 {
+    if radius <= 0.0 {
+        return at;
+    }
+    let inner = rect.shrink(radius);
+    let centre = pos2(at.x.clamp(inner.left(), inner.right()), at.y.clamp(inner.top(), inner.bottom()));
+    let out = at - centre;
+    if out.x != 0.0 && out.y != 0.0 && out.length() > radius { centre + out.normalized() * radius } else { at }
 }
 
 /// `wall` repeated every 390 px across `rect`.

@@ -303,7 +303,6 @@ pub const MINT_DARK: Palette = Palette {
 /// Mint's frame (sidebar) and what sits on it: its fill, the fields and the
 /// selected row on it, and its lines. `(light, dark)`.
 pub const MINT_SIDEBAR: (Color32, Color32) = (hex(0xF5F5F6), hex(0x131315));
-pub const MINT_SIDEBAR_FIELD: (Color32, Color32) = (hex(0xFFFFFF), hex(0x1C1C20));
 pub const MINT_SIDEBAR_SELECTED: (Color32, Color32) = (hex(0xFFFFFF), hex(0x242428));
 pub const MINT_SIDEBAR_LINE: (Color32, Color32) = (hex(0xE4E4E7), hex(0x26262A));
 /// The soft glow in the top right of Mint's chat background.
