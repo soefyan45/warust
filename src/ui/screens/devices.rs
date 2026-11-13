@@ -54,6 +54,7 @@ fn item(
     badge: u32,
     selected: bool,
     main: bool,
+    number: Option<&str>,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(vec2(ui.available_width(), ITEM), Sense::click());
     if selected {
@@ -62,8 +63,19 @@ fn item(
         ui.painter().rect_filled(rect, theme::r_inner(), p.raised);
     }
     let tile = Rect::from_center_size(pos2(rect.left() + 26.0, rect.center().y), vec2(34.0, 34.0));
-    ui.painter().circle_filled(tile.center(), 17.0, if selected { p.panel } else { p.raised });
-    icons::paint(ui, tile, icon, 16.0, p.text_2);
+    match number {
+        // A number's own colour and icon (#142).
+        Some(id) => {
+            if selected {
+                ui.painter().circle_filled(tile.center(), 17.0, p.panel);
+            }
+            widgets::paint_number_tile(ui, tile, id);
+        }
+        None => {
+            ui.painter().circle_filled(tile.center(), 17.0, if selected { p.panel } else { p.raised });
+            icons::paint(ui, tile, icon, 16.0, p.text_2);
+        }
+    }
     if let Some(dot) = dot {
         let at = pos2(tile.right() - 4.0, tile.bottom() - 4.0);
         ui.painter().circle_filled(at, 5.0, p.panel);
@@ -94,6 +106,9 @@ fn number_menu(row: &egui::Response, state: &mut State, session: &SessionView) {
         }
         if ui.button(tr("Rename…", "Ganti nama…")).clicked() {
             state.rename = Some((session.id.clone(), session.name.clone()));
+        }
+        if ui.button(tr("Colour and icon…", "Warna dan ikon…")).clicked() {
+            state.number_look = Some(session.id.clone());
         }
         let main = is_main(state, session);
         if ui.button(if main { tr("Main number ✓", "Nomor utama ✓") } else { tr("Set as main number", "Jadikan nomor utama") }).clicked() {
@@ -127,6 +142,7 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
         total,
         state.inbox_scope.is_none(),
         false,
+        None,
     );
     if all.clicked() {
         state.inbox_scope = None;
@@ -135,7 +151,7 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
         let phone = s.phone.clone().unwrap_or_default();
         let selected = state.inbox_scope.as_deref() == Some(s.id.as_str());
         let main = is_main(state, s);
-        let row = item(ui, p, "smartphone", &s.name, &phone, p.muted, true, Some(p.green), unread(s), selected, main);
+        let row = item(ui, p, "smartphone", &s.name, &phone, p.muted, true, Some(p.green), unread(s), selected, main, Some(&s.id));
         if row.clicked() {
             state.inbox_scope = Some(s.id.clone());
         }
@@ -150,7 +166,7 @@ pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView
             let detail = if chats > 0 { crate::trf!("{label} · {chats} old chats", "{label} · {chats} chat lama") } else { label };
             let selected = state.inbox_scope.as_deref() == Some(s.id.as_str());
             let dot = status_dot(p, &s.status);
-            let row = item(ui, p, icon, &s.name, &detail, dot, false, Some(dot), unread(s), selected, is_main(state, s));
+            let row = item(ui, p, icon, &s.name, &detail, dot, false, Some(dot), unread(s), selected, is_main(state, s), Some(&s.id));
             if row.clicked() {
                 state.inbox_scope = Some(s.id.clone());
             }

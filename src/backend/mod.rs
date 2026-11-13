@@ -994,7 +994,8 @@ async fn run(
                 }
                 // A removed main number leaves no main (#138).
                 let was_main = settings.main_number.take_if(|main| *main == id).is_some();
-                if wall.is_some() || was_main {
+                let had_look = settings.number_looks.remove(&id).is_some();
+                if wall.is_some() || was_main || had_look {
                     settings.save(&data_dir);
                     if let Ok(mut shared) = state.shared.lock() {
                         shared.settings = Arc::new(settings);

@@ -556,6 +556,62 @@ pub fn paint_number_name(ui: &Ui, rect: Rect, name: &str, font: egui::FontId, co
     ui.painter().galley(pill.center() - tag.size() / 2.0, tag, p.accent_text);
 }
 
+/// The colours a number can have (#142): mid tones that read on light and
+/// dark backgrounds, as a tint on a soft fill of themselves.
+pub const NUMBER_COLORS: [Color32; 8] = [
+    Color32::from_rgb(0x2E, 0x8B, 0x57),
+    Color32::from_rgb(0x2F, 0x6F, 0xDB),
+    Color32::from_rgb(0x7B, 0x4F, 0xD6),
+    Color32::from_rgb(0xE0, 0x7B, 0x24),
+    Color32::from_rgb(0xD6, 0x45, 0x7A),
+    Color32::from_rgb(0x13, 0x8A, 0x8A),
+    Color32::from_rgb(0xB8, 0x86, 0x0B),
+    Color32::from_rgb(0x5B, 0x6B, 0x7A),
+];
+
+/// The icons a number can have (#142), the phone first (the default).
+pub const NUMBER_ICONS: [&str; 8] = ["smartphone", "briefcase", "store", "headset", "house", "user", "star", "message-circle"];
+
+fn number_looks() -> &'static Mutex<std::collections::HashMap<String, crate::backend::settings::NumberLook>> {
+    static LOOKS: OnceLock<Mutex<std::collections::HashMap<String, crate::backend::settings::NumberLook>>> = OnceLock::new();
+    LOOKS.get_or_init(Default::default)
+}
+
+/// Takes the numbers' colours and icons from the settings (cheap; called every frame).
+pub fn set_number_looks(settings: &crate::backend::Settings) {
+    if let Ok(mut looks) = number_looks().lock() {
+        if *looks != settings.number_looks {
+            *looks = settings.number_looks.clone();
+        }
+    }
+}
+
+/// A number's colour index: its own, else one picked from its id, so
+/// numbers differ before anyone chooses.
+pub fn number_color_index(id: &str) -> usize {
+    let chosen = number_looks().lock().ok().and_then(|looks| looks.get(id).map(|l| l.color as usize));
+    chosen.unwrap_or_else(|| id.bytes().fold(0usize, |sum, b| sum.wrapping_mul(31).wrapping_add(b as usize))) % NUMBER_COLORS.len()
+}
+
+/// A number's colour and icon (#142).
+pub fn number_look(id: &str) -> (Color32, &'static str) {
+    let icon = number_looks()
+        .lock()
+        .ok()
+        .and_then(|looks| looks.get(id).and_then(|l| NUMBER_ICONS.iter().copied().find(|i| *i == l.icon)))
+        .unwrap_or(NUMBER_ICONS[0]);
+    (NUMBER_COLORS[number_color_index(id)], icon)
+}
+
+/// A number's round tile: its icon in its colour on a soft fill of it.
+pub fn paint_number_tile(ui: &Ui, rect: Rect, id: &str) {
+    let (color, icon) = number_look(id);
+    let r = rect.width().min(rect.height()) / 2.0;
+    ui.painter().circle_filled(rect.center(), r, color.gamma_multiply(0.16));
+    let size = (r * 0.95).round();
+    icons::paint(ui, Rect::from_center_size(rect.center(), vec2(size, size)), icon, size, color);
+}
+
 /// A designed chat wallpaper (Pego "Mobile · Chat wallpaper"): settings key,
 /// names, the colour under it, and the image.
 pub struct Wallpaper {
@@ -680,4 +736,17 @@ pub fn paint_wallpaper_preview(ui: &Ui, rect: Rect, wall: &Wallpaper) {
     let painter = ui.painter().with_clip_rect(rect);
     painter.rect_filled(rect, 8.0, wall.background);
     egui::Image::from_bytes(wall.uri, wall.bytes).corner_radius(8).fit_to_exact_size(rect.size()).paint_at(ui, rect);
+}
+
+#[cfg(test)]
+mod number_look_tests {
+    use super::*;
+
+    #[test]
+    fn a_number_without_a_choice_gets_a_steady_colour_and_the_phone() {
+        let id = "s1794296306";
+        assert_eq!(number_color_index(id), number_color_index(id));
+        assert!(number_color_index(id) < NUMBER_COLORS.len());
+        assert_eq!(number_look("s-unknown").1, "smartphone");
+    }
 }

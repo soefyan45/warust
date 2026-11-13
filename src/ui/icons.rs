@@ -25,6 +25,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "pin", "trash", "chevron-up", "eye-off", "shield",
     "phone", "phone-incoming", "phone-missed", "phone-off", "mic-off", "volume-2", "volume-x", "minimize-2",
     "video-off", "monitor-up", "file-spreadsheet", "file-archive", "pencil", "camera", "contact", "phone-outgoing", "bell-off", "minus", "users",
+    "briefcase", "store", "headset", "user", "star",
 ];
 
 fn white_svgs() -> &'static HashMap<&'static str, Bytes> {

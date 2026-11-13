@@ -211,6 +211,9 @@ pub struct Settings {
     pub number_wallpapers: HashMap<String, NumberWallpaper>,
     /// The main number (#138): listed first, and the Inbox opens on it.
     pub main_number: Option<String>,
+    /// A number's own colour and icon, by session id (#142). A number not in
+    /// here gets a colour from its id and the phone icon.
+    pub number_looks: HashMap<String, NumberLook>,
     pub privacy: Privacy,
     /// Navigation shows only its icons (#102): Forest's top pills, or
     /// Classic's sidebar as a rail.
@@ -229,6 +232,15 @@ pub struct NumberWallpaper {
     pub key: String,
     pub file: String,
     pub dim: u8,
+}
+
+/// A number's colour (an index into the UI's palette of number colours) and
+/// icon (a lucide icon name) (#142).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NumberLook {
+    pub color: u8,
+    pub icon: String,
 }
 
 /// Deletes a copied wallpaper picture, only ever inside the data folder's
@@ -262,6 +274,7 @@ impl Default for Settings {
             wallpaper_dim: 30,
             number_wallpapers: HashMap::new(),
             main_number: None,
+            number_looks: HashMap::new(),
             privacy: Privacy::default(),
             nav_icons_only: false,
             updates: Updates::default(),
