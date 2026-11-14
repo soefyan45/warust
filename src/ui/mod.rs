@@ -23,6 +23,7 @@ mod time;
 mod view;
 mod widgets;
 mod window;
+mod zoom;
 
 use egui::{CursorIcon, Frame, Margin, Panel, Stroke, Theme, ThemePreference, Ui};
 

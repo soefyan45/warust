@@ -513,17 +513,35 @@ pub fn paint_avatar(ui: &Ui, rect: Rect, initials: &str, picture: Option<&Path>,
     );
 }
 
+/// The pictures handed to egui's image loader, by URI.
+fn loaded_pictures() -> &'static Mutex<HashSet<String>> {
+    static LOADED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    LOADED.get_or_init(Default::default)
+}
+
+fn picture_key(path: &Path) -> String {
+    format!("bytes://picture/{}", path.display())
+}
+
 /// Hands a picture file to egui's image loader once; later frames use the URI.
 pub fn picture_uri(ctx: &egui::Context, path: &Path) -> Option<String> {
-    static LOADED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
-    let uri = format!("bytes://picture/{}", path.display());
-    let mut loaded = LOADED.get_or_init(Default::default).lock().ok()?;
+    let uri = picture_key(path);
+    let mut loaded = loaded_pictures().lock().ok()?;
     if !loaded.contains(&uri) {
         let bytes = std::fs::read(path).ok()?;
         ctx.include_bytes(uri.clone(), bytes);
         loaded.insert(uri.clone());
     }
     Some(uri)
+}
+
+/// Lets go of a picture's bytes and texture; `picture_uri` reads it again
+/// when it is next wanted.
+pub fn forget_picture(ctx: &egui::Context, path: &Path) {
+    let uri = picture_key(path);
+    if loaded_pictures().lock().is_ok_and(|mut loaded| loaded.remove(&uri)) {
+        ctx.forget_image(&uri);
+    }
 }
 
 /// A picture file's size in pixels, read from its header once and remembered.
