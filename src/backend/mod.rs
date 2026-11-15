@@ -376,6 +376,8 @@ pub enum Command {
     /// Video in the call (#55): our camera off or on, turn a voice call into
     /// video, or answer the caller's request to.
     CameraCall(bool),
+    /// Share the screen instead of the camera, or go back to it (#121).
+    ShareScreen(bool),
     StartVideo,
     AcceptVideo,
     DeclineVideo,
@@ -1232,6 +1234,7 @@ async fn run(
             Command::MuteCall(muted) => call::set_muted(&state, muted),
             Command::SpeakerOff(off) => call::set_speaker_off(&state, off),
             Command::CameraCall(on) => call::set_camera(&state, on),
+            Command::ShareScreen(on) => call::set_screen(&state, on),
             Command::StartVideo => call::start_video(&state),
             Command::AcceptVideo => call::accept_video(&state),
             Command::DeclineVideo => call::decline_video(&state),

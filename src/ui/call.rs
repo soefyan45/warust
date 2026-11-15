@@ -54,6 +54,7 @@ pub fn show(ctx: &Context, state: &mut State, call: &CallView, sessions: &[Sessi
     match asked {
         Some(Ask::End) => commands.push(Command::EndCall),
         Some(Ask::Camera) => commands.push(Command::CameraCall(!call.camera_on)),
+        Some(Ask::Screen) => commands.push(Command::ShareScreen(!call.screen_on)),
         Some(Ask::StartVideo) => commands.push(Command::StartVideo),
         Some(Ask::AcceptVideo) => commands.push(Command::AcceptVideo),
         Some(Ask::DeclineVideo) => commands.push(Command::DeclineVideo),
@@ -76,6 +77,8 @@ enum Ask {
     Minimize,
     Restore,
     Camera,
+    /// Share the screen, or stop sharing it (#121).
+    Screen,
     StartVideo,
     AcceptVideo,
     DeclineVideo,
@@ -191,7 +194,17 @@ fn video_call(ctx: &Context, p: &Palette, call: &CallView, session: Option<&Sess
         if control(&mut child, p, cam_icon, tr("Camera", "Kamera"), cam_fill, cam_glyph, true, tr("Turn your camera off or on", "Matikan atau nyalakan kamera Anda")) {
             asked = Some(Ask::Camera);
         }
-        control(&mut child, p, "monitor-up", tr("Screen", "Layar"), dark, Color32::WHITE, false, tr("Screen sharing comes in a later version", "Berbagi layar menyusul di versi berikutnya"));
+        // Shown filled while the screen is shared, like the mic when muted.
+        let blocked = crate::backend::video::screen_share_blocked();
+        let (screen_fill, screen_glyph) = if call.screen_on { (Color32::WHITE, Color32::BLACK) } else { (dark, Color32::WHITE) };
+        let screen_hint = match blocked {
+            Some(why) => why,
+            None if call.screen_on => tr("Stop sharing your screen", "Berhenti berbagi layar"),
+            None => tr("Share your screen instead of the camera", "Bagikan layar Anda sebagai ganti kamera"),
+        };
+        if control(&mut child, p, "monitor-up", tr("Screen", "Layar"), screen_fill, screen_glyph, blocked.is_none(), screen_hint) {
+            asked = Some(Ask::Screen);
+        }
         control(&mut child, p, "image", tr("Blur", "Latar blur"), dark, Color32::WHITE, false, tr("Background blur comes in a later version", "Latar blur menyusul di versi berikutnya"));
         if control(&mut child, p, "phone-off", tr("End", "Akhiri"), p.red, Color32::WHITE, true, tr("End the call", "Akhiri panggilan")) {
             asked = Some(Ask::End);
