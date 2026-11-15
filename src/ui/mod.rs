@@ -1783,6 +1783,11 @@ impl eframe::App for App {
         if !ui.ctx().input(|i| i.viewport().close_requested()) {
             self.hidden = false;
         }
+        // Nor is it drawn then: the screens would undo what `hide_window`
+        // did, starting a status video again (#167) and going online.
+        if self.hidden {
+            return;
+        }
         let snapshot = self.backend.snapshot();
         self.sessions = snapshot.sessions;
         // The main number first in every list (#138).
