@@ -824,6 +824,22 @@ fn sync_contacts_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, clie
     });
 }
 
+/// Reads the phone's chat pins once, like the mutes: a number linked
+/// before warust read pins never got the ones already set; replaying their
+/// collection brings each back as a `PinUpdate`.
+fn sync_pins_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: Arc<Client>) {
+    if state.book(id).is_none_or(|book| book.pins_synced) {
+        return;
+    }
+    let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
+    tokio::spawn(async move {
+        match client.resync_app_state_collection(whatsapp_rust::WAPatchName::RegularLow).await {
+            Ok(_) => state.record(&id, &chats, &[store::pins_synced_record()]),
+            Err(e) => log::warn!("session {id}: reading chat pins from the phone failed: {e}"),
+        }
+    });
+}
+
 /// A contact saved on the phone (#115): the LID ↔ number pair it carries
 /// first, then its name under every JID it goes by, so the chat finds it
 /// whichever one it uses.
@@ -1074,6 +1090,7 @@ async fn on_event(
             fetch_group_names(state, id, chats, client.clone());
             sync_mutes_once(state, id, chats, client.clone());
             sync_contacts_once(state, id, chats, client.clone());
+            sync_pins_once(state, id, chats, client.clone());
             let phone = client.pn().map(|jid| mask_phone(&jid.to_string()));
             let own_number = client.pn().map(|jid| store::bare(&jid.to_string()).split('@').next().unwrap_or_default().to_owned());
             let own_lid = client.lid().map(|jid| user_part(&jid.to_string()).to_owned());
@@ -1191,6 +1208,11 @@ async fn on_event(
         Event::UserStatusMuteUpdate(update) => {
             state.record(id, chats, &[store::status_mute_record(&update.jid.to_string(), update.muted)]);
         }
+        // A chat pinned or unpinned on the phone.
+        Event::PinUpdate(update) => {
+            let at = update.action.pinned.unwrap_or(true).then(|| update.timestamp.timestamp());
+            state.record(id, chats, &[store::chat_pin_record(&update.jid.to_string(), at)]);
+        }
         Event::ArchiveUpdate(update) => {
             let archived = update.action.archived.unwrap_or(true);
             state.record(id, chats, &[store::archive_record(&update.jid.to_string(), archived)]);
@@ -1291,6 +1313,9 @@ fn history_records(compressed: &[u8], media_dir: &Path, own: &[String], now: i64
         }
         if let Some(name) = conversation.name.as_ref().filter(|n| !n.is_empty()) {
             records.push(store::name_record(&chat, name));
+        }
+        if let Some(at) = conversation.pinned.filter(|&at| at > 0) {
+            records.push(store::chat_pin_record(&chat, Some(i64::from(at))));
         }
         for entry in &conversation.messages {
             let Some(info) = entry.message.as_option() else { continue };

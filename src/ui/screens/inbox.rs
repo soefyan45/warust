@@ -271,7 +271,7 @@ pub fn show(
                                     info_clicked = true;
                                 }
                                 if chat.is_muted(time::now()) {
-                                    icons::show(ui, "bell-off", 14.0, p.muted);
+                                    icons::show(ui, "bell-off", 14.0, p.amber);
                                 }
                                 if let Some(group) = &group_text {
                                     icons::show(ui, "users", 13.0, p.muted);
@@ -312,7 +312,7 @@ pub fn show(
                         info_clicked = true;
                     }
                     if chat.is_muted(time::now()) {
-                        icons::show(ui, "bell-off", 14.0, p.muted);
+                        icons::show(ui, "bell-off", 14.0, p.amber);
                     }
                     if let Some(group) = &group_text {
                         icons::show(ui, "users", 13.0, p.muted);
@@ -1012,7 +1012,10 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
         let mut order: Vec<&SessionView> = scoped.to_vec();
         order.sort_by_key(|s| s.status != Status::Connected);
         for s in order {
-            let mine: Vec<&Chat> = s.book.chats.iter().filter(|c| keep(s, c)).collect();
+            let mut mine: Vec<&Chat> = s.book.chats.iter().filter(|c| keep(s, c)).collect();
+            if tab == TAB_ALL {
+                mine.sort_by_key(|c| std::cmp::Reverse(c.pinned_at));
+            }
             lines.push(Line::Header(s, mine.len()));
             if !state.folded.contains(&s.id) {
                 lines.extend(mine.into_iter().map(|c| Line::Chat(s, c)));
@@ -1022,6 +1025,11 @@ fn lines_for<'a>(state: &State, scoped: &[&'a SessionView], tab: usize, grouped:
         let mut mine: Vec<(&SessionView, &Chat)> =
             scoped.iter().flat_map(|s| s.book.chats.iter().map(move |c| (*s, c))).filter(|(s, c)| keep(s, c)).collect();
         mine.sort_by_key(|(_, c)| std::cmp::Reverse(c.last_ts()));
+        // All: chats pinned on the phone first, the latest pin on top; the
+        // sort is stable, so the rest stay newest first.
+        if tab == TAB_ALL {
+            mine.sort_by_key(|(_, c)| std::cmp::Reverse(c.pinned_at));
+        }
         lines.extend(mine.into_iter().map(|(s, c)| Line::Chat(s, c)));
     }
     lines
@@ -1337,14 +1345,21 @@ fn chat_row(
     widgets::paint_text(ui, name, title, fonts::ui(14.0, Weight::SemiBold), p.text, Align::Min);
     let at = chat.mention_pending();
     let badges = if chat.unread > 0 { 30.0 } else { 0.0 } + if at { 26.0 } else { 0.0 };
-    // Muted here or on the phone: a struck bell before the badges (#87).
+    // Muted here or on the phone: a struck bell before the badges (#87), in
+    // amber; a pinned chat a pin in blue, so the two tell apart at a glance.
     let muted = chat.is_muted(time::now());
-    let reserve = badges + if muted { 22.0 } else { 0.0 };
+    let pinned = chat.pinned_at.is_some();
+    let bell_w = if muted { 22.0 } else { 0.0 };
+    let reserve = badges + bell_w + if pinned { 22.0 } else { 0.0 };
     let preview_rect = Rect::from_min_max(bottom.min, pos2(right - reserve, bottom.bottom()));
     paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 18.0, bottom.center().y - 8.0), vec2(16.0, 16.0));
-        icons::paint(ui, bell, "bell-off", 15.0, p.muted);
+        icons::paint(ui, bell, "bell-off", 15.0, p.amber);
+    }
+    if pinned {
+        let pin = Rect::from_min_size(pos2(right - badges - bell_w - 18.0, bottom.center().y - 8.0), vec2(16.0, 16.0));
+        icons::paint(ui, pin, "pin", 15.0, p.pin);
     }
     if at {
         // "@": a mention is waiting; sits before the unread count.
@@ -5141,12 +5156,18 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     let unread_w = if chat.unread > 9 { 28.0 } else { 20.0 };
     let badges = if chat.unread > 0 { unread_w + 12.0 } else { 0.0 } + if at { 28.0 } else { 0.0 };
     let muted = chat.is_muted(time::now());
-    let reserve = badges + if muted { 24.0 } else { 0.0 };
+    let pinned = chat.pinned_at.is_some();
+    let bell_w = if muted { 24.0 } else { 0.0 };
+    let reserve = badges + bell_w + if pinned { 24.0 } else { 0.0 };
     let line = Rect::from_min_max(pos2(left, row.top() + 35.0), pos2(right - reserve, row.top() + 56.0));
     paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 20.0, line.center().y - 9.0), vec2(18.0, 18.0));
-        icons::paint(ui, bell, "bell-off", 17.0, p.muted);
+        icons::paint(ui, bell, "bell-off", 17.0, p.amber);
+    }
+    if pinned {
+        let pin = Rect::from_min_size(pos2(right - badges - bell_w - 20.0, line.center().y - 9.0), vec2(18.0, 18.0));
+        icons::paint(ui, pin, "pin", 17.0, p.pin);
     }
     if at {
         let x = right - if chat.unread > 0 { unread_w + 6.0 + 20.0 } else { 20.0 };
@@ -5484,7 +5505,7 @@ mod typing_tests {
     #[test]
     fn contact_presence_label() {
         use crate::backend::{Chat, Presence, Typing};
-        let mut chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new(), muted_until: None };
+        let mut chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new(), muted_until: None, pinned_at: None };
         let mut state = State::default();
         assert_eq!(presence_label(&state, "s1", &chat), None, "nothing known");
         let key = Typing::key("s1", &chat.jid);
@@ -5508,7 +5529,7 @@ mod typing_tests {
     fn contact_typing_label() {
         use crate::backend::{Book, Chat, Typing};
         use std::time::{Duration, Instant};
-        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new(), muted_until: None };
+        let chat = Chat { jid: "62811@s.whatsapp.net".to_owned(), unread: 0, messages: Vec::new(), done_at: None, archived: false, pins: Vec::new(), muted_until: None, pinned_at: None };
         let book = Book::default();
         let mut state = State::default();
         assert_eq!(typing_label(&state, "s1", &book, &chat), None);
