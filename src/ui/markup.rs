@@ -216,17 +216,78 @@ pub fn job_with_mentions(
     job
 }
 
-/// Appends `text`, with its web links underlined; the bubble opens them on click.
+/// Appends `text`, with its web links and phone numbers underlined; the
+/// bubble opens them on click.
 fn append_linked(job: &mut LayoutJob, text: &str, format: TextFormat, color: Color32) {
     let chars: Vec<char> = text.chars().collect();
     let mut at = 0;
-    for (range, _) in links(text) {
+    let mut ranges: Vec<std::ops::Range<usize>> = links(text).into_iter().map(|(r, _)| r).chain(phones(text).into_iter().map(|(r, _)| r)).collect();
+    ranges.sort_by_key(|r| r.start);
+    for range in ranges {
         emoji::append(job, &chars[at..range.start].iter().collect::<String>(), format.clone());
         let underline = TextFormat { underline: Stroke::new(1.0, color), ..format.clone() };
         emoji::append(job, &chars[range.clone()].iter().collect::<String>(), underline);
         at = range.end;
     }
     emoji::append(job, &chars[at..].iter().collect::<String>(), format);
+}
+
+/// Phone numbers in `text` (#162): their char range and the number as digits
+/// with the country code (`0852…` becomes `62852…`). Indonesian mobiles
+/// (`08…`, `62…`) and `+<country>` numbers, written with spaces, dots or
+/// dashes; years, prices and short codes are left alone, and so are numbers
+/// inside a web link.
+pub fn phones(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let chars: Vec<char> = text.chars().collect();
+    let in_link = links(text);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let starts = (c == '+' && chars.get(i + 1).is_some_and(char::is_ascii_digit)) || c.is_ascii_digit();
+        // Only where a word starts: not "Rp500" or "x2026".
+        let boundary = i == 0 || !(chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '+' | '.' | ',' | '/' | '-'));
+        if !starts || !boundary {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        let mut digits = String::new();
+        let mut end = i;
+        let mut j = if c == '+' { i + 1 } else { i };
+        while j < chars.len() {
+            let d = chars[j];
+            if d.is_ascii_digit() {
+                digits.push(d);
+                j += 1;
+                end = j;
+            } else if matches!(d, ' ' | '-' | '.') && chars.get(j + 1).is_some_and(char::is_ascii_digit) && digits.len() < 15 {
+                j += 1;
+            } else {
+                break;
+            }
+        }
+        i = end.max(start + 1);
+        // A number glued to letters or more digits is something else.
+        if chars.get(end).is_some_and(|d| d.is_alphanumeric()) {
+            continue;
+        }
+        let number = if c == '+' {
+            (9..=15).contains(&digits.len()).then(|| digits.clone())
+        } else if digits.starts_with("08") {
+            (10..=13).contains(&digits.len()).then(|| format!("62{}", &digits[1..]))
+        } else if digits.starts_with("628") {
+            (11..=15).contains(&digits.len()).then(|| digits.clone())
+        } else {
+            None
+        };
+        let Some(number) = number else { continue };
+        if in_link.iter().any(|(r, _)| r.start < end && start < r.end) {
+            continue;
+        }
+        out.push((start..end, number));
+    }
+    out
 }
 
 /// Web links in `text`: their char range and the URL to open (`www.` gets
@@ -267,6 +328,43 @@ pub fn links(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
         out.push((start + lead..end, url));
     }
     out
+}
+
+#[cfg(test)]
+mod phone_tests {
+    use super::*;
+
+    fn found(text: &str) -> Vec<String> {
+        phones(text).into_iter().map(|(_, n)| n).collect()
+    }
+
+    #[test]
+    fn indonesian_and_international_numbers_are_found() {
+        assert_eq!(found("wa ke 0852 7199 5583 ya"), ["6285271995583"]);
+        assert_eq!(found("+62 852-7199-5583"), ["6285271995583"]);
+        assert_eq!(found("6285271995583"), ["6285271995583"]);
+        assert_eq!(found("call +1 415 555 0132."), ["14155550132"]);
+        assert_eq!(found("0812.3456.7890, 0813-1111-2222"), ["6281234567890", "6281311112222"]);
+    }
+
+    #[test]
+    fn dates_prices_and_ids_are_not_numbers() {
+        assert!(found("rapat 2026-11-13 jam 10").is_empty());
+        assert!(found("total Rp3.506.500").is_empty());
+        assert!(found("harga 3.506.500").is_empty());
+        assert!(found("order 1234567890123").is_empty());
+        assert!(found("kode 021").is_empty());
+        assert!(found("INV08123456789").is_empty());
+        assert!(found("https://wa.me/6285271995583").is_empty());
+    }
+
+    #[test]
+    fn the_range_covers_the_written_number() {
+        let text = "hubungi +62 852-7199-5583 sekarang";
+        let (range, _) = &phones(text)[0];
+        let shown: String = text.chars().skip(range.start).take(range.end - range.start).collect();
+        assert_eq!(shown, "+62 852-7199-5583");
+    }
 }
 
 #[cfg(test)]

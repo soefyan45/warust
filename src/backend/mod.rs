@@ -114,6 +114,16 @@ impl SessionView {
     }
 }
 
+/// Whether a phone number clicked in a message uses WhatsApp (#162).
+#[derive(Clone, Debug, PartialEq)]
+pub enum NumberCheck {
+    Checking,
+    /// Its chat JID.
+    OnWhatsApp(String),
+    Not,
+    Failed(String),
+}
+
 #[derive(Clone, Default)]
 pub struct Shared {
     pub sessions: Vec<SessionView>,
@@ -123,6 +133,9 @@ pub struct Shared {
     pub update: update::UpdateState,
     /// Full-size profile pictures asked for the photo viewer (#92), by JID.
     pub full_avatars: Arc<HashMap<String, Option<PathBuf>>>,
+    /// Phone numbers clicked in messages and whether they use WhatsApp
+    /// (#162), by `session|digits`.
+    pub number_checks: Arc<HashMap<String, NumberCheck>>,
     /// Downloads by message id: `None` while running, else why it failed.
     /// Finished downloads leave the map and show as the message's file.
     pub downloads: Arc<HashMap<String, Option<String>>>,
@@ -383,6 +396,9 @@ pub enum Command {
     Avatar { id: String, jid: String },
     /// Fetch (or load from cache) the full-size profile picture, for the viewer.
     AvatarFull { id: String, jid: String },
+    /// Whether the phone number `number` (digits with the country code) uses
+    /// WhatsApp, asked through number `id` (#162).
+    CheckNumber { id: String, number: String },
     /// Queue a sticker (any picture; converted to 512×512 WebP when needed).
     SendSticker { id: String, chat: String, path: PathBuf },
     /// Queue a voice note recorded in the composer (an Ogg Opus file).
@@ -579,6 +595,13 @@ impl Updater {
     fn set_api(&self, api: ApiState) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.api = api;
+        }
+        self.ctx.request_repaint();
+    }
+
+    pub(crate) fn set_number_check(&self, key: &str, check: NumberCheck) {
+        if let Ok(mut shared) = self.shared.lock() {
+            Arc::make_mut(&mut shared.number_checks).insert(key.to_owned(), check);
         }
         self.ctx.request_repaint();
     }
@@ -1169,6 +1192,29 @@ async fn run(
                         let picture = avatars::full(&client, &jid).await;
                         state.set_full_avatar(&jid, picture);
                     });
+                }
+            }
+            Command::CheckNumber { id, number } => {
+                let key = Typing::key(&id, &number);
+                match running.get(&id) {
+                    Some(r) => {
+                        state.set_number_check(&key, NumberCheck::Checking);
+                        let (client, state) = (r.client(), state.clone());
+                        tokio::spawn(async move {
+                            let check = match format!("{number}@s.whatsapp.net").parse::<whatsapp_rust::prelude::Jid>() {
+                                Ok(jid) => match client.contacts().is_on_whatsapp(std::slice::from_ref(&jid)).await {
+                                    Ok(found) => match found.into_iter().find(|r| r.is_registered) {
+                                        Some(user) => NumberCheck::OnWhatsApp(store::bare(&user.jid.to_string())),
+                                        None => NumberCheck::Not,
+                                    },
+                                    Err(e) => NumberCheck::Failed(e.to_string()),
+                                },
+                                Err(e) => NumberCheck::Failed(format!("{e:?}")),
+                            };
+                            state.set_number_check(&key, check);
+                        });
+                    }
+                    None => state.set_number_check(&key, NumberCheck::Failed(crate::i18n::tr("This number is not connected", "Nomor ini tidak tersambung").to_owned())),
                 }
             }
             Command::WatchPresence { id, chat } => {
