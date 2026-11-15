@@ -271,7 +271,7 @@ pub fn show(
                                     info_clicked = true;
                                 }
                                 if chat.is_muted(time::now()) {
-                                    icons::show(ui, "bell-off", 14.0, p.muted);
+                                    icons::show(ui, "bell-off", 14.0, p.amber);
                                 }
                                 if let Some(group) = &group_text {
                                     icons::show(ui, "users", 13.0, p.muted);
@@ -312,7 +312,7 @@ pub fn show(
                         info_clicked = true;
                     }
                     if chat.is_muted(time::now()) {
-                        icons::show(ui, "bell-off", 14.0, p.muted);
+                        icons::show(ui, "bell-off", 14.0, p.amber);
                     }
                     if let Some(group) = &group_text {
                         icons::show(ui, "users", 13.0, p.muted);
@@ -1345,7 +1345,8 @@ fn chat_row(
     widgets::paint_text(ui, name, title, fonts::ui(14.0, Weight::SemiBold), p.text, Align::Min);
     let at = chat.mention_pending();
     let badges = if chat.unread > 0 { 30.0 } else { 0.0 } + if at { 26.0 } else { 0.0 };
-    // Muted here or on the phone: a struck bell before the badges (#87).
+    // Muted here or on the phone: a struck bell before the badges (#87), in
+    // amber; a pinned chat a pin in blue, so the two tell apart at a glance.
     let muted = chat.is_muted(time::now());
     let pinned = chat.pinned_at.is_some();
     let bell_w = if muted { 22.0 } else { 0.0 };
@@ -1354,11 +1355,11 @@ fn chat_row(
     paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 18.0, bottom.center().y - 8.0), vec2(16.0, 16.0));
-        icons::paint(ui, bell, "bell-off", 15.0, p.muted);
+        icons::paint(ui, bell, "bell-off", 15.0, p.amber);
     }
     if pinned {
         let pin = Rect::from_min_size(pos2(right - badges - bell_w - 18.0, bottom.center().y - 8.0), vec2(16.0, 16.0));
-        icons::paint(ui, pin, "pin", 15.0, p.muted);
+        icons::paint(ui, pin, "pin", 15.0, p.pin);
     }
     if at {
         // "@": a mention is waiting; sits before the unread count.
@@ -5162,11 +5163,11 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 20.0, line.center().y - 9.0), vec2(18.0, 18.0));
-        icons::paint(ui, bell, "bell-off", 17.0, p.muted);
+        icons::paint(ui, bell, "bell-off", 17.0, p.amber);
     }
     if pinned {
         let pin = Rect::from_min_size(pos2(right - badges - bell_w - 20.0, line.center().y - 9.0), vec2(18.0, 18.0));
-        icons::paint(ui, pin, "pin", 17.0, p.muted);
+        icons::paint(ui, pin, "pin", 17.0, p.pin);
     }
     if at {
         let x = right - if chat.unread > 0 { unread_w + 6.0 + 20.0 } else { 20.0 };
