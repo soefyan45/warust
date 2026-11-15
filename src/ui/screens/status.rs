@@ -42,7 +42,8 @@ fn argb(value: u32) -> Color32 {
 
 /// Paints one update into `card`: a text on its colour, or the photo (asked
 /// for when missing) with a play badge for videos. Clicks open or download it.
-fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: &str, downloads: &Downloads, playing: Option<&movie::Status>) -> Vec<Command> {
+#[allow(clippy::too_many_arguments)]
+fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: &str, connected: bool, downloads: &Downloads, playing: Option<&movie::Status>) -> Vec<Command> {
     let mut commands = Vec::new();
     match &post.media {
         None => {
@@ -97,6 +98,8 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
             } else {
                 match downloads.get(&post.id) {
                     Some(None) => Some(tr("Downloading…", "Mengunduh…")),
+                    // Fetched by itself once the number connects (#167).
+                    Some(Some(_)) if !connected => Some(tr("Waiting for this number to connect", "Menunggu nomor ini tersambung")),
                     Some(Some(_)) => Some(tr("Failed, click to retry", "Gagal, klik untuk ulangi")),
                     None if media.downloadable() => Some(tr("Loading…", "Memuat…")),
                     None => Some(tr("Not available", "Tidak tersedia")),
@@ -108,7 +111,8 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
                 icons::paint(ui, badge, "video", 26.0, Color32::WHITE);
             }
             if let Some(label) = state_label {
-                let pill = Rect::from_center_size(pos2(card.center().x, card.bottom() - 28.0), vec2(170.0, 26.0));
+                let width = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(12.0, Weight::Medium), Color32::WHITE).size().x;
+                let pill = Rect::from_center_size(pos2(card.center().x, card.bottom() - 28.0), vec2((width + 32.0).max(170.0), 26.0));
                 ui.painter().rect_filled(pill, 13.0, Color32::from_black_alpha(160));
                 widgets::paint_text(ui, pill, label, fonts::ui(12.0, Weight::Medium), Color32::WHITE, Align::Center);
             }
@@ -665,7 +669,7 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     let side_room = if phone { pad * 2.0 } else { 150.0 };
     let width = (height * 9.0 / 16.0).max(240.0).min(area.width() - side_room);
     let card = Rect::from_min_size(pos2(area.center().x - width / 2.0, top), vec2(width, height));
-    commands.extend(paint_post(ui, p, card, post, &e.session.id, downloads, playing.as_ref()));
+    commands.extend(paint_post(ui, p, card, post, &e.session.id, connected, downloads, playing.as_ref()));
     if let Some(file) = ui.ctx().data_mut(|d| d.remove_temp::<PathBuf>(egui::Id::unique("status_preview"))) {
         state.status_paused = true;
         state.video_view = Some(crate::ui::movie_view::Viewer::new(file, e.title()));

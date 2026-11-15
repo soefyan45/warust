@@ -528,6 +528,10 @@ pub(crate) struct Updater {
 
 impl Updater {
     /// Numbers that could not start because another process holds their lock.
+    fn connected(&self, id: &str) -> bool {
+        self.shared.lock().is_ok_and(|shared| shared.sessions.iter().any(|s| s.id == id && s.status == Status::Connected))
+    }
+
     fn locked(&self) -> Vec<String> {
         let Ok(shared) = self.shared.lock() else {
             return Vec::new();
@@ -891,6 +895,9 @@ async fn run(
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Pictures asked for a number not running yet, sent once it runs (#116).
     let mut waiting_avatars: HashMap<String, Vec<String>> = HashMap::new();
+    // Files asked for while their number was not connected, fetched once it
+    // is (#167).
+    let mut waiting_downloads: HashMap<String, Vec<String>> = HashMap::new();
     let mut away = Away::default();
     loop {
         waiting_avatars.retain(|id, jids| match running.get(id) {
@@ -899,6 +906,17 @@ async fn run(
                 false
             }
             None => stores.contains_key(id),
+        });
+        waiting_downloads.retain(|id, msg_ids| match (running.get(id), stores.get(id)) {
+            (Some(r), Some(store)) if state.connected(id) => {
+                for msg_id in msg_ids.drain(..) {
+                    if let Some(media) = state.book(id).and_then(|book| book.media_of(&msg_id).map(|m| m.raw.clone())) {
+                        r.download(id, msg_id, media, &state, store.clone());
+                    }
+                }
+                false
+            }
+            _ => stores.contains_key(id),
         });
         let command = tokio::select! {
             command = commands.recv() => match command {
@@ -1179,7 +1197,16 @@ async fn run(
             Command::Download { id, msg_id } => {
                 let media = state.book(&id).and_then(|book| book.media_of(&msg_id).map(|m| m.raw.clone()));
                 match (running.get(&id), stores.get(&id), media) {
-                    (Some(r), Some(store), Some(media)) => r.download(&id, msg_id, media, &state, store.clone()),
+                    (Some(r), Some(store), Some(media)) if state.connected(&id) => r.download(&id, msg_id, media, &state, store.clone()),
+                    // Kept as waiting (the screens stop asking) until the
+                    // number connects, then fetched by itself.
+                    (_, Some(_), Some(_)) => {
+                        state.set_download(&msg_id, Some(Some(crate::i18n::tr("Waiting for this number to connect", "Menunggu nomor ini tersambung").to_owned())));
+                        let waiting = waiting_downloads.entry(id).or_default();
+                        if !waiting.contains(&msg_id) {
+                            waiting.push(msg_id);
+                        }
+                    }
                     // Said once and kept as a failure, so a picture that loads
                     // by itself (#167) is not asked for again every frame.
                     (running_now, _, media) => {
