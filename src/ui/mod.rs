@@ -23,6 +23,7 @@ mod time;
 mod view;
 mod widgets;
 mod window;
+mod zoom;
 
 use egui::{CursorIcon, Frame, Margin, Panel, Stroke, Theme, ThemePreference, Ui};
 
@@ -162,6 +163,10 @@ pub struct State {
     pub video_view: Option<movie_view::Viewer>,
     /// Profile photo open in the pop-up viewer (#92), and the full-size ones fetched.
     pub photo_view: Option<photo_view::Viewer>,
+    /// Phone numbers clicked in messages and whether they use WhatsApp (#162).
+    pub number_checks: std::sync::Arc<std::collections::HashMap<String, backend::NumberCheck>>,
+    /// The phone number dialog: the number it was clicked in and the digits.
+    pub number_ask: Option<(String, String)>,
     pub full_avatars: std::sync::Arc<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
     /// "Teruskan ke…" dialog for a message of the open chat.
     pub forward: Option<forward::Dialog>,
@@ -250,6 +255,8 @@ pub struct State {
     pub summary_tab: usize,
     /// Webhook & API: 0 = REST API, 1 = Webhook, 2 = Pemicu.
     pub integrations_tab: usize,
+    /// The tab open on the settings screen.
+    pub settings_tab: usize,
     /// Pemicu: the rule open in the editor, and the editor's test message.
     pub rule_selected: Option<usize>,
     pub rule_test: String,
@@ -302,8 +309,10 @@ pub struct App {
     settings: std::sync::Arc<backend::Settings>,
     webhooks: std::sync::Arc<Vec<backend::webhook::Delivery>>,
     api: backend::ApiState,
-    /// Theme taken from the settings last; `None` until the first frame.
+    /// Theme applied last; `None` until the first frame.
     applied_theme: Option<String>,
+    /// Dev aid: the theme from `WARUST_THEME`, shown instead of the saved one.
+    theme_override: Option<String>,
     applied_template: Option<String>,
     /// Keeps the screen and the Inbox's number and tab for the next start (#128).
     view: view::Keeper,
@@ -390,12 +399,7 @@ impl App {
         theme::install(&cc.egui_ctx);
         // Dev aid: WARUST_SCREEN=nomor|pairing|inbox|status|log|webhook|settings|lainnya,
         // WARUST_THEME=light|dark (overrides the saved theme).
-        let env_theme = std::env::var("WARUST_THEME").ok();
-        match env_theme.as_deref() {
-            Some("light") => cc.egui_ctx.set_theme(ThemePreference::Light),
-            Some("dark") => cc.egui_ctx.set_theme(ThemePreference::Dark),
-            _ => {}
-        }
+        let env_theme = std::env::var("WARUST_THEME").ok().filter(|t| t == "light" || t == "dark");
         let screen = match std::env::var("WARUST_SCREEN").as_deref() {
             Ok("ringkasan") => Screen::Ringkasan,
             Ok("pairing") => Screen::Pairing,
@@ -441,7 +445,8 @@ impl App {
             settings: Default::default(),
             webhooks: Default::default(),
             api: backend::ApiState::Off,
-            applied_theme: env_theme,
+            applied_theme: None,
+            theme_override: env_theme,
             applied_template: None,
             // Dev aid: WARUST_PAIR=<session id> opens its pairing screen.
             pairing_id: std::env::var("WARUST_PAIR").ok(),
@@ -879,10 +884,16 @@ impl App {
                 ui.painter().rect_filled(row.shrink2(egui::vec2(0.0, 1.0)), 8.0, if selected { p.selected } else { p.raised });
             }
             let up = session.status == Status::Connected;
-            ui.painter().circle_filled(egui::pos2(row.left() + 12.0, row.center().y), 3.5, screens::devices::status_dot(&p, &session.status));
-            let name = egui::Rect::from_min_max(egui::pos2(row.left() + 24.0, row.top()), egui::pos2(row.right() - 30.0, row.bottom()));
+            // The number's own tile (#142) with its state as a dot on it.
+            let tile = egui::Rect::from_center_size(egui::pos2(row.left() + 14.0, row.center().y), egui::vec2(20.0, 20.0));
+            widgets::paint_number_tile(ui, tile, &session.id);
+            let dot = egui::pos2(tile.right() - 2.0, tile.bottom() - 2.0);
+            ui.painter().circle_filled(dot, 3.5, p.panel);
+            ui.painter().circle_filled(dot, 2.4, screens::devices::status_dot(&p, &session.status));
+            let name = egui::Rect::from_min_max(egui::pos2(row.left() + 30.0, row.top()), egui::pos2(row.right() - 30.0, row.bottom()));
             let weight = if selected { Weight::SemiBold } else { Weight::Medium };
-            widgets::paint_text(ui, name, &session.name, fonts::ui(13.0, weight), if up { p.text_2 } else { p.muted }, egui::Align::Min);
+            let main = self.settings.main_number.as_deref() == Some(session.id.as_str());
+            widgets::paint_number_name(ui, name, &session.name, fonts::ui(13.0, weight), if up { p.text_2 } else { p.muted }, main);
             let end = egui::Rect::from_min_max(egui::pos2(row.right() - 30.0, row.top()), egui::pos2(row.right() - 8.0, row.bottom()));
             if up {
                 let unread: u32 = session.book.chats.iter().filter(|c| !c.archived).map(|c| c.unread).sum();
@@ -1764,7 +1775,6 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
-        dev_shot(ui.ctx());
         // Drawn again, so on screen again: also after a click on the Dock
         // icon, which shows the window without going through `show_window`.
         // Not in the frame that closes it: `logic` has just hidden it.
@@ -1784,6 +1794,10 @@ impl eframe::App for App {
         self.view.follow(self.screen, &mut self.state, |id| !main_set && sessions.iter().any(|s| s.id == id));
         self.avatars = snapshot.avatars;
         self.state.full_avatars = snapshot.full_avatars;
+        self.state.number_checks = snapshot.number_checks.clone();
+        for w in &mut self.windows {
+            w.state.number_checks = snapshot.number_checks.clone();
+        }
         self.downloads = snapshot.downloads;
         self.settings = snapshot.settings;
         self.open_on_main();
@@ -1792,6 +1806,13 @@ impl eframe::App for App {
             self.set_main(id);
         }
         self.state.settings = self.settings.clone();
+        if self.screen != Screen::Settings {
+            // A number typed on the settings screen and left by going to
+            // another screen: saved now, as the screen no longer does it.
+            if let Some(settings) = self.state.settings_form.autosave(&self.settings, false) {
+                self.backend.send(Command::SaveSettings(settings));
+            }
+        }
         self.state.rule_hits = snapshot.rule_hits;
         self.state.typing_now = snapshot.typing;
         self.state.presence_now = snapshot.presence;
@@ -1839,13 +1860,10 @@ impl eframe::App for App {
             // The theme is applied again on top of the new template.
             self.applied_theme = None;
         }
-        if theme::template().has_dark() && self.applied_theme.as_deref() != Some(self.settings.theme.as_str()) {
-            ui.ctx().set_theme(if self.settings.theme == "light" {
-                ThemePreference::Light
-            } else {
-                ThemePreference::Dark
-            });
-            self.applied_theme = Some(self.settings.theme.clone());
+        let wanted = shown_theme(self.theme_override.as_deref(), &self.settings.theme);
+        if theme::template().has_dark() && self.applied_theme.as_deref() != Some(wanted) {
+            ui.ctx().set_theme(if wanted == "light" { ThemePreference::Light } else { ThemePreference::Dark });
+            self.applied_theme = Some(wanted.to_owned());
         }
         if self.screen == Screen::Pairing {
             let session = self.pairing_id.as_ref().and_then(|id| self.sessions.iter().find(|s| &s.id == id));
@@ -2133,6 +2151,24 @@ impl eframe::App for App {
     }
 }
 
+/// The theme to show: the `WARUST_THEME` override if there is one, else the
+/// saved theme.
+fn shown_theme<'a>(over: Option<&'a str>, saved: &'a str) -> &'a str {
+    over.unwrap_or(saved)
+}
+
+#[cfg(test)]
+mod shown_theme_tests {
+    use super::*;
+
+    #[test]
+    fn the_override_wins_over_the_saved_theme() {
+        assert_eq!(shown_theme(Some("dark"), "light"), "dark");
+        assert_eq!(shown_theme(Some("light"), "dark"), "light");
+        assert_eq!(shown_theme(None, "light"), "light");
+    }
+}
+
 #[cfg(test)]
 mod lock_choice_tests {
     use super::*;
@@ -2147,22 +2183,3 @@ mod lock_choice_tests {
     }
 }
 
-/// Dev aid: WARUST_SHOT=/path/shot.png saves the window as a PNG once it has
-/// drawn for a moment, then quits. For checking a design where the screen
-/// cannot be grabbed.
-fn dev_shot(ctx: &egui::Context) {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static FRAMES: AtomicU32 = AtomicU32::new(0);
-    let Some(path) = std::env::var_os("WARUST_SHOT") else { return };
-    if FRAMES.fetch_add(1, Ordering::Relaxed) == 90 {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::ScreenshotCallback::new(move |shot: std::sync::Arc<egui::ColorImage>| {
-            let [w, h] = shot.size;
-            let bytes: Vec<u8> = shot.pixels.iter().flat_map(|c| c.to_array()).collect();
-            if let Err(e) = image::save_buffer(&path, &bytes, w as u32, h as u32, image::ColorType::Rgba8) {
-                log::error!("cannot save the screenshot: {e}");
-            }
-            std::process::exit(0);
-        })));
-    }
-    ctx.request_repaint();
-}

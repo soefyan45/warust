@@ -93,7 +93,16 @@ pub fn show(
         });
         return commands;
     }
-    if state.devices_panel && !theme::mint() {
+    // Mint has no Devices panel: its numbers are in the sidebar card.
+    if state.devices_panel && !theme::mint() && state.settings.nav_icons_only {
+        // Icons only (#142): the numbers as a column of their tiles.
+        Panel::left(panel_id(state, "devices_rail"))
+            .exact_size(72.0)
+            .resizable(false)
+            .show_separator_line(!forest)
+            .frame(theme::pane(ui.ctx(), p.panel, Margin { left: 8, right: 8, top: 0, bottom: 10 }))
+            .show(ui, |ui| super::devices::rail(ui, &p, state, sessions));
+    } else if state.devices_panel && !theme::mint() {
         Panel::left(panel_id(state, "devices"))
             .default_size(if forest { 250.0 } else { 230.0 })
             .size_range(210.0..=320.0)
@@ -245,7 +254,8 @@ pub fn show(
                         // it the number the chat came in on and whether they are there.
                         // The picture and the name open and close the details.
                         let title = super::chat_title(&book, chat);
-                        let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
+                        // Anti-peek's "hide names" hides the picture too, as in the list.
+                        let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref()).filter(|_| !crate::ui::privacy::hide_names());
                         let (face, face_response) = ui.allocate_exact_size(vec2(36.0, 36.0), Sense::click());
                         widgets::paint_avatar(ui, face, &super::initials(&title), picture, false);
                         if face_response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
@@ -408,20 +418,23 @@ pub fn show(
                 if crate::ui::privacy::blur_chat() {
                     privacy_banner(ui, &p);
                 }
-                if msg_search_bar(ui, &p, state, session, chat) || older_bar(ui, &p, state, session, chat) {
-                    state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
-                    commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
-                }
+                let mut older = msg_search_bar(ui, &p, state, session, chat);
                 pinned_bar(ui, &p, chat);
                 let mut want = Vec::new();
                 let own = (session.own_number.as_deref(), session.own_lid.as_deref());
                 let query = search_query(state, &session.id, &chat.jid);
-                let event = messages(ui, &p, &book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref());
+                let top = older_state(state, session, chat);
+                let event = messages(ui, &p, &book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, &book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref(), &mut |ui| older |= older_bar(ui, &p, top));
+                if older {
+                    state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
+                    commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
+                }
                 ask_avatars(state, &mut commands, &session.id, want);
                 if let Some(event) = event {
                     on_message_event(event, state, session, chat, &mut commands);
                 }
                 delete_dialog(ui.ctx(), state, &mut commands);
+                number_dialog(ui.ctx(), state, session);
                 contact_dialog(ui.ctx(), state, session, &mut commands);
             });
             if floating {
@@ -684,16 +697,44 @@ fn reply_badge(ui: &mut Ui, p: &Palette) {
     widgets::paint_text(ui, rect, text, fonts::ui(12.0, Weight::SemiBold), color, Align::Center);
 }
 
-/// "Load older messages from the phone". Returns true when clicked.
-fn older_bar(ui: &mut Ui, p: &Palette, state: &State, session: &SessionView, chat: &Chat) -> bool {
-    let asked = state
-        .older_asked
-        .as_ref()
-        .is_some_and(|(jid, at)| jid == &chat.jid && at.elapsed().as_secs() < 30);
+/// What stands above a chat's first message.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Older {
+    /// The phone was asked for history a moment ago: say so.
+    Asked,
+    /// "Load older messages from the phone".
+    Offer,
+    /// The number is not connected: nothing to ask.
+    Nothing,
+}
+
+/// What `older_bar` shows for this chat now.
+fn older_state(state: &State, session: &SessionView, chat: &Chat) -> Older {
+    older_for(state.older_asked.as_ref(), &chat.jid, session.status == Status::Connected, std::time::Instant::now())
+}
+
+/// `asked` is the chat last asked for and when; the answer is awaited for
+/// half a minute, in that chat only.
+fn older_for(asked: Option<&(String, std::time::Instant)>, chat: &str, connected: bool, now: std::time::Instant) -> Older {
+    let waiting = asked.is_some_and(|(jid, at)| jid == chat && now.saturating_duration_since(*at).as_secs() < 30);
+    match () {
+        () if waiting => Older::Asked,
+        () if connected => Older::Offer,
+        () => Older::Nothing,
+    }
+}
+
+/// "Load older messages from the phone", at the top of the thread: it scrolls
+/// with the messages and is met on reaching the first one. Returns true when
+/// clicked.
+fn older_bar(ui: &mut Ui, p: &Palette, older: Older) -> bool {
     let mut clicked = false;
+    if older == Older::Nothing {
+        return clicked;
+    }
     ui.add_space(8.0);
     ui.vertical_centered(|ui| {
-        if asked {
+        if older == Older::Asked {
             ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
             ui.label(rich(
                 tr(
@@ -704,10 +745,11 @@ fn older_bar(ui: &mut Ui, p: &Palette, state: &State, session: &SessionView, cha
                 Weight::Regular,
                 p.muted,
             ));
-        } else if session.status == Status::Connected && theme::mint() {
+        } else if theme::mint() {
             // Rarely used, so it reads as a quiet link that turns into a pill under the pointer.
             let text = tr("Load older messages from phone", "Muat pesan lama dari HP");
-            let galley = ui.painter().layout_no_wrap(text.to_owned(), fonts::ui(12.0, Weight::Medium), p.muted);
+            // Laid out without a colour of its own, so it takes the hover colour.
+            let galley = ui.painter().layout_no_wrap(text.to_owned(), fonts::ui(12.0, Weight::Medium), Color32::PLACEHOLDER);
             let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 44.0, 28.0), Sense::click());
             let color = if response.hovered() { p.text } else { p.muted };
             if response.hovered() {
@@ -716,7 +758,7 @@ fn older_bar(ui: &mut Ui, p: &Palette, state: &State, session: &SessionView, cha
             icons::paint(ui, Rect::from_center_size(pos2(rect.left() + 19.0, rect.center().y), vec2(14.0, 14.0)), "download", 14.0, color);
             ui.painter().galley(pos2(rect.left() + 32.0, rect.center().y - galley.size().y / 2.0), galley, color);
             clicked = response.on_hover_cursor(CursorIcon::PointingHand).clicked();
-        } else if session.status == Status::Connected {
+        } else {
             clicked = widgets::button(ui, Some("download"), tr("Load older messages from phone", "Muat pesan lama dari HP"), Kind::Secondary).clicked();
         }
     });
@@ -1094,12 +1136,8 @@ fn number_chips(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[Session
                 }
                 for s in sessions {
                     let count = s.book.chats.iter().filter(|c| !c.archived).count();
-                    // The main number's chip starts with a star (#138).
-                    let star = if super::devices::is_main(state, s) { "★ " } else { "" };
-                    let label = format!("{star}{} · {count}", super::devices::chip_label(s));
-                    let dot = super::devices::status_dot(p, &s.status);
                     let active = state.inbox_scope.as_deref() == Some(s.id.as_str());
-                    let chip = number_chip_button(ui, p, &label, Some(dot), Some(&s.id), active);
+                    let chip = number_icon_chip(ui, p, s, count, active, super::devices::is_main(state, s), 28.0);
                     if chip.clicked() {
                         state.inbox_scope = Some(s.id.clone());
                     }
@@ -1722,7 +1760,8 @@ fn paint_call_log(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media) 
         (false, true) => tr("Video call again", "Video call lagi"),
     };
     let response = ui.interact(button, ui.scope_id().with(("call_back", &m.id)), Sense::click());
-    let (back, fg) = if mine { (p.on_primary.gamma_multiply(if response.hovered() { 0.2 } else { 0.12 }), p.on_primary) } else { (if response.hovered() { p.border } else { p.raised }, p.primary) };
+    // Coloured for the bubble it sits on: Mint draws our bubbles like theirs.
+    let (back, fg) = if own_look(m) { (p.on_primary.gamma_multiply(if response.hovered() { 0.2 } else { 0.12 }), p.on_primary) } else { (if response.hovered() { p.border } else { p.raised }, p.primary) };
     ui.painter().rect_filled(button, R_MD, back);
     let text = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(12.5, Weight::SemiBold), fg);
     let width = text.size().x + 22.0;
@@ -2173,6 +2212,9 @@ enum MsgEvent {
     Menu(MsgAction, String),
     /// A group member's face or name was used (#136): their JID.
     Member(MemberAction, String),
+    /// A phone number in a message was clicked (#162): digits with the
+    /// country code.
+    Phone(String),
 }
 
 /// How long WhatsApp lets a sender edit a message.
@@ -2199,6 +2241,69 @@ pub struct DeleteAsk {
     chat: String,
     msg_id: String,
     everyone: bool,
+}
+
+/// `628527…` as "+62 852-7199-5583" (Indonesia) or "+<digits>" (#162);
+/// masked like any number while anti-peek hides numbers.
+fn phone_display(number: &str) -> String {
+    if crate::ui::privacy::hide_names() {
+        return super::short_jid(&format!("{number}@s.whatsapp.net"));
+    }
+    match number.strip_prefix("62") {
+        Some(rest) if rest.len() >= 9 => format!("+62 {}-{}-{}", &rest[..3], &rest[3..7], &rest[7..]),
+        _ => format!("+{number}"),
+    }
+}
+
+/// A phone number clicked in a message (#162): whether it uses WhatsApp,
+/// then "Chat on WhatsApp" (on the same linked number) or "Copy number".
+fn number_dialog(ctx: &egui::Context, state: &mut State, session: &SessionView) {
+    let Some((id, number)) = state.number_ask.clone().filter(|(id, _)| *id == session.id) else { return };
+    let p = theme::palette(ctx);
+    let check = state.number_checks.get(&crate::backend::Typing::key(&id, &number)).cloned();
+    let (mut close, mut open) = (false, None);
+    let modal = egui::Modal::new(egui::Id::unique("phone_number"))
+        .frame(egui::Frame::NONE.fill(p.panel).stroke(Stroke::new(1.0, p.border_strong)).corner_radius(R_LG).inner_margin(egui::Margin::same(24)))
+        .show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.spacing_mut().item_spacing.y = 12.0;
+            ui.label(rich(&phone_display(&number), 18.0, Weight::SemiBold, p.text));
+            let (text, color) = match &check {
+                None | Some(crate::backend::NumberCheck::Checking) => (tr("Checking WhatsApp…", "Memeriksa WhatsApp…").to_owned(), p.muted),
+                Some(crate::backend::NumberCheck::OnWhatsApp(_)) => (crate::trf!("On WhatsApp · chat from {}", "Ada di WhatsApp · chat dari {}", super::devices::chip_label(session)), p.accent_text),
+                Some(crate::backend::NumberCheck::Not) => (tr("This number is not on WhatsApp.", "Nomor ini tidak memakai WhatsApp.").to_owned(), p.muted),
+                Some(crate::backend::NumberCheck::Failed(why)) => (crate::trf!("Could not check: {why}", "Tidak bisa diperiksa: {why}"), p.red_text),
+            };
+            ui.add(egui::Label::new(rich(&text, 13.0, Weight::Regular, color)).wrap());
+            if matches!(check, None | Some(crate::backend::NumberCheck::Checking)) {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let jid = match &check {
+                    Some(crate::backend::NumberCheck::OnWhatsApp(jid)) => Some(jid.clone()),
+                    _ => None,
+                };
+                let chat = ui.add_enabled_ui(jid.is_some(), |ui| widgets::button(ui, Some("message-circle"), tr("Chat on WhatsApp", "Chat di WhatsApp"), Kind::Primary)).inner;
+                if chat.clicked() {
+                    open = jid;
+                }
+                if widgets::button(ui, Some("copy"), tr("Copy number", "Salin nomor"), Kind::Secondary).clicked() {
+                    ui.ctx().copy_text(format!("+{number}"));
+                    close = true;
+                }
+                if widgets::button(ui, None, tr("Close", "Tutup"), Kind::Secondary).clicked() {
+                    close = true;
+                }
+            });
+        });
+    if let Some(jid) = open {
+        let existing = session.book.chats.iter().find(|c| c.jid == jid);
+        open_chat(state, &session.id, &jid, existing);
+        close = true;
+    }
+    if close || modal.should_close() {
+        state.number_ask = None;
+    }
 }
 
 /// "Delete message?": for everyone (our own recent messages), for me, or not.
@@ -2561,6 +2666,10 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
         MsgEvent::Media(MediaClick::Preview(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
+        MsgEvent::Phone(number) => {
+            commands.push(Command::CheckNumber { id: session.id.clone(), number: number.clone() });
+            state.number_ask = Some((session.id.clone(), number));
+        }
         MsgEvent::Media(MediaClick::Call(video)) => {
             if state.call_now.is_none() && !chat.is_group() {
                 commands.push(Command::PlaceCall { id: session.id.clone(), chat: chat.jid.clone(), video });
@@ -2834,6 +2943,8 @@ fn messages(
     own: (Option<&str>, Option<&str>),
     anchor: &mut Option<UnreadAnchor>,
     search: Option<&str>,
+    // Drawn above the first message, inside the scroll area.
+    top: &mut dyn FnMut(&mut Ui),
 ) -> Option<MsgEvent> {
     const GAP: f32 = 6.0;
     /// Extra space before a group run from another member.
@@ -2997,7 +3108,10 @@ fn messages(
         .stick_to_bottom(true)
         .auto_shrink(false)
         .show(ui, |ui| {
-            ui.add_space(12.0);
+            top(ui);
+            // Room for the "older messages not shown" note, which is painted
+            // above the first message.
+            ui.add_space(if start > 0 { 28.0 } else { 12.0 });
             let height = content.max(ui.available_height());
             let (area, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
             let mut painter = ui.painter().clone();
@@ -3172,10 +3286,13 @@ fn messages(
                             let link = link_at(ui, &text, at);
                             let label = ui.put(Rect::from_min_size(at, text.size()), egui::Label::new(text).selectable(true));
                             // A click (not a drag that selects text) on a link opens it.
-                            if let Some(url) = link.filter(|_| label.hovered()) {
+                            if let Some(link) = link.filter(|_| label.hovered()) {
                                 label.ctx.set_cursor_icon(CursorIcon::PointingHand);
                                 if ui.input(|i| i.pointer.primary_clicked()) {
-                                    crate::platform::open_url(&url);
+                                    match link {
+                                        Link::Url(url) => crate::platform::open_url(&url),
+                                        Link::Phone(number) => clicked = Some(MsgEvent::Phone(number)),
+                                    }
                                 }
                             }
                             label.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
@@ -3481,18 +3598,28 @@ fn save_pasted_image(image: &egui::ColorImage, dir: &Path) -> Result<PathBuf, St
     Ok(path)
 }
 
-/// The web link under the pointer in a bubble's text laid out at `at`.
-fn link_at(ui: &Ui, text: &std::sync::Arc<egui::Galley>, at: egui::Pos2) -> Option<String> {
+/// What can be clicked in a bubble's text.
+enum Link {
+    Url(String),
+    /// A phone number, as digits with the country code (#162).
+    Phone(String),
+}
+
+/// The web link or phone number under the pointer in a bubble's text laid
+/// out at `at`.
+fn link_at(ui: &Ui, text: &std::sync::Arc<egui::Galley>, at: egui::Pos2) -> Option<Link> {
     let pointer = ui.input(|i| i.pointer.hover_pos())?;
     let rect = Rect::from_min_size(at, text.size());
     if !rect.contains(pointer) {
         return None;
     }
     let index: usize = text.cursor_from_pos(pointer - at).index.into();
+    let hit = |range: &std::ops::Range<usize>| range.start <= index && index < range.end;
     markup::links(text.text())
         .into_iter()
-        .find(|(range, _)| range.start <= index && index < range.end)
-        .map(|(_, url)| url)
+        .find(|(range, _)| hit(range))
+        .map(|(_, url)| Link::Url(url))
+        .or_else(|| markup::phones(text.text()).into_iter().find(|(range, _)| hit(range)).map(|(_, number)| Link::Phone(number)))
 }
 
 /// The file waiting to be sent: icon, name, size and a remove button.
@@ -4650,7 +4777,7 @@ fn contact(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars
         ui.vertical_centered(|ui| {
             ui.spacing_mut().item_spacing.y = 4.0;
             let initials = if chat.is_group() { "GR".to_owned() } else { super::initials(&title) };
-            let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
+            let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref()).filter(|_| !crate::ui::privacy::hide_names());
             let (face, _) = ui.allocate_exact_size(vec2(72.0, 72.0), Sense::hover());
             widgets::paint_avatar(ui, face, &initials, picture, false);
             photo_target(ui, face, None, &chat.jid, &title, picture);
@@ -4834,8 +4961,8 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                             state.inbox_scope = None;
                         }
                         for s in sessions {
-                            let label = format!("{} · {}", s.name, s.book.chats.len());
-                            if scope_chip(ui, &p, &label, state.inbox_scope.as_deref() == Some(s.id.as_str())).clicked() {
+                            let active = state.inbox_scope.as_deref() == Some(s.id.as_str());
+                            if number_icon_chip(ui, &p, s, s.book.chats.len(), active, super::devices::is_main(state, s), 34.0).clicked() {
                                 state.inbox_scope = Some(s.id.clone());
                             }
                         }
@@ -4930,15 +5057,54 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
     commands
 }
 
+/// A number's filter chip as its own icon and its chat count (#142), so every
+/// number fits on the row: the name, last digits and count are in the hint,
+/// and the status dot and the main number's star are marks on the icon.
+fn number_icon_chip(ui: &mut Ui, p: &Palette, session: &SessionView, count: usize, active: bool, main: bool, height: f32) -> egui::Response {
+    let forest = theme::template().top_nav();
+    let (fill, color) = match (active, forest) {
+        (true, true) => (p.accent, p.primary),
+        (true, false) => (p.primary, p.on_primary),
+        (false, _) => (p.panel, p.text_2),
+    };
+    let (tint, icon) = widgets::number_look(&session.id);
+    let tint = if active && !forest { p.on_primary } else { tint };
+    let size = (height * 0.5).round();
+    let galley = ui.painter().layout_no_wrap(count.to_string(), fonts::ui(height * 0.42, if active { Weight::SemiBold } else { Weight::Medium }), color);
+    let (rect, response) = ui.allocate_exact_size(vec2(12.0 + size + 6.0 + galley.size().x + 12.0, height), Sense::click());
+    let hover = response.hovered() && !active;
+    ui.painter().rect_filled(rect, height / 2.0, if hover { p.raised } else { fill });
+    if !active {
+        ui.painter().rect_stroke(rect, height / 2.0, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    }
+    let mark = Rect::from_center_size(pos2(rect.left() + 12.0 + size / 2.0, rect.center().y), vec2(size, size));
+    icons::paint(ui, mark, icon, size, tint);
+    // The number's state as a dot on the icon's corner, ringed by the chip.
+    let dot = mark.right_bottom() + vec2(1.0, 0.0);
+    ui.painter().circle_filled(dot, 4.0, if hover { p.raised } else { fill });
+    ui.painter().circle_filled(dot, 2.6, super::devices::status_dot(p, &session.status));
+    if main {
+        icons::paint(ui, Rect::from_center_size(mark.right_top() + vec2(1.0, 0.0), vec2(9.0, 9.0)), "star", 9.0, MAIN_STAR);
+    }
+    ui.painter().galley(pos2(mark.right() + 6.0, rect.center().y - galley.size().y / 2.0), galley, color);
+    let hint = crate::trf!("{} · {count} chats", "{} · {count} chat", super::devices::chip_label(session));
+    let hint = if main { format!("{hint} · {}", tr("main number", "nomor utama")) } else { hint };
+    response.on_hover_text(hint).on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// The main number's star on its icon (#138, #142).
+const MAIN_STAR: Color32 = Color32::from_rgb(0xE0, 0xA8, 0x00);
+
 fn scope_chip(ui: &mut Ui, p: &Palette, label: &str, active: bool) -> egui::Response {
     let forest = theme::template().top_nav();
-    let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(14.0, if active { Weight::SemiBold } else { Weight::Medium }), p.text);
-    let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 34.0), Sense::click());
     let (fill, color) = match (active, forest) {
         (true, true) => (p.accent, p.primary),
         (true, false) => (p.primary, p.on_primary),
         (false, _) => (p.panel, p.text),
     };
+    // Laid out in the colour it is painted in: a galley keeps its own colour.
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(14.0, if active { Weight::SemiBold } else { Weight::Medium }), color);
+    let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 34.0), Sense::click());
     ui.painter().rect_filled(rect, 17.0, fill);
     if !active && !forest {
         ui.painter().rect_stroke(rect, 17.0, Stroke::new(1.0, p.border), StrokeKind::Inside);
@@ -5183,20 +5349,23 @@ fn compact_chat(
         widgets::wallpaper(ui, ui.max_rect(), &session.id);
         Frame::NONE.inner_margin(Margin { left: 12, right: 12, top: 0, bottom: 6 }).show(ui, |ui| {
             ui.set_min_size(ui.available_size());
-            if msg_search_bar(ui, &p, state, session, chat) || older_bar(ui, &p, state, session, chat) {
-                state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
-                commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
-            }
+            let mut older = msg_search_bar(ui, &p, state, session, chat);
             pinned_bar(ui, &p, chat);
             let mut want = Vec::new();
             let own = (session.own_number.as_deref(), session.own_lid.as_deref());
             let query = search_query(state, &session.id, &chat.jid);
-            let event = messages(ui, &p, book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref());
+            let top = older_state(state, session, chat);
+            let event = messages(ui, &p, book, chat, downloads, avatars, &mut want, auto_stickers, typing_label(state, &session.id, book, chat).as_deref(), own, &mut state.unread_anchor, query.as_deref(), &mut |ui| older |= older_bar(ui, &p, top));
+            if older {
+                state.older_asked = Some((chat.jid.clone(), std::time::Instant::now()));
+                commands.push(Command::LoadOlder { id: session.id.clone(), chat: chat.jid.clone() });
+            }
             ask_avatars(state, &mut commands, &session.id, want);
             if let Some(event) = event {
                 on_message_event(event, state, session, chat, &mut commands);
             }
             delete_dialog(ui.ctx(), state, &mut commands);
+            number_dialog(ui.ctx(), state, session);
             contact_dialog(ui.ctx(), state, session, &mut commands);
         });
     });
@@ -5297,6 +5466,19 @@ mod typing_tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn what_stands_above_the_first_message() {
+        use std::time::{Duration, Instant};
+        let now = Instant::now();
+        assert_eq!(older_for(None, "a", true, now), Older::Offer);
+        assert_eq!(older_for(None, "a", false, now), Older::Nothing, "not connected: nothing to ask");
+        let asked = ("a".to_owned(), now);
+        assert_eq!(older_for(Some(&asked), "a", true, now + Duration::from_secs(5)), Older::Asked);
+        assert_eq!(older_for(Some(&asked), "a", false, now + Duration::from_secs(5)), Older::Asked, "still said after a disconnect");
+        assert_eq!(older_for(Some(&asked), "b", true, now + Duration::from_secs(5)), Older::Offer, "another chat");
+        assert_eq!(older_for(Some(&asked), "a", true, now + Duration::from_secs(31)), Older::Offer, "offered again after half a minute");
     }
 
     #[test]

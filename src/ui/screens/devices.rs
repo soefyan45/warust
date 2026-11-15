@@ -120,6 +120,73 @@ fn number_menu(row: &egui::Response, state: &mut State, session: &SessionView) {
     });
 }
 
+/// The Devices panel with "Icons only" (#142): all numbers, then each
+/// number as its tile with its unread count, status dot and main star; the
+/// name and number are in the hint, the number's menu on right-click.
+pub fn rail(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) {
+    ui.spacing_mut().item_spacing.y = 6.0;
+    ui.add_space(14.0);
+    let total: u32 = sessions.iter().map(unread).sum();
+    let all = rail_tile(ui, p, None, total, state.inbox_scope.is_none(), false, None);
+    if all.on_hover_text(crate::trf!("All numbers · {} together", "Semua nomor · gabungan {}", sessions.len())).clicked() {
+        state.inbox_scope = None;
+    }
+    ui.add_space(4.0);
+    let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
+    ui.painter().hline(line.x_range().shrink(10.0), line.center().y, egui::Stroke::new(1.0, p.border));
+    ui.add_space(4.0);
+    let mut ordered: Vec<&SessionView> = sessions.iter().filter(|s| s.status == Status::Connected).collect();
+    ordered.extend(sessions.iter().filter(|s| s.status != Status::Connected));
+    for s in ordered {
+        let selected = state.inbox_scope.as_deref() == Some(s.id.as_str());
+        let tile = rail_tile(ui, p, Some(&s.id), unread(s), selected, is_main(state, s), Some(status_dot(p, &s.status)));
+        let phone = s.phone.clone().unwrap_or_default();
+        let hint = if is_main(state, s) { format!("{} · {phone} · {}", s.name, tr("main number", "nomor utama")) } else { format!("{} · {phone}", s.name) };
+        let tile = tile.on_hover_text(hint);
+        if tile.clicked() {
+            state.inbox_scope = Some(s.id.clone());
+        }
+        number_menu(&tile, state, s);
+    }
+}
+
+/// One tile of `rail`: a number's own tile (or the inbox icon for all
+/// numbers), selected or hovered, with its marks.
+fn rail_tile(ui: &mut Ui, p: &Palette, number: Option<&str>, badge: u32, selected: bool, main: bool, dot: Option<Color32>) -> egui::Response {
+    let (row, response) = ui.allocate_exact_size(vec2(ui.available_width(), 52.0), Sense::click());
+    let back = Rect::from_center_size(row.center(), vec2(52.0, 52.0));
+    if selected {
+        ui.painter().rect_filled(back, theme::r_inner(), p.selected);
+    } else if response.hovered() {
+        ui.painter().rect_filled(back, theme::r_inner(), p.raised);
+    }
+    let tile = Rect::from_center_size(row.center(), vec2(38.0, 38.0));
+    match number {
+        Some(id) => widgets::paint_number_tile(ui, tile, id),
+        None => {
+            ui.painter().circle_filled(tile.center(), 19.0, p.raised);
+            icons::paint(ui, Rect::from_center_size(tile.center(), vec2(18.0, 18.0)), "inbox", 18.0, p.text_2);
+        }
+    }
+    if let Some(dot) = dot {
+        let at = pos2(tile.right() - 4.0, tile.bottom() - 4.0);
+        ui.painter().circle_filled(at, 5.0, p.panel);
+        ui.painter().circle_filled(at, 3.5, dot);
+    }
+    if main {
+        icons::paint(ui, Rect::from_center_size(pos2(tile.left() + 3.0, tile.top() + 3.0), vec2(11.0, 11.0)), "star", 11.0, Color32::from_rgb(0xE0, 0xA8, 0x00));
+    }
+    if badge > 0 {
+        let label = if badge > 99 { "99+".to_owned() } else { badge.to_string() };
+        let galley = ui.painter().layout_no_wrap(label, fonts::ui(9.5, Weight::SemiBold), p.on_primary);
+        let size = vec2((galley.size().x + 8.0).max(16.0), 16.0);
+        let pill = Rect::from_min_size(pos2(tile.right() - size.x + 6.0, tile.top() - 4.0), size);
+        ui.painter().rect_filled(pill, 8.0, p.primary);
+        ui.painter().galley(pill.center() - galley.size() / 2.0, galley, p.on_primary);
+    }
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
 pub fn show(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionView]) {
     ui.spacing_mut().item_spacing.y = 4.0;
     let connected: Vec<&SessionView> = sessions.iter().filter(|s| s.status == Status::Connected).collect();

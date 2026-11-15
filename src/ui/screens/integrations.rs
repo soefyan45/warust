@@ -52,8 +52,10 @@ pub fn show(
         .frame(theme::page(ui.ctx()))
         .show(ui, |ui| {
             ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
+                let page = ui;
+                let mut column = super::column(page);
+                let ui = &mut column;
                 ui.spacing_mut().item_spacing.y = 20.0;
-                ui.set_max_width(ui.available_width().min(880.0));
                 super::page_head(
                     ui,
                     "Webhook & API",
@@ -79,6 +81,7 @@ pub fn show(
                 if let Some(settings) = super::settings::save_bar(ui, &mut state.settings_form) {
                     commands.push(Command::SaveSettings(settings));
                 }
+                super::end_column(page, &column);
             });
         });
     commands
