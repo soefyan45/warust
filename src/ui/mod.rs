@@ -561,6 +561,8 @@ impl App {
         // No chat is on screen any more, so the notifier holds none back.
         self.backend.set_viewing(None);
         self.viewing = None;
+        // A status video is not heard from the tray either.
+        backend::movie::stop();
         if !crate::platform::hide_app() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
