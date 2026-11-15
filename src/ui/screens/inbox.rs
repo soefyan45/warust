@@ -1536,9 +1536,8 @@ enum MediaBox {
 /// What a click on media asks for.
 enum MediaClick {
     Download(String),
-    /// Play a video without keeping it (#167): message id, title, and
-    /// whether it is too long for the in-app player.
-    Stream(String, String, bool),
+    /// Fetch a video without keeping it, to play it in its bubble (#167).
+    Stream(String),
     /// A downloaded PDF and its title, for the in-app viewer.
     OpenPdf(PathBuf, String),
     /// "Call back" on a call's line: a video call (true) or a voice call.
@@ -2068,8 +2067,20 @@ fn paint_media(
         return paint_call_log(ui, p, rect, m, media);
     }
     let state = media_action(m, media, downloads);
-    // A video not downloaded plays on a click without being kept (#167).
-    let direct = media.kind == "video" && media.file.is_none() && VIDEOS_DIRECT.load(std::sync::atomic::Ordering::Relaxed);
+    // A video plays in its bubble (#167), from its file or the stream cache;
+    // one too long for that, or without ffmpeg, opens as before.
+    let inline = media.kind == "video" && matches!(shown, MediaBox::Picture(..)) && movie::available() && !media.seconds.is_some_and(|s| s as f32 > movie::MAX_SECONDS);
+    // Not downloaded, it plays on a click without being kept.
+    let direct = inline && media.file.is_none() && VIDEOS_DIRECT.load(std::sync::atomic::Ordering::Relaxed);
+    let playable = inline.then(|| media.file.clone().or_else(|| streamed(&m.id))).flatten();
+    // Asked to play while still being fetched: starts once it is here.
+    if let Some(file) = &playable
+        && take_pending(&m.id)
+    {
+        movie::play(&m.id, file, movie::repaint_for(ui.ctx()));
+    }
+    // Asked about only while on screen: a video scrolled away stops.
+    let playing = (inline && ui.is_rect_visible(rect)).then(|| movie::status(&m.id)).flatten();
     let action = match state {
         MediaState::Download if direct => tr("Play", "Putar"),
         MediaState::Downloading if direct => tr("Loading…", "Memuat…"),
@@ -2077,6 +2088,7 @@ fn paint_media(
     };
     let response = ui.interact(rect, ui.scope_id().with(("media", &m.id)), Sense::click());
     match shown {
+        MediaBox::Picture(..) if playing.is_some() => paint_playing(ui, rect, playing.as_ref().expect("checked")),
         MediaBox::Picture(source, _) => {
             if let Some(uri) = widgets::picture_uri(ui.ctx(), source) {
                 // Cropped to the box, never stretched (#126).
@@ -2085,7 +2097,11 @@ fn paint_media(
             } else {
                 ui.painter().rect_filled(rect, R_MD, p.border);
             }
-            if state != MediaState::Open {
+            if playable.is_some() || (direct && state == MediaState::Download) {
+                ui.painter().circle_filled(rect.center(), 24.0, Color32::from_black_alpha(150));
+                icons::paint(ui, Rect::from_center_size(rect.center() + vec2(2.0, 0.0), vec2(22.0, 22.0)), "play", 22.0, Color32::WHITE);
+            }
+            if state != MediaState::Open && playable.is_none() {
                 let label = if media.kind == "video" { format!("Video · {action}") } else { action.to_owned() };
                 let galley = ui.painter().layout_no_wrap(label, fonts::ui(12.0, Weight::Medium), Color32::WHITE);
                 let pill = Rect::from_min_size(
@@ -2093,7 +2109,11 @@ fn paint_media(
                     vec2(galley.size().x + 34.0, 22.0),
                 );
                 ui.painter().rect_filled(pill, 11.0, Color32::from_black_alpha(160));
-                let icon = if direct && state == MediaState::Download { "play" } else { "download" };
+                let icon = match state {
+                    MediaState::Download if direct => "play",
+                    MediaState::Downloading if direct => "loader-circle",
+                    _ => "download",
+                };
                 icons::paint(ui, Rect::from_min_size(pill.min + vec2(8.0, 3.0), vec2(16.0, 16.0)), icon, 14.0, Color32::WHITE);
                 ui.painter().galley(pos2(pill.left() + 26.0, pill.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
             }
@@ -2173,10 +2193,24 @@ fn paint_media(
     if auto {
         return Some(MediaClick::Download(m.id.clone()));
     }
-    let clickable = matches!(state, MediaState::Open | MediaState::Download | MediaState::Retry);
+    let clickable = playing.is_some() || playable.is_some() || matches!(state, MediaState::Open | MediaState::Download | MediaState::Retry);
+    let hint = match &playing {
+        Some(s) if s.playing => tr("Pause", "Jeda").to_owned(),
+        Some(_) => tr("Play", "Putar").to_owned(),
+        None if playable.is_some() => tr("Play", "Putar").to_owned(),
+        None => hint,
+    };
     let response = response.on_hover_text(hint);
     let response = if clickable { response.on_hover_cursor(CursorIcon::PointingHand) } else { response };
     if !response.clicked() || !clickable {
+        return None;
+    }
+    if playing.is_some() {
+        movie::toggle(&m.id);
+        return None;
+    }
+    if let Some(file) = &playable {
+        movie::play(&m.id, file, movie::repaint_for(ui.ctx()));
         return None;
     }
     match (&media.file, shown) {
@@ -2188,7 +2222,10 @@ fn paint_media(
             None
         }
         (Some(file), _) => Some(MediaClick::Preview(file.clone(), media_title(media))),
-        (None, _) if direct => Some(MediaClick::Stream(m.id.clone(), media_title(media), media.seconds.is_some_and(|s| s as f32 > movie::MAX_SECONDS))),
+        (None, _) if direct => {
+            set_pending(&m.id);
+            Some(MediaClick::Stream(m.id.clone()))
+        }
         (None, _) => Some(MediaClick::Download(m.id.clone())),
     }
 }
@@ -2680,13 +2717,7 @@ fn retry_link(ui: &Ui, p: &Palette, right_top: egui::Pos2, msg_id: &str, why: &s
 fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, chat: &Chat, commands: &mut Vec<Command>) {
     match event {
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
-        // Played once it is in the stream cache: at once when it already is.
-        MsgEvent::Media(MediaClick::Stream(msg_id, title, long)) => {
-            if streamed(&msg_id).is_none() {
-                commands.push(Command::Stream { id: session.id.clone(), msg_id: msg_id.clone() });
-            }
-            state.stream_open = Some((msg_id, title, long));
-        }
+        MsgEvent::Media(MediaClick::Stream(msg_id)) => commands.push(Command::Stream { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
         MsgEvent::Media(MediaClick::Preview(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
         MsgEvent::Phone(number) => {
@@ -3659,16 +3690,49 @@ fn streamed(msg_id: &str) -> Option<PathBuf> {
     STREAMED.lock().ok()?.as_ref()?.get(msg_id).cloned()
 }
 
-/// Opens the video asked to play without keeping it (#167) once it is in
-/// the stream cache: in the in-app player, or the system's when it is long.
-pub fn open_streamed(state: &mut State) {
-    let Some((msg_id, ..)) = &state.stream_open else { return };
-    let Some(file) = streamed(msg_id) else { return };
-    let Some((_, title, long)) = state.stream_open.take() else { return };
-    if long {
-        open_file(&file);
-    } else {
-        state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title));
+/// The video asked to play while it was still being fetched (#167).
+static PENDING: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn set_pending(msg_id: &str) {
+    if let Ok(mut pending) = PENDING.lock() {
+        *pending = Some(msg_id.to_owned());
+    }
+}
+
+/// Whether `msg_id` was waiting to play; it is not any more.
+fn take_pending(msg_id: &str) -> bool {
+    PENDING.lock().is_ok_and(|mut pending| pending.take_if(|id| id == msg_id).is_some())
+}
+
+/// A video playing in its bubble (#167): its frames over the poster, a play
+/// mark while paused, the time, and how far it is.
+fn paint_playing(ui: &Ui, rect: Rect, status: &movie::Status) {
+    ui.painter().rect_filled(rect, R_MD, Color32::BLACK);
+    if let Some(texture) = widgets::frame_texture(ui.ctx(), "chat_video", &status.picture) {
+        let size = texture.size_vec2();
+        let scale = (rect.width() / size.x).min(rect.height() / size.y);
+        let shown = Rect::from_center_size(rect.center(), size * scale);
+        egui::Image::from_texture(&texture).corner_radius(R_MD).fit_to_exact_size(shown.size()).paint_at(ui, shown);
+    }
+    if status.loading {
+        let pill = Rect::from_center_size(rect.center(), vec2(96.0, 24.0));
+        ui.painter().rect_filled(pill, 12.0, Color32::from_black_alpha(160));
+        widgets::paint_text(ui, pill, tr("Loading…", "Memuat…"), fonts::ui(12.0, Weight::Medium), Color32::WHITE, Align::Center);
+    } else if !status.playing {
+        ui.painter().circle_filled(rect.center(), 24.0, Color32::from_black_alpha(150));
+        icons::paint(ui, Rect::from_center_size(rect.center() + vec2(2.0, 0.0), vec2(22.0, 22.0)), "play", 22.0, Color32::WHITE);
+    }
+    let time = format!("{} / {}", clock_of(status.position), clock_of(status.duration));
+    let galley = ui.painter().layout_no_wrap(time, fonts::ui(11.0, Weight::Medium), Color32::WHITE);
+    let pill = Rect::from_min_size(pos2(rect.left() + 8.0, rect.bottom() - 30.0), vec2(galley.size().x + 16.0, 20.0));
+    ui.painter().rect_filled(pill, 10.0, Color32::from_black_alpha(160));
+    ui.painter().galley(pos2(pill.left() + 8.0, pill.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
+    let track = Rect::from_min_max(pos2(rect.left() + 8.0, rect.bottom() - 6.0), pos2(rect.right() - 8.0, rect.bottom() - 4.0));
+    ui.painter().rect_filled(track, 1.0, Color32::from_white_alpha(70));
+    let done = if status.duration > 0.0 { (status.position / status.duration).clamp(0.0, 1.0) } else { 0.0 };
+    ui.painter().rect_filled(Rect::from_min_max(track.min, pos2(track.left() + track.width() * done, track.bottom())), 1.0, Color32::WHITE);
+    if status.playing || status.loading {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(500));
     }
 }
 

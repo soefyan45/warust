@@ -251,10 +251,6 @@ pub struct State {
     pub focus_composer: bool,
     /// "Tautkan nomor" was clicked in the Inbox's device panel.
     pub add_number_requested: bool,
-    /// A video asked to play without keeping it (#167): its message id, its
-    /// title, and whether it is too long for the in-app player. Opened once
-    /// it is in the stream cache.
-    pub stream_open: Option<(String, String, bool)>,
     /// "Buka perangkat" was clicked on the Status page's note about a number
     /// that is not connected.
     pub devices_requested: bool,
@@ -1361,7 +1357,6 @@ impl App {
                     };
                 });
                 pdf::show(ui.ctx(), &mut w.state.pdf_view);
-                screens::inbox::open_streamed(&mut w.state);
                 movie_view::show(ui.ctx(), &mut w.state.video_view);
                 photo_view::show(ui.ctx(), &mut w.state.photo_view, &w.state.full_avatars);
                 if locked {
@@ -2104,7 +2099,6 @@ impl eframe::App for App {
         self.number_look_dialog(ui.ctx());
         self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
-        screens::inbox::open_streamed(&mut self.state);
         movie_view::show(ui.ctx(), &mut self.state.video_view);
         photo_view::show(ui.ctx(), &mut self.state.photo_view, &self.state.full_avatars);
         // "Sedang mengetik" for the chat on screen while its reply is typed.
