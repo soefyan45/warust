@@ -422,9 +422,9 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                             line(ui, "Language / Bahasa", |ui| widgets::tabs(ui, &["English", "Bahasa Indonesia"], &mut language));
                             draft.language = if language == 1 { crate::i18n::ID } else { crate::i18n::EN }.to_owned();
                             if Template::from_key(&draft.template).has_dark() {
-                                let mut tab = usize::from(draft.theme == "light");
-                                line(ui, tr("Theme", "Tema"), |ui| widgets::tabs(ui, &[tr("Dark", "Gelap"), tr("Light", "Terang")], &mut tab));
-                                draft.theme = if tab == 1 { "light" } else { "dark" }.to_owned();
+                                let mut theme_tab = usize::from(draft.theme == "light");
+                                line(ui, tr("Theme", "Tema"), |ui| widgets::tabs(ui, &[tr("Dark", "Gelap"), tr("Light", "Terang")], &mut theme_tab));
+                                draft.theme = if theme_tab == 1 { "light" } else { "dark" }.to_owned();
                             } else {
                                 ui.label(rich(tr("This template only has a light mode.", "Template ini hanya punya mode terang."), 12.0, Weight::Regular, p.muted));
                             }
