@@ -68,8 +68,9 @@ pub fn ffmpeg() -> Option<PathBuf> {
 pub struct Camera {
     child: Child,
     running: Arc<AtomicBool>,
-    /// The anti-peek watcher stays off the camera meanwhile (#57).
-    _busy: super::guard::CameraBusy,
+    /// The anti-peek watcher stays off the camera meanwhile (#57); a screen
+    /// share leaves it alone.
+    _busy: Option<super::guard::CameraBusy>,
 }
 
 impl Drop for Camera {
@@ -127,22 +128,90 @@ pub fn snapshot(dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
     }
 }
 
+/// Where our call video comes from (#121).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Source {
+    Camera,
+    /// The whole screen.
+    Screen,
+}
+
+/// Why the screen cannot be shared here, if it cannot: no ffmpeg, or a
+/// Wayland session, whose screen ffmpeg's x11grab cannot see (it would show
+/// only the windows of X apps).
+pub fn screen_share_blocked() -> Option<&'static str> {
+    if ffmpeg().is_none() {
+        return Some(tr("Screen sharing needs ffmpeg installed", "Berbagi layar butuh ffmpeg terpasang"));
+    }
+    let wayland = std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland") || std::env::var_os("WAYLAND_DISPLAY").is_some();
+    (cfg!(target_os = "linux") && wayland).then_some(tr(
+        "Screen sharing is not available on Wayland yet: log in with an X11 (Xorg) session to share the screen",
+        "Berbagi layar belum tersedia di Wayland: masuk dengan sesi X11 (Xorg) untuk berbagi layar",
+    ))
+}
+
+/// The ffmpeg input for the whole screen on this OS (#121).
+fn screen_input() -> Result<Vec<String>, String> {
+    if let Some(why) = screen_share_blocked() {
+        return Err(why.to_owned());
+    }
+    let fps = FPS.to_string();
+    if cfg!(target_os = "macos") {
+        // The screen is an AVFoundation device after the cameras: "[n] Capture screen 0".
+        let index = mac_screen().ok_or(tr("No screen to share was found", "Layar untuk dibagikan tidak ditemukan"))?;
+        Ok(vec!["-f".into(), "avfoundation".into(), "-framerate".into(), "30".into(), "-capture_cursor".into(), "1".into(), "-i".into(), format!("{index}:none")])
+    } else if cfg!(windows) {
+        Ok(["-f", "gdigrab", "-framerate", &fps, "-draw_mouse", "1", "-i", "desktop"].map(str::to_owned).to_vec())
+    } else {
+        let display = std::env::var("DISPLAY").unwrap_or_else(|_| ":0".to_owned());
+        Ok(vec!["-f".into(), "x11grab".into(), "-framerate".into(), fps, "-draw_mouse".into(), "1".into(), "-i".into(), display])
+    }
+}
+
+/// The AVFoundation index of the first screen, from ffmpeg's own listing.
+fn mac_screen() -> Option<String> {
+    let path = ffmpeg()?;
+    let out = crate::platform::command(path).args(["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""]).output().ok()?;
+    screen_index(&String::from_utf8_lossy(&out.stderr))
+}
+
+/// "[AVFoundation indev @ 0x…] [2] Capture screen 0" → "2".
+fn screen_index(listing: &str) -> Option<String> {
+    listing.lines().filter(|l| l.contains("Capture screen")).find_map(|l| {
+        let before = &l[..l.find("Capture screen")?];
+        let open = before.rfind('[')?;
+        let close = before.rfind(']')?;
+        before.get(open + 1..close).map(|n| n.trim().to_owned()).filter(|n| n.chars().all(|c| c.is_ascii_digit()) && !n.is_empty())
+    })
+}
+
 /// Starts the camera. Access units go to the returned channel, from the
 /// first keyframe on; the mirrored preview goes to `preview`.
 pub fn open_camera(preview: Latest, repaint: Arc<dyn Fn() + Send + Sync>) -> Result<(Camera, async_channel::Receiver<Vec<u8>>), String> {
+    open_video(Source::Camera, preview, repaint)
+}
+
+/// Starts our call video from `source`: the camera (its preview mirrored)
+/// or the screen (#121), encoded the same way for the call.
+pub fn open_video(source: Source, preview: Latest, repaint: Arc<dyn Fn() + Send + Sync>) -> Result<(Camera, async_channel::Receiver<Vec<u8>>), String> {
     let path = ffmpeg().ok_or(tr("Video calls need ffmpeg installed", "Video call butuh ffmpeg terpasang"))?;
     let (w, h) = SEND;
     let (pw, ph) = PREVIEW;
+    let mirror = if source == Source::Camera { ",hflip" } else { "" };
     let graph = format!(
         "[0:v]scale={w}:{h}:force_original_aspect_ratio=decrease:force_divisible_by=2,pad={w}:{h}:(ow-iw)/2:(oh-ih)/2,setsar=1,fps={FPS},format=yuv420p,split=2[send][look];\
-         [look]scale={pw}:{ph},hflip,format=rgba[you]"
+         [look]scale={pw}:{ph}{mirror},format=rgba[you]"
     );
     let gop = (FPS * 2).to_string();
-    let busy = super::guard::CameraBusy::take();
+    let input = match source {
+        Source::Camera => camera_input()?,
+        Source::Screen => screen_input()?,
+    };
+    let busy = (source == Source::Camera).then(super::guard::CameraBusy::take);
     let mut command = crate::platform::command(path);
     command
         .args(["-hide_banner", "-loglevel", "quiet", "-nostats", "-nostdin"])
-        .args(camera_input()?)
+        .args(input)
         .args(["-filter_complex", &graph])
         .args(["-map", "[send]", "-c:v", "libx264", "-profile:v", "baseline", "-level:v", "3.1", "-pix_fmt", "yuv420p"])
         .args(["-preset", "veryfast", "-tune", "zerolatency", "-g", &gop, "-keyint_min", &gop, "-sc_threshold", "0"])
@@ -314,6 +383,13 @@ pub fn open_decoder(frames: async_channel::Receiver<VideoFrame>, latest: Latest,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_mac_screen_is_found_in_the_device_list() {
+        let listing = "[AVFoundation indev @ 0x7f8] AVFoundation video devices:\n[AVFoundation indev @ 0x7f8] [0] FaceTime HD Camera\n[AVFoundation indev @ 0x7f8] [1] Capture screen 0\n[AVFoundation indev @ 0x7f8] AVFoundation audio devices:";
+        assert_eq!(screen_index(listing).as_deref(), Some("1"));
+        assert_eq!(screen_index("[AVFoundation indev @ 0x7f8] [0] FaceTime HD Camera"), None);
+    }
 
     #[test]
     fn rotation_filters() {

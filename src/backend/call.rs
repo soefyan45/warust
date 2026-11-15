@@ -65,6 +65,8 @@ pub struct CallView {
     pub local: Latest,
     /// Why our camera could not start, shown in the call.
     pub camera_error: Option<String>,
+    /// Our video is the screen, not the camera (#121).
+    pub screen_on: bool,
 }
 
 #[derive(Debug, Default)]
@@ -152,6 +154,7 @@ pub fn on_incoming(state: &Updater, session: &str, client: &Arc<Client>, store: 
                     remote: Arc::default(),
                     local: Arc::default(),
                     camera_error: None,
+                    screen_on: false,
                 },
                 incoming: Some(Box::new(call.clone())),
                 canceled: false,
@@ -426,6 +429,7 @@ pub fn place(state: &Updater, session: &str, client: &Arc<Client>, store: &Arc<M
                 remote: remote.clone(),
                 local: local.clone(),
                 camera_error: None,
+                screen_on: false,
             },
             incoming: None,
             canceled: false,
@@ -642,6 +646,58 @@ pub fn decline_video(state: &Updater) {
     publish(state);
 }
 
+/// Shares the screen instead of the camera, or (`false`) goes back to the
+/// camera (#121). The call's video is stopped and resumed with the new
+/// source; the caller's video carries on.
+pub fn set_screen(state: &Updater, on: bool) {
+    let Some((handle, view, sink)) = active().lock().ok().and_then(|slot| {
+        let a = slot.as_ref()?;
+        Some((a.handle.clone()?, a.view.clone(), a.video_sink.clone()?))
+    }) else {
+        return;
+    };
+    let source = if on { video::Source::Screen } else { video::Source::Camera };
+    // The current capture lets go first, so the camera is free to open again.
+    if let Ok(mut slot) = active().lock() {
+        if let Some(a) = slot.as_mut() {
+            a.camera = None;
+        }
+    }
+    let (capture, frames) = match video::open_video(source, view.local.clone(), state.repaint_handle()) {
+        Ok(opened) => opened,
+        Err(e) => {
+            if let Ok(mut slot) = active().lock() {
+                if let Some(a) = slot.as_mut() {
+                    a.view.camera_error = Some(e);
+                    a.view.camera_on = false;
+                    a.view.screen_on = false;
+                }
+            }
+            publish(state);
+            return;
+        }
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _ = handle.stop_video().await;
+        match handle.resume_video(frames, sink).await {
+            Ok(()) => {
+                if let Ok(mut slot) = active().lock() {
+                    if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == view.call_id) {
+                        a.camera = Some(capture);
+                        a.view.camera_on = true;
+                        a.view.screen_on = on;
+                        a.view.camera_error = None;
+                        a.idle_source = None;
+                    }
+                }
+            }
+            Err(e) => log::warn!("call: switching the video source failed: {e}"),
+        }
+        publish(&state);
+    });
+}
+
 /// Turns our camera off (the caller stays visible) or on again.
 pub fn set_camera(state: &Updater, on: bool) {
     let Some((handle, view, sink)) = active().lock().ok().and_then(|slot| {
@@ -655,6 +711,7 @@ pub fn set_camera(state: &Updater, on: bool) {
             if let Some(a) = slot.as_mut() {
                 a.camera = None;
                 a.view.camera_on = false;
+                a.view.screen_on = false;
                 if let Ok(mut picture) = a.view.local.lock() {
                     *picture = None;
                 }
@@ -687,6 +744,7 @@ pub fn set_camera(state: &Updater, on: bool) {
                     if let Some(a) = slot.as_mut().filter(|a| a.view.call_id == view.call_id) {
                         a.camera = Some(camera);
                         a.view.camera_on = true;
+                        a.view.screen_on = false;
                         a.view.camera_error = None;
                         a.idle_source = None;
                     }
