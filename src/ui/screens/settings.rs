@@ -669,8 +669,9 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
 
                 form.track(before);
                 // A number being typed or a slider being dragged is saved
-                // once it is let go.
-                let hold = ui.ctx().egui_wants_keyboard_input() || ui.ctx().input(|i| i.pointer.any_down());
+                // once it is let go. Only a text box holds it: a toggle or
+                // slider focused with Tab and changed with Space saves at once.
+                let hold = ui.ctx().text_edit_focused() || ui.ctx().input(|i| i.pointer.any_down());
                 if let Some(settings) = form.autosave(saved, hold) {
                     commands.push(Command::SaveSettings(settings));
                 }
