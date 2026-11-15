@@ -1180,7 +1180,13 @@ async fn run(
                 let media = state.book(&id).and_then(|book| book.media_of(&msg_id).map(|m| m.raw.clone()));
                 match (running.get(&id), stores.get(&id), media) {
                     (Some(r), Some(store), Some(media)) => r.download(&id, msg_id, media, &state, store.clone()),
-                    _ => log::warn!("download: nothing to download for a message in {id}"),
+                    // Said once and kept as a failure, so a picture that loads
+                    // by itself (#167) is not asked for again every frame.
+                    (running_now, _, media) => {
+                        log::warn!("download: nothing to download for message {msg_id} in {id}");
+                        let why = if running_now.is_none() { crate::i18n::tr("This number is not connected", "Nomor ini tidak tersambung") } else if media.is_none() { crate::i18n::tr("This file is no longer available", "File ini sudah tidak tersedia") } else { crate::i18n::tr("Cannot download now", "Tidak bisa diunduh sekarang") };
+                        state.set_download(&msg_id, Some(Some(why.to_owned())));
+                    }
                 }
             }
             Command::Avatar { id, jid } => match running.get(&id) {
