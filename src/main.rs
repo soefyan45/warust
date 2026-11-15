@@ -34,6 +34,8 @@ fn main() -> eframe::Result<()> {
         // No OS title bar: the app's topbar carries the window controls.
         viewport.with_decorations(false)
     };
+    // Changed below on Linux only.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
     let mut options = eframe::NativeOptions { viewport, ..Default::default() };
     // Wayland cannot hide a window and bring it back, so closing to the tray
     // would quit there: with close-to-tray on, run through XWayland (#134).
