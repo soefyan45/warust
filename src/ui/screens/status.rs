@@ -518,7 +518,16 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
         _ => std::time::Duration::ZERO,
     };
     let paused = state.status_paused || typing;
-    if paused || !matches!(&state.status_shown, Some((id, _)) if id == &post.id) {
+    // Held, not paused, while the photo or video is still on its way (#167).
+    let loading = post.media.as_ref().is_some_and(|m| {
+        (m.kind == "image" || m.kind == "video")
+            && match &m.file {
+                None => m.downloadable() && !matches!(downloads.get(&post.id), Some(Some(_))),
+                Some(_) => m.kind == "video" && movie::available() && movie::status(&post.id).is_none_or(|s| s.loading),
+            }
+    });
+    let hold = paused || loading;
+    if hold || !matches!(&state.status_shown, Some((id, _)) if id == &post.id) {
         state.status_shown = Some((post.id.clone(), now - elapsed));
     }
     // A downloaded video plays in the card; its length is the update's time (#84).
@@ -542,7 +551,7 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
         Some(s) => ((if s.duration > 0.0 { s.position / s.duration } else { 0.0 }).min(1.0), s.ended),
         None => ((elapsed.as_secs_f32() / ADVANCE.as_secs_f32()).min(1.0), elapsed >= ADVANCE),
     };
-    if !paused {
+    if !hold {
         if finished {
             if state.status_index + 1 < count {
                 state.status_index += 1;
@@ -553,6 +562,8 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
             }
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    } else if loading {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
 
     // Progress segments.
