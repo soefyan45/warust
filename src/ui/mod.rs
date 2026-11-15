@@ -1777,14 +1777,18 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
-        // Drawn again, so on screen again: also after a click on the Dock
-        // icon, which shows the window without going through `show_window`.
-        // Not in the frame that closes it: `logic` has just hidden it.
+        // macOS: drawn again, so on screen again, also after a click on the
+        // Dock icon, which shows the window without going through
+        // `show_window`. Not in the frame that closes it: `logic` has just
+        // hidden it. Elsewhere only `show_window` brings it back: X11 runs
+        // `ui` for a hidden window too.
+        #[cfg(target_os = "macos")]
         if !ui.ctx().input(|i| i.viewport().close_requested()) {
             self.hidden = false;
         }
-        // Nor is it drawn then: the screens would undo what `hide_window`
-        // did, starting a status video again (#167) and going online.
+        // Nor is it drawn while hidden: the screens would undo what
+        // `hide_window` did, starting a status video again (#167) and going
+        // online.
         if self.hidden {
             return;
         }
