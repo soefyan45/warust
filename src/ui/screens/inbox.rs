@@ -85,7 +85,15 @@ pub fn show(
 
     let several = sessions.len() > 1;
     let forest = theme::template().top_nav();
-    if state.devices_panel {
+    if state.devices_panel && state.settings.nav_icons_only {
+        // Icons only (#142): the numbers as a column of their tiles.
+        Panel::left(panel_id(state, "devices_rail"))
+            .exact_size(72.0)
+            .resizable(false)
+            .show_separator_line(!forest)
+            .frame(theme::pane(ui.ctx(), p.panel, Margin { left: 8, right: 8, top: 0, bottom: 10 }))
+            .show(ui, |ui| super::devices::rail(ui, &p, state, sessions));
+    } else if state.devices_panel {
         Panel::left(panel_id(state, "devices"))
             .default_size(if forest { 250.0 } else { 230.0 })
             .size_range(210.0..=320.0)
@@ -917,12 +925,8 @@ fn number_chips(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[Session
                 }
                 for s in sessions {
                     let count = s.book.chats.iter().filter(|c| !c.archived).count();
-                    // The main number's chip starts with a star (#138).
-                    let star = if super::devices::is_main(state, s) { "★ " } else { "" };
-                    let label = format!("{star}{} · {count}", super::devices::chip_label(s));
-                    let dot = super::devices::status_dot(p, &s.status);
                     let active = state.inbox_scope.as_deref() == Some(s.id.as_str());
-                    let chip = number_chip_button(ui, p, &label, Some(dot), Some(&s.id), active);
+                    let chip = number_icon_chip(ui, p, s, count, active, super::devices::is_main(state, s), 28.0);
                     if chip.clicked() {
                         state.inbox_scope = Some(s.id.clone());
                     }
@@ -4570,8 +4574,8 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                             state.inbox_scope = None;
                         }
                         for s in sessions {
-                            let label = format!("{} · {}", s.name, s.book.chats.len());
-                            if scope_chip(ui, &p, &label, state.inbox_scope.as_deref() == Some(s.id.as_str())).clicked() {
+                            let active = state.inbox_scope.as_deref() == Some(s.id.as_str());
+                            if number_icon_chip(ui, &p, s, s.book.chats.len(), active, super::devices::is_main(state, s), 34.0).clicked() {
                                 state.inbox_scope = Some(s.id.clone());
                             }
                         }
@@ -4663,6 +4667,44 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
     });
     commands
 }
+
+/// A number's filter chip as its own icon and its chat count (#142), so every
+/// number fits on the row: the name, last digits and count are in the hint,
+/// and the status dot and the main number's star are marks on the icon.
+fn number_icon_chip(ui: &mut Ui, p: &Palette, session: &SessionView, count: usize, active: bool, main: bool, height: f32) -> egui::Response {
+    let forest = theme::template().top_nav();
+    let (fill, color) = match (active, forest) {
+        (true, true) => (p.accent, p.primary),
+        (true, false) => (p.primary, p.on_primary),
+        (false, _) => (p.panel, p.text_2),
+    };
+    let (tint, icon) = widgets::number_look(&session.id);
+    let tint = if active && !forest { p.on_primary } else { tint };
+    let size = (height * 0.5).round();
+    let galley = ui.painter().layout_no_wrap(count.to_string(), fonts::ui(height * 0.42, if active { Weight::SemiBold } else { Weight::Medium }), color);
+    let (rect, response) = ui.allocate_exact_size(vec2(12.0 + size + 6.0 + galley.size().x + 12.0, height), Sense::click());
+    let hover = response.hovered() && !active;
+    ui.painter().rect_filled(rect, height / 2.0, if hover { p.raised } else { fill });
+    if !active {
+        ui.painter().rect_stroke(rect, height / 2.0, Stroke::new(1.0, p.border), StrokeKind::Inside);
+    }
+    let mark = Rect::from_center_size(pos2(rect.left() + 12.0 + size / 2.0, rect.center().y), vec2(size, size));
+    icons::paint(ui, mark, icon, size, tint);
+    // The number's state as a dot on the icon's corner, ringed by the chip.
+    let dot = mark.right_bottom() + vec2(1.0, 0.0);
+    ui.painter().circle_filled(dot, 4.0, if hover { p.raised } else { fill });
+    ui.painter().circle_filled(dot, 2.6, super::devices::status_dot(p, &session.status));
+    if main {
+        icons::paint(ui, Rect::from_center_size(mark.right_top() + vec2(1.0, 0.0), vec2(9.0, 9.0)), "star", 9.0, MAIN_STAR);
+    }
+    ui.painter().galley(pos2(mark.right() + 6.0, rect.center().y - galley.size().y / 2.0), galley, color);
+    let hint = crate::trf!("{} · {count} chats", "{} · {count} chat", super::devices::chip_label(session));
+    let hint = if main { format!("{hint} · {}", tr("main number", "nomor utama")) } else { hint };
+    response.on_hover_text(hint).on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// The main number's star on its icon (#138, #142).
+const MAIN_STAR: Color32 = Color32::from_rgb(0xE0, 0xA8, 0x00);
 
 fn scope_chip(ui: &mut Ui, p: &Palette, label: &str, active: bool) -> egui::Response {
     let forest = theme::template().top_nav();
