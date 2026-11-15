@@ -251,6 +251,9 @@ pub struct State {
     pub focus_composer: bool,
     /// "Tautkan nomor" was clicked in the Inbox's device panel.
     pub add_number_requested: bool,
+    /// "Buka perangkat" was clicked on the Status page's note about a number
+    /// that is not connected.
+    pub devices_requested: bool,
     /// Ringkasan "Pesan terbaru": 0 = belum dibalas, 1 = semua.
     pub summary_tab: usize,
     /// Webhook & API: 0 = REST API, 1 = Webhook, 2 = Pemicu.
@@ -563,6 +566,8 @@ impl App {
         // No chat is on screen any more, so the notifier holds none back.
         self.backend.set_viewing(None);
         self.viewing = None;
+        // A status video is not heard from the tray either.
+        backend::movie::stop();
         if !crate::platform::hide_app() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
         }
@@ -668,7 +673,7 @@ impl App {
     fn side_items(&self) -> ([SideItem; 5], [SideItem; 2]) {
         let shown = |n: usize| (n > 0).then(|| n.to_string());
         let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).map(|c| c.unread).sum();
-        let unseen: usize = self.sessions.iter().map(|s| screens::status::unseen_posters(&s.book)).sum();
+        let unseen: usize = self.sessions.iter().filter(|s| s.status == Status::Connected).map(|s| screens::status::unseen_posters(&s.book)).sum();
         let api_on = matches!(self.api, backend::ApiState::Listening(_)).then(|| "API".to_owned());
         (
             [
@@ -1739,6 +1744,8 @@ impl eframe::App for App {
         // A change made in the very last frame is kept too.
         self.view.follow(self.screen, &mut self.state, |_| false);
         self.backend.close_notifications();
+        // Videos played without keeping them go with warust (#167).
+        let _ = std::fs::remove_dir_all(backend::stream_dir(crate::platform::data_dir()));
     }
 
     /// Runs before every `ui`, and on its own while the main window is hidden
@@ -1777,11 +1784,20 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, frame: &mut eframe::Frame) {
-        // Drawn again, so on screen again: also after a click on the Dock
-        // icon, which shows the window without going through `show_window`.
-        // Not in the frame that closes it: `logic` has just hidden it.
+        // macOS: drawn again, so on screen again, also after a click on the
+        // Dock icon, which shows the window without going through
+        // `show_window`. Not in the frame that closes it: `logic` has just
+        // hidden it. Elsewhere only `show_window` brings it back: X11 runs
+        // `ui` for a hidden window too.
+        #[cfg(target_os = "macos")]
         if !ui.ctx().input(|i| i.viewport().close_requested()) {
             self.hidden = false;
+        }
+        // Nor is it drawn while hidden: the screens would undo what
+        // `hide_window` did, starting a status video again (#167) and going
+        // online.
+        if self.hidden {
+            return;
         }
         let snapshot = self.backend.snapshot();
         self.sessions = snapshot.sessions;
@@ -1796,6 +1812,7 @@ impl eframe::App for App {
         self.view.follow(self.screen, &mut self.state, |id| !main_set && sessions.iter().any(|s| s.id == id));
         self.avatars = snapshot.avatars;
         self.state.full_avatars = snapshot.full_avatars;
+        screens::inbox::set_streamed(snapshot.streamed.clone());
         self.state.number_checks = snapshot.number_checks.clone();
         for w in &mut self.windows {
             w.state.number_checks = snapshot.number_checks.clone();
@@ -1846,6 +1863,8 @@ impl eframe::App for App {
         }
         widgets::set_wallpapers(&self.settings);
         widgets::set_number_looks(&self.settings);
+        screens::inbox::set_auto_photos(self.settings.auto_photos);
+        screens::inbox::set_videos_direct(self.settings.videos_direct);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.
@@ -1887,7 +1906,7 @@ impl eframe::App for App {
         if compact {
             compact::title_bar(ui);
             let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).map(|c| c.unread).sum();
-            let unseen: usize = self.sessions.iter().map(|s| screens::status::unseen_posters(&s.book)).sum();
+            let unseen: usize = self.sessions.iter().filter(|s| s.status == Status::Connected).map(|s| screens::status::unseen_posters(&s.book)).sum();
             // An open chat or status takes the whole window, like the phone.
             let immersive = match self.screen {
                 Screen::Inbox => self.state.chat_selected.is_some(),
@@ -2016,6 +2035,9 @@ impl eframe::App for App {
         }
         if std::mem::take(&mut self.state.add_number_requested) {
             self.add_number();
+        }
+        if std::mem::take(&mut self.state.devices_requested) {
+            self.screen = Screen::Nomor;
         }
         match summary_action {
             Some(screens::ringkasan::Action::Nomor(a)) => action = Some(a),

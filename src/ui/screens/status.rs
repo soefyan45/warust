@@ -42,7 +42,8 @@ fn argb(value: u32) -> Color32 {
 
 /// Paints one update into `card`: a text on its colour, or the photo (asked
 /// for when missing) with a play badge for videos. Clicks open or download it.
-fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: &str, downloads: &Downloads, playing: Option<&movie::Status>) -> Vec<Command> {
+#[allow(clippy::too_many_arguments)]
+fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: &str, connected: bool, downloads: &Downloads, playing: Option<&movie::Status>) -> Vec<Command> {
     let mut commands = Vec::new();
     match &post.media {
         None => {
@@ -97,10 +98,10 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
             } else {
                 match downloads.get(&post.id) {
                     Some(None) => Some(tr("Downloading…", "Mengunduh…")),
+                    // Fetched by itself once the number connects (#167).
+                    Some(Some(_)) if !connected => Some(tr("Waiting for this number to connect", "Menunggu nomor ini tersambung")),
                     Some(Some(_)) => Some(tr("Failed, click to retry", "Gagal, klik untuk ulangi")),
-                    None if media.downloadable() => {
-                        Some(if media.kind == "image" { tr("Loading…", "Memuat…") } else { tr("Click to download", "Klik untuk unduh") })
-                    }
+                    None if media.downloadable() => Some(tr("Loading…", "Memuat…")),
                     None => Some(tr("Not available", "Tidak tersedia")),
                 }
             };
@@ -110,14 +111,15 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
                 icons::paint(ui, badge, "video", 26.0, Color32::WHITE);
             }
             if let Some(label) = state_label {
-                let pill = Rect::from_center_size(pos2(card.center().x, card.bottom() - 28.0), vec2(170.0, 26.0));
+                let width = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(12.0, Weight::Medium), Color32::WHITE).size().x;
+                let pill = Rect::from_center_size(pos2(card.center().x, card.bottom() - 28.0), vec2((width + 32.0).max(170.0), 26.0));
                 ui.painter().rect_filled(pill, 13.0, Color32::from_black_alpha(160));
                 widgets::paint_text(ui, pill, label, fonts::ui(12.0, Weight::Medium), Color32::WHITE, Align::Center);
             }
             let response = ui.interact(card, ui.scope_id().with(("status_media", &post.id)), Sense::click());
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            // Photos load by themselves; videos when clicked.
-            let auto = media.kind == "image" && media.file.is_none() && media.downloadable() && !downloads.contains_key(&post.id);
+            // Photos and videos load by themselves once shown (#167).
+            let auto = matches!(media.kind.as_str(), "image" | "video") && media.file.is_none() && media.downloadable() && !downloads.contains_key(&post.id);
             let retry = matches!(downloads.get(&post.id), Some(Some(_)));
             if response.clicked() {
                 match &media.file {
@@ -200,13 +202,14 @@ impl<'a> Entry<'a> {
     }
 }
 
-/// Contacts' updates of the last 24 hours on every number (or the one in
-/// `scope`) matching `search`: unseen first, newest first.
+/// Contacts' updates of the last 24 hours on every connected number (or the
+/// one in `scope`) matching `search`: unseen first, newest first. A number
+/// that is not connected shows none: its photos and videos cannot load.
 fn entries<'a>(sessions: &'a [SessionView], scope: Option<&str>, search: &str) -> Vec<Entry<'a>> {
     let now = time::now();
     let query = search.trim().to_lowercase();
     let mut all = Vec::new();
-    for s in sessions.iter().filter(|s| scope.is_none_or(|id| s.id == id)) {
+    for s in sessions.iter().filter(|s| s.status == Status::Connected && scope.is_none_or(|id| s.id == id)) {
         for (poster, posts) in s.book.status_feed(now) {
             let Some(poster) = poster else { continue };
             let entry = Entry { session: s, poster, posts };
@@ -361,6 +364,12 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
     }
     widgets::search(ui, &mut state.status_search, tr("Search name or number", "Cari nama atau nomor"), ui.available_width(), false);
     ui.add_space(8.0);
+    // A number that is not connected: a note instead of its statuses.
+    let scope = state.status_scope.clone();
+    for s in sessions.iter().filter(|s| s.status != Status::Connected && scope.as_ref().is_none_or(|id| &s.id == id)) {
+        offline_note(ui, p, state, s);
+        ui.add_space(8.0);
+    }
     let mut list = entries(sessions, state.status_scope.as_deref(), &state.status_search);
     // Not muted by default; all, or the muted ones alone, a click away (#101).
     let muted_count = list.iter().filter(|e| e.muted()).count();
@@ -422,6 +431,26 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
         });
     }
     commands
+}
+
+/// Says that `s` is not connected, so its statuses are not shown, with a
+/// way to the device list where it can be connected again.
+fn offline_note(ui: &mut Ui, p: &Palette, state: &mut State, s: &SessionView) {
+    let connecting = matches!(s.status, Status::Starting | Status::Reconnecting);
+    egui::Frame::new().fill(if connecting { p.raised } else { p.red_soft }).corner_radius(R_LG).inner_margin(Margin::same(12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 6.0;
+        if connecting {
+            ui.label(rich(&crate::trf!("{} is connecting…", "{} sedang menyambung…", s.name), 13.0, Weight::SemiBold, p.text));
+            ui.label(rich(tr("Its statuses show once it is connected.", "Statusnya tampil setelah tersambung."), 12.0, Weight::Regular, p.muted));
+        } else {
+            ui.label(rich(&crate::trf!("{} is not connected", "{} tidak terhubung", s.name), 13.0, Weight::SemiBold, p.red_text));
+            ui.label(rich(tr("Its statuses are not shown. Check the device list.", "Statusnya tidak ditampilkan. Cek daftar perangkat."), 12.0, Weight::Regular, p.text));
+            if widgets::button(ui, Some("smartphone"), tr("Open devices", "Buka perangkat"), widgets::Kind::Secondary).clicked() {
+                state.devices_requested = true;
+            }
+        }
+    });
 }
 
 /// Right-click on a poster: mute or unmute their status updates (#101).
@@ -515,12 +544,23 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
 
     // The timer: frozen while paused or typing; at the end, the next update or poster.
     let now = std::time::Instant::now();
+    // Held at the start, not paused, until the photo or video has loaded
+    // (#167); a failed one waits for a retry or the arrows rather than
+    // running out unseen.
+    let loading = post.media.as_ref().is_some_and(|m| {
+        (m.kind == "image" || m.kind == "video")
+            && match &m.file {
+                None => m.downloadable(),
+                Some(_) => m.kind == "video" && movie::available() && movie::status(&post.id).is_none_or(|s| s.loading),
+            }
+    });
     let elapsed = match &state.status_shown {
-        Some((id, since)) if id == &post.id => since.elapsed(),
+        Some((id, since)) if id == &post.id && !loading => since.elapsed(),
         _ => std::time::Duration::ZERO,
     };
     let paused = state.status_paused || typing;
-    if paused || !matches!(&state.status_shown, Some((id, _)) if id == &post.id) {
+    let hold = paused || loading;
+    if hold || !matches!(&state.status_shown, Some((id, _)) if id == &post.id) {
         state.status_shown = Some((post.id.clone(), now - elapsed));
     }
     // A downloaded video plays in the card; its length is the update's time (#84).
@@ -544,7 +584,7 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
         Some(s) => ((if s.duration > 0.0 { s.position / s.duration } else { 0.0 }).min(1.0), s.ended),
         None => ((elapsed.as_secs_f32() / ADVANCE.as_secs_f32()).min(1.0), elapsed >= ADVANCE),
     };
-    if !paused {
+    if !hold {
         if finished {
             if state.status_index + 1 < count {
                 state.status_index += 1;
@@ -555,6 +595,8 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
             }
         }
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
+    } else if loading {
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(250));
     }
 
     // Progress segments.
@@ -569,6 +611,13 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
         if done > 0.0 {
             ui.painter().rect_filled(Rect::from_min_size(seg.min, vec2(seg.width() * done, 3.0)), 2.0, white);
         }
+    }
+
+    // Esc closes the update, like ← (#167). In the comment box it first only
+    // leaves the box; with the preview open, it closes the preview.
+    if !ui.ctx().text_edit_focused() && state.video_view.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.status_selected = None;
+        state.status_comment.clear();
     }
 
     // Header: back (phone), who, which update, through which number; pause, menu.
@@ -615,6 +664,13 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
         if !post.text.is_empty() && ui.button(tr("Copy text", "Salin teks")).clicked() {
             ui.ctx().copy_text(post.caption());
         }
+        // A copy of the photo or video, kept where the user picks (#167).
+        if let Some(file) = post.media.as_ref().and_then(|m| m.file.clone()) {
+            if ui.button(tr("Save…", "Simpan…")).clicked() {
+                let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "status".to_owned());
+                crate::platform::save_copy(file, name);
+            }
+        }
         if ui.button(crate::trf!("Open chat with {title}", "Buka chat {title}")).clicked() {
             state.open_chat_requested = Some((e.session.id.clone(), e.poster.clone()));
         }
@@ -640,7 +696,7 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
     let side_room = if phone { pad * 2.0 } else { 150.0 };
     let width = (height * 9.0 / 16.0).max(240.0).min(area.width() - side_room);
     let card = Rect::from_min_size(pos2(area.center().x - width / 2.0, top), vec2(width, height));
-    commands.extend(paint_post(ui, p, card, post, &e.session.id, downloads, playing.as_ref()));
+    commands.extend(paint_post(ui, p, card, post, &e.session.id, connected, downloads, playing.as_ref()));
     if let Some(file) = ui.ctx().data_mut(|d| d.remove_temp::<PathBuf>(egui::Id::unique("status_preview"))) {
         state.status_paused = true;
         state.video_view = Some(crate::ui::movie_view::Viewer::new(file, e.title()));

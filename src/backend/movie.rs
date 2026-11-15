@@ -135,6 +135,10 @@ pub fn play(id: &str, path: &Path, repaint: Arc<dyn Fn() + Send + Sync>) {
             if info.audio && info.duration <= MAX_SECONDS {
                 match decode_audio(&path) {
                     Ok(pcm) if !pcm.is_empty() => {
+                        // Stopped while the sound was decoding: not heard.
+                        if !current().lock().is_ok_and(|slot| slot.as_ref().is_some_and(|c| c.id == id)) {
+                            return;
+                        }
                         player::play_buffer(&audio_id, pcm);
                         audio.store(true, Ordering::Relaxed);
                         // The wanted state: paused while the sound was decoding stays paused.

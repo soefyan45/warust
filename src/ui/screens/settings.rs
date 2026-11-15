@@ -559,7 +559,9 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                     super::card(ui, "Media", "", |ui| {
                         let draft = form.draft.as_mut().expect("synced");
                         widgets::toggle(ui, &mut draft.auto_stickers, tr("Download stickers automatically when they show in a chat", "Unduh stiker otomatis saat terlihat di chat"));
-                        hint(ui, &p, tr("Photos, videos, and documents are still downloaded on click.", "Foto, video, dan dokumen tetap diunduh saat diklik."));
+                        widgets::toggle(ui, &mut draft.auto_photos, tr("Show photos in chats automatically when they show on screen", "Tampilkan foto di chat otomatis saat terlihat"));
+                        widgets::toggle(ui, &mut draft.videos_direct, tr("Play videos in chats without downloading them first", "Putar video di chat tanpa download dulu"));
+                        hint(ui, &p, tr("A video played this way is not kept: it is gone when warust closes, and Save… keeps a copy. Off, a video has to be downloaded before it plays. Documents load on click. Status photos and videos always load by themselves.", "Video yang diputar begini tidak disimpan: hilang saat warust ditutup, dan Simpan… menyimpan salinannya. Bila mati, video harus didownload dulu sebelum diputar. Dokumen dimuat saat diklik. Foto dan video status selalu dimuat sendiri."));
                     });
 
                     super::card(ui, tr("Privacy", "Privasi"), "", |ui| {

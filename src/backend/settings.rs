@@ -209,6 +209,11 @@ pub struct Settings {
     /// A number's own chat wallpaper, by session id (#60). A number not in
     /// here uses the app's.
     pub number_wallpapers: HashMap<String, NumberWallpaper>,
+    /// Chat photos load by themselves once on screen (#167).
+    pub auto_photos: bool,
+    /// A chat video plays on a click without being kept; off, it has to be
+    /// downloaded first (#167).
+    pub videos_direct: bool,
     /// The main number (#138): listed first, and the Inbox opens on it.
     pub main_number: Option<String>,
     /// A number's own colour and icon, by session id (#142). A number not in
@@ -274,6 +279,8 @@ impl Default for Settings {
             wallpaper_dim: 30,
             number_wallpapers: HashMap::new(),
             main_number: None,
+            auto_photos: true,
+            videos_direct: true,
             number_looks: HashMap::new(),
             privacy: Privacy::default(),
             nav_icons_only: false,

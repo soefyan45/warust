@@ -30,7 +30,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use registry::Registry;
 use session::{Body, Running};
-pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
+pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker, stream_dir};
 pub use registry::{DEFAULT_DEVICE_NAME, Device, DeviceKind, NAME_MAX, clean_name};
 pub use session::mask_phone;
 pub use settings::Settings;
@@ -139,6 +139,9 @@ pub struct Shared {
     /// Downloads by message id: `None` while running, else why it failed.
     /// Finished downloads leave the map and show as the message's file.
     pub downloads: Arc<HashMap<String, Option<String>>>,
+    /// Videos fetched to be played without keeping them (#167), by message
+    /// id: the file in the stream cache.
+    pub streamed: Arc<HashMap<String, PathBuf>>,
     pub settings: Arc<Settings>,
     /// Latest webhook deliveries, newest first.
     pub webhooks: Arc<Vec<HookDelivery>>,
@@ -409,6 +412,9 @@ pub enum Command {
     SendContact { id: String, chat: String, name: String, number: String },
     /// Download a received photo, video, sticker, voice note or document.
     Download { id: String, msg_id: String },
+    /// Fetch a video into the stream cache to play it, without keeping it
+    /// with the number's files (#167).
+    Stream { id: String, msg_id: String },
     /// Send a message that failed again (#70).
     Retry { id: String, msg_id: String },
     /// Send the "seen" receipt for a status update shown in the viewer.
@@ -528,6 +534,10 @@ pub(crate) struct Updater {
 
 impl Updater {
     /// Numbers that could not start because another process holds their lock.
+    fn connected(&self, id: &str) -> bool {
+        self.shared.lock().is_ok_and(|shared| shared.sessions.iter().any(|s| s.id == id && s.status == Status::Connected))
+    }
+
     fn locked(&self) -> Vec<String> {
         let Ok(shared) = self.shared.lock() else {
             return Vec::new();
@@ -640,6 +650,13 @@ impl Updater {
                 Some(state) => downloads.insert(msg_id.to_owned(), state),
                 None => downloads.remove(msg_id),
             };
+        }
+        self.ctx.request_repaint();
+    }
+
+    pub(crate) fn set_streamed(&self, msg_id: &str, file: PathBuf) {
+        if let Ok(mut shared) = self.shared.lock() {
+            Arc::make_mut(&mut shared.streamed).insert(msg_id.to_owned(), file);
         }
         self.ctx.request_repaint();
     }
@@ -858,6 +875,8 @@ async fn run(
     let api_context = api::Context { commands: api_commands, shared: state.shared.clone(), data_dir: data_dir.clone() };
     let mut api_server = api::start(&api_context, &state);
     let mut registry = Registry::load(&data_dir);
+    // Videos played last time without keeping them are not kept (#167).
+    let _ = std::fs::remove_dir_all(media::stream_dir(&data_dir));
     let mut running: HashMap<String, Running> = HashMap::new();
     let mut stores: HashMap<String, Arc<Mutex<Store>>> = HashMap::new();
     // Dev aid: WARUST_OFFLINE=1 shows the saved chats without connecting.
@@ -891,6 +910,9 @@ async fn run(
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Pictures asked for a number not running yet, sent once it runs (#116).
     let mut waiting_avatars: HashMap<String, Vec<String>> = HashMap::new();
+    // Files asked for while their number was not connected, fetched once it
+    // is (#167).
+    let mut waiting_downloads: HashMap<String, Vec<String>> = HashMap::new();
     let mut away = Away::default();
     loop {
         waiting_avatars.retain(|id, jids| match running.get(id) {
@@ -899,6 +921,17 @@ async fn run(
                 false
             }
             None => stores.contains_key(id),
+        });
+        waiting_downloads.retain(|id, msg_ids| match (running.get(id), stores.get(id)) {
+            (Some(r), Some(store)) if state.connected(id) => {
+                for msg_id in msg_ids.drain(..) {
+                    if let Some(media) = state.book(id).and_then(|book| book.media_of(&msg_id).map(|m| m.raw.clone())) {
+                        r.download(id, msg_id, media, &state, store.clone());
+                    }
+                }
+                false
+            }
+            _ => stores.contains_key(id),
         });
         let command = tokio::select! {
             command = commands.recv() => match command {
@@ -1148,7 +1181,17 @@ async fn run(
                     let _ = std::fs::remove_file(&path);
                 }
             },
-            Command::Download { msg_id, .. } if state.downloading(&msg_id) => {}
+            Command::Download { msg_id, .. } | Command::Stream { msg_id, .. } if state.downloading(&msg_id) => {}
+            Command::Stream { id, msg_id } => {
+                let media = state.book(&id).and_then(|book| book.media_of(&msg_id).map(|m| m.raw.clone()));
+                match (running.get(&id), media) {
+                    (Some(r), Some(media)) if state.connected(&id) => r.stream(&id, msg_id, media, &state),
+                    (_, media) => {
+                        let why = if media.is_none() { crate::i18n::tr("This file is no longer available", "File ini sudah tidak tersedia") } else { crate::i18n::tr("This number is not connected", "Nomor ini tidak tersambung") };
+                        state.set_download(&msg_id, Some(Some(why.to_owned())));
+                    }
+                }
+            }
             Command::StatusSeen { id, msg_id } => {
                 let post = state.book(&id).and_then(|book| {
                     let post = book.statuses.iter().find(|s| s.id == msg_id)?;
@@ -1179,8 +1222,23 @@ async fn run(
             Command::Download { id, msg_id } => {
                 let media = state.book(&id).and_then(|book| book.media_of(&msg_id).map(|m| m.raw.clone()));
                 match (running.get(&id), stores.get(&id), media) {
-                    (Some(r), Some(store), Some(media)) => r.download(&id, msg_id, media, &state, store.clone()),
-                    _ => log::warn!("download: nothing to download for a message in {id}"),
+                    (Some(r), Some(store), Some(media)) if state.connected(&id) => r.download(&id, msg_id, media, &state, store.clone()),
+                    // Kept as waiting (the screens stop asking) until the
+                    // number connects, then fetched by itself.
+                    (_, Some(_), Some(_)) => {
+                        state.set_download(&msg_id, Some(Some(crate::i18n::tr("Waiting for this number to connect", "Menunggu nomor ini tersambung").to_owned())));
+                        let waiting = waiting_downloads.entry(id).or_default();
+                        if !waiting.contains(&msg_id) {
+                            waiting.push(msg_id);
+                        }
+                    }
+                    // Said once and kept as a failure, so a picture that loads
+                    // by itself (#167) is not asked for again every frame.
+                    (running_now, _, media) => {
+                        log::warn!("download: nothing to download for message {msg_id} in {id}");
+                        let why = if running_now.is_none() { crate::i18n::tr("This number is not connected", "Nomor ini tidak tersambung") } else if media.is_none() { crate::i18n::tr("This file is no longer available", "File ini sudah tidak tersedia") } else { crate::i18n::tr("Cannot download now", "Tidak bisa diunduh sekarang") };
+                        state.set_download(&msg_id, Some(Some(why.to_owned())));
+                    }
                 }
             }
             Command::Avatar { id, jid } => match running.get(&id) {

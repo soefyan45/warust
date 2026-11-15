@@ -290,6 +290,12 @@ pub fn dir(data_dir: &Path, session: &str) -> PathBuf {
     data_dir.join("media").join(session)
 }
 
+/// Videos fetched only to be played (#167): not kept, emptied at each start
+/// and on quit.
+pub fn stream_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("stream")
+}
+
 fn stem(msg_id: &str) -> String {
     msg_id.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect()
 }

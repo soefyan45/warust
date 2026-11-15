@@ -50,6 +50,8 @@ enum Command {
     Play { id: String, path: PathBuf, from: f32 },
     /// Samples already decoded: a recording listened to before it is sent.
     PlayBuffer { id: String, pcm: Arc<Vec<f32>> },
+    /// `forget` again, after the plays sent before it.
+    Forget(String),
     Speed(f32),
 }
 
@@ -130,9 +132,14 @@ pub fn play_buffer(id: &str, pcm: Vec<f32>) {
     let _ = player().commands.send(Command::PlayBuffer { id: id.to_owned(), pcm: Arc::new(pcm) });
 }
 
-/// Stops message `id` if it is the note loaded.
+/// Stops message `id` if it is the note loaded, also when it is still on
+/// its way to the player thread.
 pub fn forget(id: &str) {
-    let shared = &player().shared;
+    unload(&player().shared, id);
+    let _ = player().commands.send(Command::Forget(id.to_owned()));
+}
+
+fn unload(shared: &Shared, id: &str) {
     let Ok(mut track) = shared.track.lock() else { return };
     if track.as_ref().is_some_and(|t| t.id == id) {
         shared.playing.store(false, Ordering::Relaxed);
@@ -228,6 +235,7 @@ fn run(shared: Arc<Shared>, commands: mpsc::Receiver<Command>) {
                 }
                 shared.playing.store(stream.is_some(), Ordering::Relaxed);
             }
+            Command::Forget(id) => unload(&shared, &id),
             Command::Speed(speed) => {
                 let Some((original, old_speed, old_len)) = shared
                     .track
