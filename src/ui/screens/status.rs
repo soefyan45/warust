@@ -362,7 +362,7 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
     widgets::search(ui, &mut state.status_search, tr("Search name or number", "Cari nama atau nomor"), ui.available_width(), false);
     ui.add_space(8.0);
     let mut list = entries(sessions, state.status_scope.as_deref(), &state.status_search);
-    // All by default; muted contacts can be left out, or shown alone (#101).
+    // Not muted by default; all, or the muted ones alone, a click away (#101).
     let muted_count = list.iter().filter(|e| e.muted()).count();
     let labels = [
         crate::trf!("All · {}", "Semua · {}", list.len()),

@@ -276,8 +276,8 @@ pub struct State {
     pub status_comment: String,
     pub status_shown: Option<(String, std::time::Instant)>,
     pub status_paused: bool,
-    /// The Status list's filter (#101): 0 all (the default), 1 not muted,
-    /// 2 muted only.
+    /// The Status list's filter (#101): 0 all, 1 not muted (what the app
+    /// opens on, so muted updates stay out of sight), 2 muted only.
     pub status_filter: usize,
     /// A screen asked to open this chat (session id, JID) in the Inbox.
     pub open_chat_requested: Option<(String, String)>,
@@ -413,6 +413,8 @@ impl App {
         };
         let mut state = State {
             contact_panel: true,
+            // Muted status updates stay out of sight until asked for (#101).
+            status_filter: 1,
             // Dev aid: WARUST_SCREEN=pemicu opens the first trigger.
             integrations_tab: if std::env::var("WARUST_SCREEN").as_deref() == Ok("pemicu") { 2 } else { 0 },
             rule_selected: (std::env::var("WARUST_SCREEN").as_deref() == Ok("pemicu")).then_some(0),
