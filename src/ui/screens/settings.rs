@@ -669,6 +669,10 @@ pub fn show(ui: &mut Ui, state: &mut State, saved: &Arc<Settings>) -> Vec<Comman
                         |ui| {
                             let draft = form.draft.as_mut().expect("synced");
                             widgets::toggle(ui, &mut draft.close_to_tray, tr("Closing the window keeps warust running in the tray", "Menutup jendela membuat warust tetap jalan di tray"));
+                            // Linux on Wayland switches to XWayland for it at start (#134).
+                            if cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                                hint(ui, &p, tr("On Wayland, warust runs through XWayland for this; a change applies after restarting warust.", "Di Wayland, warust berjalan lewat XWayland untuk ini; perubahan berlaku setelah warust dibuka ulang."));
+                            }
                         },
                     );
 

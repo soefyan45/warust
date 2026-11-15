@@ -34,7 +34,19 @@ fn main() -> eframe::Result<()> {
         // No OS title bar: the app's topbar carries the window controls.
         viewport.with_decorations(false)
     };
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    // Changed below on Linux only.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut options = eframe::NativeOptions { viewport, ..Default::default() };
+    // Wayland cannot hide a window and bring it back, so closing to the tray
+    // would quit there: with close-to-tray on, run through XWayland (#134).
+    #[cfg(target_os = "linux")]
+    if xwayland_for_tray() {
+        log::info!("wayland: running through XWayland so the window can close to the tray");
+        options.event_loop_builder = Some(Box::new(|builder| {
+            use egui_winit::winit::platform::x11::EventLoopBuilderExtX11 as _;
+            builder.with_x11();
+        }));
+    }
     let result = eframe::run_native(
         "warust",
         options,
@@ -43,6 +55,22 @@ fn main() -> eframe::Result<()> {
     // An update installed while running starts warust again (#93).
     backend::update::after_exit();
     result
+}
+
+/// A Wayland session with an X server for X apps (XWayland), and close to
+/// tray on in the saved settings (its default when not saved yet).
+/// `WARUST_WAYLAND=native` keeps native Wayland anyway.
+#[cfg(target_os = "linux")]
+fn xwayland_for_tray() -> bool {
+    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland");
+    if !wayland || std::env::var_os("DISPLAY").is_none() || std::env::var("WARUST_WAYLAND").is_ok_and(|v| v == "native") {
+        return false;
+    }
+    let saved = std::fs::read(backend::Settings::path(platform::data_dir())).ok();
+    let close_to_tray = saved
+        .and_then(|bytes| whatsapp_rust::serde_json::from_slice::<whatsapp_rust::serde_json::Value>(&bytes).ok())
+        .and_then(|settings| settings.get("close_to_tray").and_then(|v| v.as_bool()));
+    close_to_tray.unwrap_or(true)
 }
 
 /// The app icon from Pego "Logo · Warust" (App icon 128), drawn at 256 px.
