@@ -177,6 +177,8 @@ pub struct Chat {
     /// Muted until this time (Unix seconds; `i64::MAX` for always), here or
     /// on the phone: no notification while it lasts (#87).
     pub muted_until: Option<i64>,
+    /// Pinned on the phone: when (Unix seconds). Pinned chats head All.
+    pub pinned_at: Option<i64>,
 }
 
 /// How long a pinned message stays pinned (the choices WhatsApp offers).
@@ -351,6 +353,10 @@ pub struct Book {
     archived: HashSet<String>,
     /// Muted chats (normalized JIDs) and until when, like `archived`.
     muted: HashMap<String, i64>,
+    /// Pinned chats (normalized JIDs) and when, like `archived`.
+    pinned: HashMap<String, i64>,
+    /// The phone's chat pins were read in full once, like `mutes_synced`.
+    pub pins_synced: bool,
     /// The phone's mutes were read in full once (#87): a number linked
     /// before warust read mutes gets them on its next connection.
     pub mutes_synced: bool,
@@ -490,6 +496,7 @@ impl Book {
             archived: self.archived.contains(jid),
             pins: Vec::new(),
             muted_until: self.muted.get(jid).copied(),
+            pinned_at: self.pinned.get(jid).copied(),
         });
         self.chats.last_mut().expect("just pushed")
     }
@@ -509,6 +516,13 @@ impl Book {
                         self.archived.insert(pn.clone());
                         if let Some(c) = self.chats.iter_mut().find(|c| c.jid == pn) {
                             c.archived = true;
+                        }
+                    }
+                    // A pin too.
+                    if let Some(at) = self.pinned.remove(&lid) {
+                        self.pinned.insert(pn.clone(), at);
+                        if let Some(c) = self.chats.iter_mut().find(|c| c.jid == pn) {
+                            c.pinned_at = Some(at);
                         }
                     }
                     self.lid_to_pn.insert(lid, pn);
@@ -696,6 +710,21 @@ impl Book {
             Some("mutesync") => self.mutes_synced = true,
             Some("smutesync") => self.status_mutes_synced = true,
             Some("csync") => self.contacts_synced = true,
+            Some("pinsync") => self.pins_synced = true,
+            Some("chatpin") => {
+                // `v` is when it was pinned; none (or null) unpins it.
+                if let Some(chat) = text("chat") {
+                    let jid = self.normalize(&chat);
+                    let at = record.get("v").and_then(Value::as_i64);
+                    match at {
+                        Some(at) => self.pinned.insert(jid.clone(), at),
+                        None => self.pinned.remove(&jid),
+                    };
+                    if let Some(c) = self.chats.iter_mut().find(|c| c.jid == jid) {
+                        c.pinned_at = at;
+                    }
+                }
+            }
             Some("smute") => {
                 if let Some(jid) = text("jid") {
                     let jid = self.normalize(&jid);
@@ -952,6 +981,17 @@ pub fn contacts_synced_record() -> Value {
     json!({ "t": "csync" })
 }
 
+/// The phone's chat pins were read in full.
+pub fn pins_synced_record() -> Value {
+    json!({ "t": "pinsync" })
+}
+
+/// A chat pinned on the phone at `at` (Unix seconds), or (with `None`)
+/// unpinned.
+pub fn chat_pin_record(chat: &str, at: Option<i64>) -> Value {
+    json!({ "t": "chatpin", "chat": chat, "v": at })
+}
+
 pub fn push_record(jid: &str, name: &str) -> Value {
     json!({ "t": "push", "jid": jid, "name": name })
 }
@@ -1081,6 +1121,22 @@ mod tests {
         let b = reopen(&[archive_record(lid, true), lid_record(lid, pn), msg]);
         assert_eq!(b.chats.len(), 1);
         assert!(b.chats[0].archived);
+    }
+
+    #[test]
+    fn chat_pin_round_trips_and_follows_the_lid_mapping() {
+        let chat = "628111000004@s.whatsapp.net";
+        let msg = |id: &str, ts: i64| msg_record(chat, id, false, chat, "x", ts, &Delivery::Received, true);
+        assert_eq!(reopen(&[msg("a", 1)]).chats[0].pinned_at, None);
+        let b = reopen(&[msg("a", 1), chat_pin_record(chat, Some(50)), msg("b", 2)]);
+        assert_eq!(b.chats[0].pinned_at, Some(50), "a new message keeps it pinned");
+        let b = reopen(&[msg("a", 1), chat_pin_record(chat, Some(50)), chat_pin_record(chat, None)]);
+        assert_eq!(b.chats[0].pinned_at, None);
+        // The phone may pin under the LID before the mapping comes.
+        let lid = "111333@lid";
+        let b = reopen(&[chat_pin_record(lid, Some(60)), lid_record(lid, chat), msg("a", 1)]);
+        assert_eq!(b.chats.len(), 1);
+        assert_eq!(b.chats[0].pinned_at, Some(60));
     }
 
     #[test]
