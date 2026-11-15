@@ -4631,13 +4631,14 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
 
 fn scope_chip(ui: &mut Ui, p: &Palette, label: &str, active: bool) -> egui::Response {
     let forest = theme::template().top_nav();
-    let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(14.0, if active { Weight::SemiBold } else { Weight::Medium }), p.text);
-    let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 34.0), Sense::click());
     let (fill, color) = match (active, forest) {
         (true, true) => (p.accent, p.primary),
         (true, false) => (p.primary, p.on_primary),
         (false, _) => (p.panel, p.text),
     };
+    // Laid out in the colour it is painted in: a galley keeps its own colour.
+    let galley = ui.painter().layout_no_wrap(label.to_owned(), fonts::ui(14.0, if active { Weight::SemiBold } else { Weight::Medium }), color);
+    let (rect, response) = ui.allocate_exact_size(vec2(galley.size().x + 28.0, 34.0), Sense::click());
     ui.painter().rect_filled(rect, 17.0, fill);
     if !active && !forest {
         ui.painter().rect_stroke(rect, 17.0, Stroke::new(1.0, p.border), StrokeKind::Inside);
