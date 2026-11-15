@@ -19,8 +19,20 @@ pub const WIDTH: f32 = 1100.0;
 /// Side padding of the phone screens.
 pub const PAD: f32 = 20.0;
 
+/// Mint shrinks in steps instead: below `MINT_RAIL` its sidebar becomes the
+/// icon rail, below `MINT_SINGLE` the Inbox shows the list or the chat, not
+/// both, and only below `MINT_WIDTH` does the phone layout take over.
+pub const MINT_RAIL: f32 = 900.0;
+pub const MINT_SINGLE: f32 = 800.0;
+pub const MINT_WIDTH: f32 = 500.0;
+
+/// The width below which the phone layout shows, for the active template.
+pub fn width() -> f32 {
+    if theme::mint() { MINT_WIDTH } else { WIDTH }
+}
+
 pub fn is_compact(ctx: &egui::Context) -> bool {
-    ctx.content_rect().width() < WIDTH
+    ctx.content_rect().width() < width()
 }
 
 fn forest() -> bool {
@@ -34,7 +46,7 @@ pub fn title_bar(ui: &mut Ui) {
         .exact_size(40.0)
         .resizable(false)
         .show_separator_line(false)
-        .frame(Frame::NONE.fill(p.panel).inner_margin(Margin { left: 14, right: 6, top: 0, bottom: 0 }))
+        .frame(Frame::NONE.fill(theme::sidebar_fill(ui.ctx())).inner_margin(Margin { left: 14, right: 6, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let rect = ui.max_rect().expand2(vec2(14.0, 0.0));
             window::drag_area(ui, rect, "m_titlebar");
@@ -59,6 +71,15 @@ fn tab_of(screen: Screen) -> usize {
     }
 }
 
+/// Room Mint's chat list leaves under its last row for the floating tab bar.
+pub const TAB_BAR_ROOM: f32 = 86.0;
+
+/// Whether the tab bar floats over `screen` (Mint's Inbox) instead of
+/// taking a strip of its own under it.
+pub fn floats(screen: Screen) -> bool {
+    theme::mint() && screen == Screen::Inbox
+}
+
 /// Beranda, Inbox, Status, Perangkat, Lainnya. Returns the screen picked.
 pub fn tab_bar(ui: &mut Ui, screen: Screen, unread: u32, unseen: usize) -> Option<Screen> {
     let p = theme::palette(ui.ctx());
@@ -71,6 +92,73 @@ pub fn tab_bar(ui: &mut Ui, screen: Screen, unread: u32, unseen: usize) -> Optio
     ];
     let current = tab_of(screen);
     let mut picked = None;
+    if theme::mint() {
+        // Mint: a capsule with room around it; the tab it is on is a raised
+        // tile around the icon and its label together.
+        let line = theme::mint_pair(ui.ctx(), theme::MINT_SIDEBAR_LINE);
+        let mut draw = |ui: &mut Ui, bar: Rect, floating: bool| {
+                // Floating, it casts a soft shadow. It stays opaque: without a blur,
+                // the rows passing behind would show through its labels.
+                let fill = theme::sidebar_fill(ui.ctx());
+                if floating {
+                    ui.painter().add(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(28) }.as_shape(bar, bar.height() / 2.0));
+                }
+                ui.painter().rect(bar, bar.height() / 2.0, fill, Stroke::new(1.0, line), egui::StrokeKind::Inside);
+                let inner = bar.shrink2(vec2(6.0, 0.0));
+                let w = inner.width() / items.len() as f32;
+                for (i, (target, icon, label, badge)) in items.into_iter().enumerate() {
+                    let cell = Rect::from_min_size(pos2(inner.left() + i as f32 * w, inner.top()), vec2(w, inner.height()));
+                    let response = ui.interact(cell, ui.scope_id().with(("m_tab", i)), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+                    let selected = i == current;
+                    let tile = cell.shrink2(vec2(1.0, 5.0));
+                    let field = theme::mint_pair(ui.ctx(), theme::MINT_SIDEBAR_SELECTED);
+                    if selected {
+                        ui.painter().rect(tile, tile.height() / 2.0, field, Stroke::new(1.0, line), egui::StrokeKind::Inside);
+                    } else if response.hovered() {
+                        ui.painter().rect_filled(tile, tile.height() / 2.0, field.gamma_multiply(0.5));
+                    }
+                    let color = if selected { p.primary } else { p.muted };
+                    let at = pos2(cell.center().x, cell.center().y - 9.0);
+                    icons::paint(ui, Rect::from_center_size(at, vec2(22.0, 22.0)), icon, 22.0, color);
+                    if badge > 0 {
+                        let text = if badge > 99 { "99+".to_owned() } else { badge.to_string() };
+                        let bw = if badge > 9 { 24.0 } else { 17.0 };
+                        let b = Rect::from_center_size(pos2(at.x + 13.0, at.y - 9.0), vec2(bw, 17.0));
+                        ui.painter().rect_filled(b, 9.0, p.hl);
+                        widgets::paint_text(ui, b, &text, fonts::ui(10.0, Weight::SemiBold), p.on_hl, Align::Center);
+                    }
+                    let text = Rect::from_center_size(pos2(cell.center().x, cell.center().y + 15.0), vec2(w, 14.0));
+                    widgets::paint_text(ui, text, label, fonts::ui(10.5, if selected { Weight::SemiBold } else { Weight::Medium }), color, Align::Center);
+                    if response.clicked() && !(selected && screen == target) {
+                        picked = Some(target);
+                    }
+                }
+        };
+        if floats(screen) {
+            // Over the Inbox the capsule floats: the chat list runs behind it
+            // (and leaves `TAB_BAR_ROOM` under its last row).
+            let screen_rect = ui.ctx().content_rect();
+            let size = vec2(screen_rect.width() - 24.0, 62.0);
+            egui::Area::new(egui::Id::unique("m_tabbar_float"))
+                .order(egui::Order::Middle)
+                .fixed_pos(pos2(screen_rect.left() + 12.0, screen_rect.bottom() - 12.0 - size.y))
+                .show(ui.ctx(), |ui| {
+                    let (bar, _) = ui.allocate_exact_size(size, Sense::hover());
+                    draw(ui, bar, true);
+                });
+        } else {
+            Panel::bottom("m_tabbar")
+                .exact_size(82.0)
+                .resizable(false)
+                .show_separator_line(false)
+                .frame(Frame::NONE.fill(p.bg))
+                .show(ui, |ui| {
+                    let bar = Rect::from_min_max(ui.max_rect().min + vec2(12.0, 8.0), ui.max_rect().max - vec2(12.0, 12.0));
+                    draw(ui, bar, false);
+                });
+        }
+        return picked;
+    }
     Panel::bottom("m_tabbar")
         .exact_size(64.0)
         .resizable(false)
@@ -127,7 +215,7 @@ pub fn back_bar(ui: &mut Ui, title: &str) -> bool {
         .exact_size(52.0)
         .resizable(false)
         .show_separator_line(false)
-        .frame(Frame::NONE.fill(p.panel).inner_margin(Margin { left: 8, right: 12, top: 0, bottom: 0 }))
+        .frame(Frame::NONE.fill(theme::sidebar_fill(ui.ctx())).inner_margin(Margin { left: 8, right: 12, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let rect = ui.max_rect().expand2(vec2(8.0, 0.0));
             ui.painter().hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, p.border));
@@ -152,9 +240,9 @@ pub fn page_title(ui: &mut Ui, title: &str, actions: impl FnOnce(&mut Ui)) {
 pub fn round_button(ui: &mut Ui, icon: &str, primary: bool) -> Response {
     let p = theme::palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::click());
-    let (fill, color) = if primary { (p.primary, p.on_primary) } else { (p.panel, p.text) };
+    let (fill, color) = if primary { (p.primary, p.on_primary) } else if theme::mint() { (p.raised, p.text_2) } else { (p.panel, p.text) };
     ui.painter().circle_filled(rect.center(), 20.0, fill);
-    if !primary && !forest() {
+    if !primary && !forest() && !theme::mint() {
         ui.painter().circle_stroke(rect.center(), 19.5, Stroke::new(1.0, p.border));
     }
     if response.hovered() {
@@ -167,7 +255,7 @@ pub fn round_button(ui: &mut Ui, icon: &str, primary: bool) -> Response {
 /// A white card (Forest) or an outlined one (Monokrom), full width.
 pub fn card(ctx: &egui::Context) -> Frame {
     let p = theme::palette(ctx);
-    let radius = if forest() { 20 } else { theme::R_LG };
+    let radius = if forest() { 20 } else { theme::r_card() };
     let frame = Frame::NONE.fill(p.panel).corner_radius(radius).inner_margin(Margin::symmetric(16, 4));
     if forest() { frame } else { frame.stroke(Stroke::new(1.0, p.border)) }
 }
@@ -175,7 +263,7 @@ pub fn card(ctx: &egui::Context) -> Frame {
 /// Paints the card of `card()` behind `rect` (for rows laid out by hand).
 pub fn paint_card(ui: &Ui, rect: Rect) {
     let p = theme::palette(ui.ctx());
-    let radius = if forest() { 20 } else { theme::R_LG };
+    let radius = if forest() { 20 } else { theme::r_card() };
     ui.painter().rect_filled(rect, radius, p.panel);
     if !forest() {
         ui.painter().rect_stroke(rect, radius, Stroke::new(1.0, p.border), egui::StrokeKind::Inside);
