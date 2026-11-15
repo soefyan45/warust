@@ -14,6 +14,7 @@ use crate::ui::fonts::{self, Weight};
 use crate::ui::theme::{self, R_LG, R_MD};
 use crate::ui::widgets::{self, Kind, rich};
 use crate::ui::icons;
+use crate::ui::zoom::{self, Span};
 
 /// How a file is previewed.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -35,6 +36,10 @@ pub struct Viewer {
     look: Look,
     /// Photo zoom: 1 fits the stage.
     zoom: f32,
+    /// The zoom the photo was last laid out at, and how far it was scrolled
+    /// then: what a zoom is measured from to stay under the pointer.
+    laid: f32,
+    scroll: egui::Vec2,
     /// A text document's content, read once.
     text: Option<String>,
 }
@@ -42,7 +47,7 @@ pub struct Viewer {
 impl Viewer {
     pub fn new(file: PathBuf, title: String) -> Self {
         let look = look_of(&file);
-        Self { id: file.to_string_lossy().into_owned(), file, title, look, zoom: 1.0, text: None }
+        Self { id: file.to_string_lossy().into_owned(), file, title, look, zoom: 1.0, laid: 1.0, scroll: egui::Vec2::ZERO, text: None }
     }
 }
 
@@ -154,37 +159,56 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
     }
 }
 
-/// A photo fitted to the stage, zoomed with −/+ or Ctrl+scroll, and moved
-/// around by scrolling (or dragging) once it is bigger than the stage.
+/// Photo zoom limits: 1 fits the stage.
+const PHOTO_ZOOM: (f32, f32) = (1.0, 6.0);
+/// Where a double click on a fitted photo zooms to.
+const PHOTO_DOUBLE: f32 = 2.5;
+
+/// A photo fitted to the stage, zoomed with −/+, a pinch, Cmd/Ctrl+scroll or
+/// a double click (around the pointer), and moved around by scrolling (or
+/// dragging) once it is bigger than the stage.
 fn photo(ui: &mut egui::Ui, viewer: &mut Viewer) {
     let controls_h = 36.0;
     let stage = vec2(ui.available_width(), (ui.available_height() - controls_h - 8.0).max(120.0));
+    let area = Rect::from_min_size(ui.cursor().min, stage);
     let uri = widgets::picture_uri(ui.ctx(), &viewer.file);
     let natural = uri.as_ref().and_then(|uri| match egui::Image::from_uri(uri.clone()).load_for_size(ui.ctx(), stage) {
         Ok(egui::load::TexturePoll::Ready { texture }) => Some(texture.size),
         _ => None,
     });
-    // Ctrl+scroll zooms around 1× (the fitted size).
-    let zoom_delta = ui.input(|i| if i.modifiers.command { i.zoom_delta() } else { 1.0 });
-    if zoom_delta != 1.0 && ui.rect_contains_pointer(Rect::from_min_size(ui.cursor().min, stage)) {
-        viewer.zoom = (viewer.zoom * zoom_delta).clamp(1.0, 6.0);
-    }
     Frame::NONE.fill(Color32::from_rgb(0x12, 0x14, 0x13)).corner_radius(R_LG).show(ui, |ui| {
         ui.set_min_size(stage);
         ui.set_max_size(stage);
         match (uri, natural) {
             (Some(uri), Some(natural)) => {
-                let fit = (stage.x / natural.x).min(stage.y / natural.y).min(1.0);
-                let shown = natural * fit * viewer.zoom;
-                ScrollArea::both().auto_shrink(false).scroll_source(egui::scroll_area::ScrollSource::ALL).show(ui, |ui| {
+                // At 1× the photo fits the stage, never past its own size.
+                let fitted = natural * (stage.x / natural.x).min(stage.y / natural.y).min(1.0);
+                // The −/+ buttons zoom around the middle, a gesture around the pointer.
+                let mut anchor = stage / 2.0;
+                if let Some(gesture) = zoom::gesture(ui, area) {
+                    anchor = gesture.anchor;
+                    viewer.zoom = if gesture.double {
+                        zoom::toggled(viewer.zoom, PHOTO_ZOOM.0, PHOTO_DOUBLE)
+                    } else {
+                        zoom::scaled(viewer.zoom, gesture.factor, PHOTO_ZOOM.0, PHOTO_ZOOM.1)
+                    };
+                }
+                let shown = fitted * viewer.zoom;
+                let mut scroll = ScrollArea::both().auto_shrink(false).scroll_source(egui::scroll_area::ScrollSource::ALL);
+                if viewer.zoom != viewer.laid {
+                    let before = fitted * viewer.laid;
+                    scroll = scroll.scroll_offset(vec2(
+                        zoom::keep(anchor.x, viewer.scroll.x, Span::centred(before.x, stage.x), Span::centred(shown.x, stage.x), stage.x),
+                        zoom::keep(anchor.y, viewer.scroll.y, Span::centred(before.y, stage.y), Span::centred(shown.y, stage.y), stage.y),
+                    ));
+                    viewer.laid = viewer.zoom;
+                }
+                let out = scroll.show(ui, |ui| {
                     // Centred while it fits, from the corner once it is bigger.
-                    let pad = ((stage - shown) / 2.0).max(egui::Vec2::ZERO);
-                    ui.add_space(pad.y);
-                    ui.horizontal(|ui| {
-                        ui.add_space(pad.x);
-                        ui.add(egui::Image::from_uri(uri).fit_to_exact_size(shown));
-                    });
+                    let (content, _) = ui.allocate_exact_size(shown.max(stage), Sense::hover());
+                    egui::Image::from_uri(uri).fit_to_exact_size(shown).paint_at(ui, Rect::from_center_size(content.center(), shown));
                 });
+                viewer.scroll = out.state.clamped_offset();
             }
             _ => {
                 let (rect, _) = ui.allocate_exact_size(stage, Sense::hover());
@@ -196,13 +220,14 @@ fn photo(ui: &mut egui::Ui, viewer: &mut Viewer) {
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         if widgets::icon_button(ui, "minus", 30.0, false).on_hover_text(tr("Zoom out", "Perkecil")).clicked() {
-            viewer.zoom = (viewer.zoom / 1.25).max(1.0);
+            viewer.zoom = (viewer.zoom / 1.25).max(PHOTO_ZOOM.0);
         }
         if widgets::button(ui, None, &format!("{:.0}%", viewer.zoom * 100.0), Kind::Secondary).on_hover_text(tr("Fit to the window", "Pas di jendela")).clicked() {
             viewer.zoom = 1.0;
         }
-        if widgets::icon_button(ui, "plus", 30.0, false).on_hover_text(tr("Zoom in (or Ctrl+scroll)", "Perbesar (atau Ctrl+scroll)")).clicked() {
-            viewer.zoom = (viewer.zoom * 1.25).min(6.0);
+        let hint = tr("Zoom in (or pinch, Ctrl/Cmd+scroll, double click)", "Perbesar (atau cubit, Ctrl/Cmd+gulir, klik dua kali)");
+        if widgets::icon_button(ui, "plus", 30.0, false).on_hover_text(hint).clicked() {
+            viewer.zoom = (viewer.zoom * 1.25).min(PHOTO_ZOOM.1);
         }
     });
 }

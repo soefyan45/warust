@@ -18,6 +18,7 @@ use super::fonts::{self, Weight};
 use super::icons;
 use super::theme::{self, R_LG, R_MD};
 use super::widgets::{self, Kind, rich};
+use super::zoom::{self, Span};
 use crate::i18n::tr;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -170,10 +171,22 @@ fn unreadable_note() -> &'static str {
     }
 }
 
+/// Widest page rendered: enough to stay sharp well into a zoom, and an A4
+/// page that wide is still a texture a graphics card takes.
+const WIDEST: u32 = 4096;
+/// Pages up to this wide stay loaded for as long as the app runs (as chat
+/// previews do); wider ones are let go once they are out of sight.
+const KEPT: u32 = 2048;
+
+/// The width a page is rendered at for `width` pixels on screen: rounded up
+/// to steps of 256 px so resizing does not re-render.
+fn render_width(width: f32) -> u32 {
+    ((width / 256.0).ceil() as u32 * 256).clamp(256, WIDEST)
+}
+
 /// A rendered page (1-based) about `width` pixels wide; `None` until ready.
-/// Widths are rounded up to steps of 256 px so resizing does not re-render.
 pub fn page(ctx: &egui::Context, file: &Path, page: u32, width: f32) -> Option<PathBuf> {
-    let width = ((width / 256.0).ceil() as u32 * 256).clamp(256, 2048);
+    let width = render_width(width);
     let key = {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -204,15 +217,46 @@ pub struct Viewer {
     pub file: PathBuf,
     pub title: String,
     pub zoom: f32,
+    /// The zoom the pages were last laid out at, and how far they were
+    /// scrolled then: what a zoom is measured from to stay under the pointer.
+    laid: f32,
+    scroll: egui::Vec2,
+    /// The zoom the pages are rendered for. It follows `zoom` once a pinch
+    /// rests, so a gesture stretches the pages it has instead of rendering
+    /// every size it passes through.
+    sharp: f32,
+    /// When a pinch or Cmd/Ctrl+scroll last changed the zoom.
+    pinched: f64,
+    /// The picture on screen for each page (1-based) and its width in pixels.
+    shown: HashMap<u32, (PathBuf, u32)>,
 }
 
 impl Viewer {
     pub fn new(file: PathBuf, title: String) -> Self {
-        Self { file, title, zoom: 1.0 }
+        Self { file, title, zoom: 1.0, laid: 1.0, scroll: egui::Vec2::ZERO, sharp: 1.0, pinched: 0.0, shown: HashMap::new() }
+    }
+
+    /// Lets go of the large pages that `keep` does not ask to stay.
+    fn release(&mut self, ctx: &egui::Context, keep: impl Fn(u32) -> bool) {
+        self.shown.retain(|number, (picture, width)| {
+            let stays = *width <= KEPT || keep(*number);
+            if !stays {
+                widgets::forget_picture(ctx, picture);
+            }
+            stays
+        });
     }
 }
 
-const ZOOMS: [f32; 6] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
+/// The zoom steps of the −/+ buttons; the first and last are the limits of
+/// a pinch too.
+const ZOOMS: [f32; 8] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0, 4.0];
+/// Where a double click on a page at 100% zooms to.
+const DOUBLE: f32 = 2.0;
+/// How long a pinch must rest before the pages are rendered at the new size.
+const SETTLE: f64 = 0.25;
+/// Gap under each page.
+const GAP: f32 = 12.0;
 /// Space inside the viewer's frame, around its content.
 const PADDING: f32 = 16.0;
 /// Gap kept between the viewer and the window's edges.
@@ -279,13 +323,13 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                         crate::platform::open(&viewer.file);
                     }
                     ui.add_space(8.0);
-                    let at = ZOOMS.iter().position(|z| *z == viewer.zoom).unwrap_or(2);
-                    if widgets::button(ui, None, "+", Kind::Secondary).on_hover_text(tr("Zoom in", "Perbesar")).clicked() {
-                        viewer.zoom = ZOOMS[(at + 1).min(ZOOMS.len() - 1)];
+                    let hint = tr("Zoom in (or pinch, Ctrl/Cmd+scroll, double click)", "Perbesar (atau cubit, Ctrl/Cmd+gulir, klik dua kali)");
+                    if widgets::button(ui, None, "+", Kind::Secondary).on_hover_text(hint).clicked() {
+                        viewer.zoom = zoom::stepped(viewer.zoom, &ZOOMS, true);
                     }
                     ui.label(rich_zoom(viewer.zoom, &p));
                     if widgets::button(ui, None, "−", Kind::Secondary).on_hover_text(tr("Zoom out", "Perkecil")).clicked() {
-                        viewer.zoom = ZOOMS[at.saturating_sub(1)];
+                        viewer.zoom = zoom::stepped(viewer.zoom, &ZOOMS, false);
                     }
                 },
             );
@@ -295,19 +339,67 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                 ui.label(rich(note, 13.0, Weight::Regular, p.muted));
                 return;
             };
-            let width = (ui.available_width() - 24.0) * viewer.zoom;
+            // A page's width at 100%, and the part of the viewer the pages scroll in.
+            let fitted = ui.available_width() - 24.0;
+            let area = egui::Rect::from_min_size(ui.cursor().min, ui.available_size());
+            let view = area.size();
+            let now = ui.input(|i| i.time);
+            // The −/+ buttons zoom around the middle, a gesture around the pointer.
+            let mut anchor = view / 2.0;
+            if let Some(gesture) = zoom::gesture(ui, area) {
+                anchor = gesture.anchor;
+                if gesture.double {
+                    viewer.zoom = zoom::toggled(viewer.zoom, 1.0, DOUBLE);
+                } else {
+                    viewer.zoom = zoom::scaled(viewer.zoom, gesture.factor, ZOOMS[0], ZOOMS[ZOOMS.len() - 1]);
+                    viewer.pinched = now;
+                }
+            }
+            if viewer.sharp != viewer.zoom {
+                if now - viewer.pinched >= SETTLE {
+                    viewer.sharp = viewer.zoom;
+                } else {
+                    ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(SETTLE));
+                }
+            }
+            let width = fitted * viewer.zoom;
             let height = width * info.aspect;
             let ppp = ui.ctx().pixels_per_point();
-            ScrollArea::both().auto_shrink(false).show_rows(ui, height + 12.0, info.pages as usize, |ui, rows| {
-                for index in rows {
+            let mut scroll = ScrollArea::both().auto_shrink(false).scroll_source(egui::scroll_area::ScrollSource::ALL);
+            if viewer.zoom != viewer.laid {
+                let before = fitted * viewer.laid;
+                // All the pages as one column, each with its gap.
+                let column = |width: f32| Span { pad: 0.0, size: info.pages as f32 * (width * info.aspect + GAP + ui.spacing().item_spacing.y) };
+                scroll = scroll.scroll_offset(vec2(
+                    zoom::keep(anchor.x, viewer.scroll.x, Span::centred(before, view.x), Span::centred(width, view.x), view.x),
+                    zoom::keep(anchor.y, viewer.scroll.y, column(before), column(width), view.y),
+                ));
+                viewer.laid = viewer.zoom;
+            }
+            let wanted = fitted * viewer.sharp * ppp;
+            let out = scroll.show_rows(ui, height + GAP, info.pages as usize, |ui, rows| {
+                for index in rows.clone() {
                     let number = index as u32 + 1;
-                    let (row, _) = ui.allocate_exact_size(vec2(width.max(ui.available_width()), height + 12.0), Sense::hover());
+                    let (row, _) = ui.allocate_exact_size(vec2(width.max(ui.available_width()), height + GAP), Sense::hover());
                     let x = row.left() + ((row.width() - width) / 2.0).max(0.0);
                     let rect = egui::Rect::from_min_size(egui::pos2(x, row.top()), vec2(width, height));
                     ui.painter().rect_filled(rect, R_MD, egui::Color32::WHITE);
-                    match page(ui.ctx(), &viewer.file, number, width * ppp) {
-                        Some(picture) => {
-                            if let Some(uri) = widgets::picture_uri(ui.ctx(), &picture) {
+                    // The page at the wanted size once its texture is there;
+                    // until then the one already on screen, stretched.
+                    let fresh = page(ui.ctx(), &viewer.file, number, wanted).filter(|picture| viewer.shown.get(&number).is_none_or(|(old, _)| old != picture));
+                    if let Some(picture) = fresh {
+                        let loaded = widgets::picture_uri(ui.ctx(), &picture).is_some_and(|uri| {
+                            matches!(egui::Image::from_uri(uri).load_for_size(ui.ctx(), rect.size()), Ok(egui::load::TexturePoll::Ready { .. }))
+                        });
+                        if loaded || !viewer.shown.contains_key(&number) {
+                            if let Some((old, _)) = viewer.shown.insert(number, (picture, render_width(wanted))) {
+                                widgets::forget_picture(ui.ctx(), &old);
+                            }
+                        }
+                    }
+                    match viewer.shown.get(&number) {
+                        Some((picture, _)) => {
+                            if let Some(uri) = widgets::picture_uri(ui.ctx(), picture) {
                                 egui::Image::from_uri(uri).fit_to_exact_size(rect.size()).paint_at(ui, rect);
                             }
                         }
@@ -322,9 +414,15 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                     }
                     ui.painter().rect_stroke(rect, R_MD, Stroke::new(1.0, p.border), StrokeKind::Inside);
                 }
+                rows
             });
+            viewer.scroll = out.state.clamped_offset();
+            // Large pages a couple of rows out of sight give their memory back.
+            let near = (out.inner.start as u32).saturating_sub(1)..=out.inner.end as u32 + 2;
+            viewer.release(ui.ctx(), |number| near.contains(&number));
         });
     if close || modal.should_close() || ctx.input(|i| i.key_pressed(Key::Escape)) {
+        viewer.release(ctx, |_| false);
         *open = None;
     }
 }
