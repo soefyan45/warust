@@ -30,7 +30,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use registry::Registry;
 use session::{Body, Running};
-pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker};
+pub use media::{MAX_BYTES as MAX_FILE_BYTES, make_sticker, stream_dir};
 pub use registry::{DEFAULT_DEVICE_NAME, Device, DeviceKind, NAME_MAX, clean_name};
 pub use session::mask_phone;
 pub use settings::Settings;
@@ -139,6 +139,9 @@ pub struct Shared {
     /// Downloads by message id: `None` while running, else why it failed.
     /// Finished downloads leave the map and show as the message's file.
     pub downloads: Arc<HashMap<String, Option<String>>>,
+    /// Videos fetched to be played without keeping them (#167), by message
+    /// id: the file in the stream cache.
+    pub streamed: Arc<HashMap<String, PathBuf>>,
     pub settings: Arc<Settings>,
     /// Latest webhook deliveries, newest first.
     pub webhooks: Arc<Vec<HookDelivery>>,
@@ -409,6 +412,9 @@ pub enum Command {
     SendContact { id: String, chat: String, name: String, number: String },
     /// Download a received photo, video, sticker, voice note or document.
     Download { id: String, msg_id: String },
+    /// Fetch a video into the stream cache to play it, without keeping it
+    /// with the number's files (#167).
+    Stream { id: String, msg_id: String },
     /// Send a message that failed again (#70).
     Retry { id: String, msg_id: String },
     /// Send the "seen" receipt for a status update shown in the viewer.
@@ -648,6 +654,13 @@ impl Updater {
         self.ctx.request_repaint();
     }
 
+    pub(crate) fn set_streamed(&self, msg_id: &str, file: PathBuf) {
+        if let Ok(mut shared) = self.shared.lock() {
+            Arc::make_mut(&mut shared.streamed).insert(msg_id.to_owned(), file);
+        }
+        self.ctx.request_repaint();
+    }
+
     pub(crate) fn downloading(&self, msg_id: &str) -> bool {
         self.shared.lock().is_ok_and(|s| matches!(s.downloads.get(msg_id), Some(None)))
     }
@@ -862,6 +875,8 @@ async fn run(
     let api_context = api::Context { commands: api_commands, shared: state.shared.clone(), data_dir: data_dir.clone() };
     let mut api_server = api::start(&api_context, &state);
     let mut registry = Registry::load(&data_dir);
+    // Videos played last time without keeping them are not kept (#167).
+    let _ = std::fs::remove_dir_all(media::stream_dir(&data_dir));
     let mut running: HashMap<String, Running> = HashMap::new();
     let mut stores: HashMap<String, Arc<Mutex<Store>>> = HashMap::new();
     // Dev aid: WARUST_OFFLINE=1 shows the saved chats without connecting.
@@ -1166,7 +1181,17 @@ async fn run(
                     let _ = std::fs::remove_file(&path);
                 }
             },
-            Command::Download { msg_id, .. } if state.downloading(&msg_id) => {}
+            Command::Download { msg_id, .. } | Command::Stream { msg_id, .. } if state.downloading(&msg_id) => {}
+            Command::Stream { id, msg_id } => {
+                let media = state.book(&id).and_then(|book| book.media_of(&msg_id).map(|m| m.raw.clone()));
+                match (running.get(&id), media) {
+                    (Some(r), Some(media)) if state.connected(&id) => r.stream(&id, msg_id, media, &state),
+                    (_, media) => {
+                        let why = if media.is_none() { crate::i18n::tr("This file is no longer available", "File ini sudah tidak tersedia") } else { crate::i18n::tr("This number is not connected", "Nomor ini tidak tersambung") };
+                        state.set_download(&msg_id, Some(Some(why.to_owned())));
+                    }
+                }
+            }
             Command::StatusSeen { id, msg_id } => {
                 let post = state.book(&id).and_then(|book| {
                     let post = book.statuses.iter().find(|s| s.id == msg_id)?;

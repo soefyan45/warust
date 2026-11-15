@@ -251,6 +251,10 @@ pub struct State {
     pub focus_composer: bool,
     /// "Tautkan nomor" was clicked in the Inbox's device panel.
     pub add_number_requested: bool,
+    /// A video asked to play without keeping it (#167): its message id, its
+    /// title, and whether it is too long for the in-app player. Opened once
+    /// it is in the stream cache.
+    pub stream_open: Option<(String, String, bool)>,
     /// "Buka perangkat" was clicked on the Status page's note about a number
     /// that is not connected.
     pub devices_requested: bool,
@@ -1357,6 +1361,7 @@ impl App {
                     };
                 });
                 pdf::show(ui.ctx(), &mut w.state.pdf_view);
+                screens::inbox::open_streamed(&mut w.state);
                 movie_view::show(ui.ctx(), &mut w.state.video_view);
                 photo_view::show(ui.ctx(), &mut w.state.photo_view, &w.state.full_avatars);
                 if locked {
@@ -1742,6 +1747,8 @@ impl eframe::App for App {
         // A change made in the very last frame is kept too.
         self.view.follow(self.screen, &mut self.state, |_| false);
         self.backend.close_notifications();
+        // Videos played without keeping them go with warust (#167).
+        let _ = std::fs::remove_dir_all(backend::stream_dir(crate::platform::data_dir()));
     }
 
     /// Runs before every `ui`, and on its own while the main window is hidden
@@ -1808,6 +1815,7 @@ impl eframe::App for App {
         self.view.follow(self.screen, &mut self.state, |id| !main_set && sessions.iter().any(|s| s.id == id));
         self.avatars = snapshot.avatars;
         self.state.full_avatars = snapshot.full_avatars;
+        screens::inbox::set_streamed(snapshot.streamed.clone());
         self.state.number_checks = snapshot.number_checks.clone();
         for w in &mut self.windows {
             w.state.number_checks = snapshot.number_checks.clone();
@@ -1859,6 +1867,7 @@ impl eframe::App for App {
         widgets::set_wallpapers(&self.settings);
         widgets::set_number_looks(&self.settings);
         screens::inbox::set_auto_photos(self.settings.auto_photos);
+        screens::inbox::set_videos_direct(self.settings.videos_direct);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.
@@ -2095,6 +2104,7 @@ impl eframe::App for App {
         self.number_look_dialog(ui.ctx());
         self.confirm_relink(ui.ctx());
         pdf::show(ui.ctx(), &mut self.state.pdf_view);
+        screens::inbox::open_streamed(&mut self.state);
         movie_view::show(ui.ctx(), &mut self.state.video_view);
         photo_view::show(ui.ctx(), &mut self.state.photo_view, &self.state.full_avatars);
         // "Sedang mengetik" for the chat on screen while its reply is typed.

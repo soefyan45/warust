@@ -1536,6 +1536,9 @@ enum MediaBox {
 /// What a click on media asks for.
 enum MediaClick {
     Download(String),
+    /// Play a video without keeping it (#167): message id, title, and
+    /// whether it is too long for the in-app player.
+    Stream(String, String, bool),
     /// A downloaded PDF and its title, for the in-app viewer.
     OpenPdf(PathBuf, String),
     /// "Call back" on a call's line: a video call (true) or a voice call.
@@ -2065,7 +2068,13 @@ fn paint_media(
         return paint_call_log(ui, p, rect, m, media);
     }
     let state = media_action(m, media, downloads);
-    let action = state.label();
+    // A video not downloaded plays on a click without being kept (#167).
+    let direct = media.kind == "video" && media.file.is_none() && VIDEOS_DIRECT.load(std::sync::atomic::Ordering::Relaxed);
+    let action = match state {
+        MediaState::Download if direct => tr("Play", "Putar"),
+        MediaState::Downloading if direct => tr("Loading…", "Memuat…"),
+        _ => state.label(),
+    };
     let response = ui.interact(rect, ui.scope_id().with(("media", &m.id)), Sense::click());
     match shown {
         MediaBox::Picture(source, _) => {
@@ -2084,7 +2093,8 @@ fn paint_media(
                     vec2(galley.size().x + 34.0, 22.0),
                 );
                 ui.painter().rect_filled(pill, 11.0, Color32::from_black_alpha(160));
-                icons::paint(ui, Rect::from_min_size(pill.min + vec2(8.0, 3.0), vec2(16.0, 16.0)), "download", 14.0, Color32::WHITE);
+                let icon = if direct && state == MediaState::Download { "play" } else { "download" };
+                icons::paint(ui, Rect::from_min_size(pill.min + vec2(8.0, 3.0), vec2(16.0, 16.0)), icon, 14.0, Color32::WHITE);
                 ui.painter().galley(pos2(pill.left() + 26.0, pill.center().y - galley.size().y / 2.0), galley, Color32::WHITE);
             }
         }
@@ -2151,6 +2161,7 @@ fn paint_media(
         _ => match state {
             MediaState::Open if matches!(shown, MediaBox::Document { pdf: Some(_), .. }) => tr("View PDF", "Lihat PDF").to_owned(),
             MediaState::Open => tr("Open with the default app", "Buka dengan aplikasi bawaan").to_owned(),
+            MediaState::Download if direct => tr("Play without downloading", "Putar tanpa download").to_owned(),
             MediaState::Download | MediaState::Retry => tr("Download this file", "Unduh file ini").to_owned(),
             _ => action.to_owned(),
         },
@@ -2177,6 +2188,7 @@ fn paint_media(
             None
         }
         (Some(file), _) => Some(MediaClick::Preview(file.clone(), media_title(media))),
+        (None, _) if direct => Some(MediaClick::Stream(m.id.clone(), media_title(media), media.seconds.is_some_and(|s| s as f32 > movie::MAX_SECONDS))),
         (None, _) => Some(MediaClick::Download(m.id.clone())),
     }
 }
@@ -2668,6 +2680,13 @@ fn retry_link(ui: &Ui, p: &Palette, right_top: egui::Pos2, msg_id: &str, why: &s
 fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, chat: &Chat, commands: &mut Vec<Command>) {
     match event {
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
+        // Played once it is in the stream cache: at once when it already is.
+        MsgEvent::Media(MediaClick::Stream(msg_id, title, long)) => {
+            if streamed(&msg_id).is_none() {
+                commands.push(Command::Stream { id: session.id.clone(), msg_id: msg_id.clone() });
+            }
+            state.stream_open = Some((msg_id, title, long));
+        }
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
         MsgEvent::Media(MediaClick::Preview(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
         MsgEvent::Phone(number) => {
@@ -2721,7 +2740,7 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         MsgEvent::Menu(MsgAction::Retry, msg_id) => commands.push(Command::Retry { id: session.id.clone(), msg_id }),
         MsgEvent::Menu(MsgAction::Save, msg_id) => {
             let Some(media) = chat.messages.iter().find(|m| m.id == msg_id).and_then(|m| m.media.as_ref()) else { return };
-            if let Some(file) = media.file.clone() {
+            if let Some(file) = media.file.clone().or_else(|| streamed(&msg_id)) {
                 let name = media.name.clone().or_else(|| file.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "warust".to_owned());
                 crate::platform::save_copy(file, name);
             }
@@ -2890,7 +2909,7 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool, group: bool) -> Option<M
     if group && !m.from_me && ui.button(tr("Reply privately", "Balas secara pribadi")).clicked() {
         action = Some(MsgAction::ReplyPrivately);
     }
-    if m.media.as_ref().is_some_and(|media| media.file.is_some()) && ui.button(tr("Save…", "Simpan…")).clicked() {
+    if m.media.as_ref().is_some_and(|media| media.file.is_some() || streamed(&m.id).is_some()) && ui.button(tr("Save…", "Simpan…")).clicked() {
         action = Some(MsgAction::Save);
     }
     // Text only for now; media forwarding is stage 2.
@@ -3617,6 +3636,40 @@ static AUTO_PHOTOS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 
 pub fn set_auto_photos(on: bool) {
     AUTO_PHOTOS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Chat videos play without being downloaded first (#167); set from the
+/// settings every frame.
+static VIDEOS_DIRECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_videos_direct(on: bool) {
+    VIDEOS_DIRECT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The videos in the stream cache (#167); set from the backend every frame.
+static STREAMED: std::sync::Mutex<Option<std::sync::Arc<std::collections::HashMap<String, PathBuf>>>> = std::sync::Mutex::new(None);
+
+pub fn set_streamed(streamed: std::sync::Arc<std::collections::HashMap<String, PathBuf>>) {
+    if let Ok(mut slot) = STREAMED.lock() {
+        *slot = Some(streamed);
+    }
+}
+
+fn streamed(msg_id: &str) -> Option<PathBuf> {
+    STREAMED.lock().ok()?.as_ref()?.get(msg_id).cloned()
+}
+
+/// Opens the video asked to play without keeping it (#167) once it is in
+/// the stream cache: in the in-app player, or the system's when it is long.
+pub fn open_streamed(state: &mut State) {
+    let Some((msg_id, ..)) = &state.stream_open else { return };
+    let Some(file) = streamed(msg_id) else { return };
+    let Some((_, title, long)) = state.stream_open.take() else { return };
+    if long {
+        open_file(&file);
+    } else {
+        state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title));
+    }
 }
 
 /// What can be clicked in a bubble's text.

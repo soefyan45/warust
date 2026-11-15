@@ -193,6 +193,26 @@ impl Running {
         });
     }
 
+    /// Like `download`, into the stream cache and not kept with the number's
+    /// files: a video played on a click (#167).
+    pub fn stream(&self, id: &str, msg_id: String, media: Value, state: &Updater) {
+        state.set_download(&msg_id, Some(None));
+        let (client, id, state) = (self.client.clone(), id.to_owned(), state.clone());
+        tokio::spawn(async move {
+            let dir = media::stream_dir(&state.data_dir);
+            match media::download(&client, &media, &dir, &msg_id).await {
+                Ok(path) => {
+                    state.set_download(&msg_id, None);
+                    state.set_streamed(&msg_id, path);
+                }
+                Err(e) => {
+                    log::warn!("session {id}: stream failed: {e}");
+                    state.set_download(&msg_id, Some(Some(e)));
+                }
+            }
+        });
+    }
+
     /// Subscribes to the contact's presence, so their typing reaches us.
     pub fn watch_presence(&self, id: &str, chat: &str) {
         let Ok(jid) = chat.parse::<Jid>() else {
