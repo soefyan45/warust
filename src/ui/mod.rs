@@ -163,6 +163,10 @@ pub struct State {
     pub video_view: Option<movie_view::Viewer>,
     /// Profile photo open in the pop-up viewer (#92), and the full-size ones fetched.
     pub photo_view: Option<photo_view::Viewer>,
+    /// Phone numbers clicked in messages and whether they use WhatsApp (#162).
+    pub number_checks: std::sync::Arc<std::collections::HashMap<String, backend::NumberCheck>>,
+    /// The phone number dialog: the number it was clicked in and the digits.
+    pub number_ask: Option<(String, String)>,
     pub full_avatars: std::sync::Arc<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
     /// "Teruskan ke…" dialog for a message of the open chat.
     pub forward: Option<forward::Dialog>,
@@ -1644,6 +1648,10 @@ impl eframe::App for App {
         self.view.follow(self.screen, &mut self.state, |id| !main_set && sessions.iter().any(|s| s.id == id));
         self.avatars = snapshot.avatars;
         self.state.full_avatars = snapshot.full_avatars;
+        self.state.number_checks = snapshot.number_checks.clone();
+        for w in &mut self.windows {
+            w.state.number_checks = snapshot.number_checks.clone();
+        }
         self.downloads = snapshot.downloads;
         self.settings = snapshot.settings;
         self.open_on_main();

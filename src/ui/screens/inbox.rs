@@ -315,6 +315,7 @@ pub fn show(
                     on_message_event(event, state, session, chat, &mut commands);
                 }
                 delete_dialog(ui.ctx(), state, &mut commands);
+                number_dialog(ui.ctx(), state, session);
                 contact_dialog(ui.ctx(), state, session, &mut commands);
             });
         });
@@ -1988,6 +1989,9 @@ enum MsgEvent {
     Menu(MsgAction, String),
     /// A group member's face or name was used (#136): their JID.
     Member(MemberAction, String),
+    /// A phone number in a message was clicked (#162): digits with the
+    /// country code.
+    Phone(String),
 }
 
 /// How long WhatsApp lets a sender edit a message.
@@ -2014,6 +2018,69 @@ pub struct DeleteAsk {
     chat: String,
     msg_id: String,
     everyone: bool,
+}
+
+/// `628527…` as "+62 852-7199-5583" (Indonesia) or "+<digits>" (#162);
+/// masked like any number while anti-peek hides numbers.
+fn phone_display(number: &str) -> String {
+    if crate::ui::privacy::hide_names() {
+        return super::short_jid(&format!("{number}@s.whatsapp.net"));
+    }
+    match number.strip_prefix("62") {
+        Some(rest) if rest.len() >= 9 => format!("+62 {}-{}-{}", &rest[..3], &rest[3..7], &rest[7..]),
+        _ => format!("+{number}"),
+    }
+}
+
+/// A phone number clicked in a message (#162): whether it uses WhatsApp,
+/// then "Chat on WhatsApp" (on the same linked number) or "Copy number".
+fn number_dialog(ctx: &egui::Context, state: &mut State, session: &SessionView) {
+    let Some((id, number)) = state.number_ask.clone().filter(|(id, _)| *id == session.id) else { return };
+    let p = theme::palette(ctx);
+    let check = state.number_checks.get(&crate::backend::Typing::key(&id, &number)).cloned();
+    let (mut close, mut open) = (false, None);
+    let modal = egui::Modal::new(egui::Id::unique("phone_number"))
+        .frame(egui::Frame::NONE.fill(p.panel).stroke(Stroke::new(1.0, p.border_strong)).corner_radius(R_LG).inner_margin(egui::Margin::same(24)))
+        .show(ctx, |ui| {
+            ui.set_width(360.0);
+            ui.spacing_mut().item_spacing.y = 12.0;
+            ui.label(rich(&phone_display(&number), 18.0, Weight::SemiBold, p.text));
+            let (text, color) = match &check {
+                None | Some(crate::backend::NumberCheck::Checking) => (tr("Checking WhatsApp…", "Memeriksa WhatsApp…").to_owned(), p.muted),
+                Some(crate::backend::NumberCheck::OnWhatsApp(_)) => (crate::trf!("On WhatsApp · chat from {}", "Ada di WhatsApp · chat dari {}", super::devices::chip_label(session)), p.accent_text),
+                Some(crate::backend::NumberCheck::Not) => (tr("This number is not on WhatsApp.", "Nomor ini tidak memakai WhatsApp.").to_owned(), p.muted),
+                Some(crate::backend::NumberCheck::Failed(why)) => (crate::trf!("Could not check: {why}", "Tidak bisa diperiksa: {why}"), p.red_text),
+            };
+            ui.add(egui::Label::new(rich(&text, 13.0, Weight::Regular, color)).wrap());
+            if matches!(check, None | Some(crate::backend::NumberCheck::Checking)) {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(200));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let jid = match &check {
+                    Some(crate::backend::NumberCheck::OnWhatsApp(jid)) => Some(jid.clone()),
+                    _ => None,
+                };
+                let chat = ui.add_enabled_ui(jid.is_some(), |ui| widgets::button(ui, Some("message-circle"), tr("Chat on WhatsApp", "Chat di WhatsApp"), Kind::Primary)).inner;
+                if chat.clicked() {
+                    open = jid;
+                }
+                if widgets::button(ui, Some("copy"), tr("Copy number", "Salin nomor"), Kind::Secondary).clicked() {
+                    ui.ctx().copy_text(format!("+{number}"));
+                    close = true;
+                }
+                if widgets::button(ui, None, tr("Close", "Tutup"), Kind::Secondary).clicked() {
+                    close = true;
+                }
+            });
+        });
+    if let Some(jid) = open {
+        let existing = session.book.chats.iter().find(|c| c.jid == jid);
+        open_chat(state, &session.id, &jid, existing);
+        close = true;
+    }
+    if close || modal.should_close() {
+        state.number_ask = None;
+    }
 }
 
 /// "Delete message?": for everyone (our own recent messages), for me, or not.
@@ -2376,6 +2443,10 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
         MsgEvent::Media(MediaClick::Preview(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
+        MsgEvent::Phone(number) => {
+            commands.push(Command::CheckNumber { id: session.id.clone(), number: number.clone() });
+            state.number_ask = Some((session.id.clone(), number));
+        }
         MsgEvent::Media(MediaClick::Call(video)) => {
             if state.call_now.is_none() && !chat.is_group() {
                 commands.push(Command::PlaceCall { id: session.id.clone(), chat: chat.jid.clone(), video });
@@ -2969,10 +3040,13 @@ fn messages(
                             let link = link_at(ui, &text, at);
                             let label = ui.put(Rect::from_min_size(at, text.size()), egui::Label::new(text).selectable(true));
                             // A click (not a drag that selects text) on a link opens it.
-                            if let Some(url) = link.filter(|_| label.hovered()) {
+                            if let Some(link) = link.filter(|_| label.hovered()) {
                                 label.ctx.set_cursor_icon(CursorIcon::PointingHand);
                                 if ui.input(|i| i.pointer.primary_clicked()) {
-                                    crate::platform::open_url(&url);
+                                    match link {
+                                        Link::Url(url) => crate::platform::open_url(&url),
+                                        Link::Phone(number) => clicked = Some(MsgEvent::Phone(number)),
+                                    }
                                 }
                             }
                             label.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
@@ -3278,18 +3352,28 @@ fn save_pasted_image(image: &egui::ColorImage, dir: &Path) -> Result<PathBuf, St
     Ok(path)
 }
 
-/// The web link under the pointer in a bubble's text laid out at `at`.
-fn link_at(ui: &Ui, text: &std::sync::Arc<egui::Galley>, at: egui::Pos2) -> Option<String> {
+/// What can be clicked in a bubble's text.
+enum Link {
+    Url(String),
+    /// A phone number, as digits with the country code (#162).
+    Phone(String),
+}
+
+/// The web link or phone number under the pointer in a bubble's text laid
+/// out at `at`.
+fn link_at(ui: &Ui, text: &std::sync::Arc<egui::Galley>, at: egui::Pos2) -> Option<Link> {
     let pointer = ui.input(|i| i.pointer.hover_pos())?;
     let rect = Rect::from_min_size(at, text.size());
     if !rect.contains(pointer) {
         return None;
     }
     let index: usize = text.cursor_from_pos(pointer - at).index.into();
+    let hit = |range: &std::ops::Range<usize>| range.start <= index && index < range.end;
     markup::links(text.text())
         .into_iter()
-        .find(|(range, _)| range.start <= index && index < range.end)
-        .map(|(_, url)| url)
+        .find(|(range, _)| hit(range))
+        .map(|(_, url)| Link::Url(url))
+        .or_else(|| markup::phones(text.text()).into_iter().find(|(range, _)| hit(range)).map(|(_, number)| Link::Phone(number)))
 }
 
 /// The file waiting to be sent: icon, name, size and a remove button.
@@ -4923,6 +5007,7 @@ fn compact_chat(
                 on_message_event(event, state, session, chat, &mut commands);
             }
             delete_dialog(ui.ctx(), state, &mut commands);
+            number_dialog(ui.ctx(), state, session);
             contact_dialog(ui.ctx(), state, session, &mut commands);
         });
     });
