@@ -513,13 +513,9 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
 
     // The timer: frozen while paused or typing; at the end, the next update or poster.
     let now = std::time::Instant::now();
-    let elapsed = match &state.status_shown {
-        Some((id, since)) if id == &post.id => since.elapsed(),
-        _ => std::time::Duration::ZERO,
-    };
-    let paused = state.status_paused || typing;
-    // Held, not paused, until the photo or video has loaded (#167); a failed
-    // one waits for a retry or the arrows rather than running out unseen.
+    // Held at the start, not paused, until the photo or video has loaded
+    // (#167); a failed one waits for a retry or the arrows rather than
+    // running out unseen.
     let loading = post.media.as_ref().is_some_and(|m| {
         (m.kind == "image" || m.kind == "video")
             && match &m.file {
@@ -527,6 +523,11 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
                 Some(_) => m.kind == "video" && movie::available() && movie::status(&post.id).is_none_or(|s| s.loading),
             }
     });
+    let elapsed = match &state.status_shown {
+        Some((id, since)) if id == &post.id && !loading => since.elapsed(),
+        _ => std::time::Duration::ZERO,
+    };
+    let paused = state.status_paused || typing;
     let hold = paused || loading;
     if hold || !matches!(&state.status_shown, Some((id, _)) if id == &post.id) {
         state.status_shown = Some((post.id.clone(), now - elapsed));
