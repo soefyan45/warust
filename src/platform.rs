@@ -99,6 +99,41 @@ pub fn pick_media(title: &str) -> Option<PathBuf> {
     pick(title, Some((crate::i18n::tr("Photos & videos", "Foto & video"), &["jpg", "jpeg", "png", "mp4", "m4v", "mov"])))
 }
 
+/// Asks where to save a copy named `name` with the OS's save dialog; blocks,
+/// so call it off the UI thread. `None` when cancelled or unavailable (#167).
+pub fn save_file_as(title: &str, name: &str) -> Option<PathBuf> {
+    let output = if cfg!(windows) {
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.SaveFileDialog; \
+             $d.Title = '{}'; $d.FileName = '{}'; if ($d.ShowDialog() -eq 'OK') {{ [Console]::OutputEncoding = [Text.Encoding]::UTF8; $d.FileName }}",
+            powershell_quote(title),
+            powershell_quote(name)
+        );
+        command("powershell").args(["-NoProfile", "-STA", "-Command", &script]).output()
+    } else if cfg!(target_os = "macos") {
+        let script = format!("POSIX path of (choose file name with prompt \"{}\" default name \"{}\")", applescript_quote(title), applescript_quote(name));
+        command("osascript").args(["-e", &script]).output()
+    } else {
+        command("zenity").args(["--file-selection", "--save", "--confirm-overwrite", &format!("--title={title}"), &format!("--filename={name}")]).output()
+    };
+    let output = output.inspect_err(|e| log::warn!("save dialog failed: {e}")).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let path = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim_end_matches(['\r', '\n']));
+    (!path.as_os_str().is_empty()).then_some(path)
+}
+
+/// Saves a copy of `file` where the user picks, off the UI thread (#167).
+pub fn save_copy(file: PathBuf, name: String) {
+    std::thread::spawn(move || {
+        let Some(dest) = save_file_as(crate::i18n::tr("Save a copy", "Simpan salinan"), &name) else { return };
+        if let Err(e) = std::fs::copy(&file, &dest) {
+            log::warn!("cannot save a copy: {e}");
+        }
+    });
+}
+
 /// The dialog itself, limited to `filter` (its label and extensions) when given.
 fn pick(title: &str, filter: Option<(&str, &[&str])>) -> Option<PathBuf> {
     let output = if cfg!(windows) {

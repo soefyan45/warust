@@ -2155,8 +2155,10 @@ fn paint_media(
             _ => action.to_owned(),
         },
     };
-    // Stickers download by themselves once on screen, like in WhatsApp.
-    let auto = auto_stickers && matches!(shown, MediaBox::Sticker(None)) && state == MediaState::Download && ui.is_rect_visible(rect);
+    // Stickers download by themselves once on screen, like in WhatsApp, and
+    // photos too unless turned off (#167); videos and documents on a click.
+    let photo = media.kind == "image" && matches!(shown, MediaBox::Picture(..)) && AUTO_PHOTOS.load(std::sync::atomic::Ordering::Relaxed);
+    let auto = ((auto_stickers && matches!(shown, MediaBox::Sticker(None))) || photo) && state == MediaState::Download && ui.is_rect_visible(rect);
     if auto {
         return Some(MediaClick::Download(m.id.clone()));
     }
@@ -2196,6 +2198,8 @@ enum MsgAction {
     Retry,
     /// Answer a group message in a private chat with its sender (#136).
     ReplyPrivately,
+    /// Keep a copy of the downloaded photo, video or file (#167).
+    Save,
 }
 
 /// What can be done with a group member from their message (#136).
@@ -2715,6 +2719,13 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
             state.delete_ask = Some(DeleteAsk { session: session.id.clone(), chat: chat.jid.clone(), msg_id, everyone });
         }
         MsgEvent::Menu(MsgAction::Retry, msg_id) => commands.push(Command::Retry { id: session.id.clone(), msg_id }),
+        MsgEvent::Menu(MsgAction::Save, msg_id) => {
+            let Some(media) = chat.messages.iter().find(|m| m.id == msg_id).and_then(|m| m.media.as_ref()) else { return };
+            if let Some(file) = media.file.clone() {
+                let name = media.name.clone().or_else(|| file.file_name().map(|n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "warust".to_owned());
+                crate::platform::save_copy(file, name);
+            }
+        }
         // The sender's own chat on the same number, with the group message in
         // the reply bar; the quote keeps pointing at the group (#136).
         MsgEvent::Menu(MsgAction::ReplyPrivately, msg_id) => {
@@ -2878,6 +2889,9 @@ fn message_menu(ui: &mut Ui, m: &ChatMsg, pinned: bool, group: bool) -> Option<M
     }
     if group && !m.from_me && ui.button(tr("Reply privately", "Balas secara pribadi")).clicked() {
         action = Some(MsgAction::ReplyPrivately);
+    }
+    if m.media.as_ref().is_some_and(|media| media.file.is_some()) && ui.button(tr("Save…", "Simpan…")).clicked() {
+        action = Some(MsgAction::Save);
     }
     // Text only for now; media forwarding is stage 2.
     // Text, or a file once it is downloaded (#6 stage 2).
@@ -3596,6 +3610,13 @@ fn save_pasted_image(image: &egui::ColorImage, dir: &Path) -> Result<PathBuf, St
     }
     picture.save(&path).map_err(|e| e.to_string())?;
     Ok(path)
+}
+
+/// Chat photos load by themselves (#167); set from the settings every frame.
+static AUTO_PHOTOS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_auto_photos(on: bool) {
+    AUTO_PHOTOS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// What can be clicked in a bubble's text.

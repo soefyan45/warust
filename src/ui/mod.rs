@@ -1844,6 +1844,7 @@ impl eframe::App for App {
         }
         widgets::set_wallpapers(&self.settings);
         widgets::set_number_looks(&self.settings);
+        screens::inbox::set_auto_photos(self.settings.auto_photos);
         if self.applied_template.as_deref() != Some(self.settings.template.as_str()) {
             let template = theme::Template::from_key(&self.settings.template);
             // Forest opens on Ringkasan, like its design; Classic on Nomor.

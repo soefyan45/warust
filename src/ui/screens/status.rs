@@ -98,9 +98,7 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
                 match downloads.get(&post.id) {
                     Some(None) => Some(tr("Downloading…", "Mengunduh…")),
                     Some(Some(_)) => Some(tr("Failed, click to retry", "Gagal, klik untuk ulangi")),
-                    None if media.downloadable() => {
-                        Some(if media.kind == "image" { tr("Loading…", "Memuat…") } else { tr("Click to download", "Klik untuk unduh") })
-                    }
+                    None if media.downloadable() => Some(tr("Loading…", "Memuat…")),
                     None => Some(tr("Not available", "Tidak tersedia")),
                 }
             };
@@ -116,8 +114,8 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
             }
             let response = ui.interact(card, ui.scope_id().with(("status_media", &post.id)), Sense::click());
             let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
-            // Photos load by themselves; videos when clicked.
-            let auto = media.kind == "image" && media.file.is_none() && media.downloadable() && !downloads.contains_key(&post.id);
+            // Photos and videos load by themselves once shown (#167).
+            let auto = matches!(media.kind.as_str(), "image" | "video") && media.file.is_none() && media.downloadable() && !downloads.contains_key(&post.id);
             let retry = matches!(downloads.get(&post.id), Some(Some(_)));
             if response.clicked() {
                 match &media.file {
@@ -571,6 +569,13 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
         }
     }
 
+    // Esc closes the update, like ← (#167). In the comment box it first only
+    // leaves the box; with the preview open, it closes the preview.
+    if !ui.ctx().text_edit_focused() && state.video_view.is_none() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        state.status_selected = None;
+        state.status_comment.clear();
+    }
+
     // Header: back (phone), who, which update, through which number; pause, menu.
     let title = e.title();
     let head = Rect::from_min_max(pos2(area.left() + pad, area.top() + 28.0), pos2(area.right() - pad, area.top() + 72.0));
@@ -614,6 +619,13 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
         ui.set_min_width(190.0);
         if !post.text.is_empty() && ui.button(tr("Copy text", "Salin teks")).clicked() {
             ui.ctx().copy_text(post.caption());
+        }
+        // A copy of the photo or video, kept where the user picks (#167).
+        if let Some(file) = post.media.as_ref().and_then(|m| m.file.clone()) {
+            if ui.button(tr("Save…", "Simpan…")).clicked() {
+                let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "status".to_owned());
+                crate::platform::save_copy(file, name);
+            }
         }
         if ui.button(crate::trf!("Open chat with {title}", "Buka chat {title}")).clicked() {
             state.open_chat_requested = Some((e.session.id.clone(), e.poster.clone()));
