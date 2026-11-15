@@ -202,13 +202,14 @@ impl<'a> Entry<'a> {
     }
 }
 
-/// Contacts' updates of the last 24 hours on every number (or the one in
-/// `scope`) matching `search`: unseen first, newest first.
+/// Contacts' updates of the last 24 hours on every connected number (or the
+/// one in `scope`) matching `search`: unseen first, newest first. A number
+/// that is not connected shows none: its photos and videos cannot load.
 fn entries<'a>(sessions: &'a [SessionView], scope: Option<&str>, search: &str) -> Vec<Entry<'a>> {
     let now = time::now();
     let query = search.trim().to_lowercase();
     let mut all = Vec::new();
-    for s in sessions.iter().filter(|s| scope.is_none_or(|id| s.id == id)) {
+    for s in sessions.iter().filter(|s| s.status == Status::Connected && scope.is_none_or(|id| s.id == id)) {
         for (poster, posts) in s.book.status_feed(now) {
             let Some(poster) = poster else { continue };
             let entry = Entry { session: s, poster, posts };
@@ -363,6 +364,12 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
     }
     widgets::search(ui, &mut state.status_search, tr("Search name or number", "Cari nama atau nomor"), ui.available_width(), false);
     ui.add_space(8.0);
+    // A number that is not connected: a note instead of its statuses.
+    let scope = state.status_scope.clone();
+    for s in sessions.iter().filter(|s| s.status != Status::Connected && scope.as_ref().is_none_or(|id| &s.id == id)) {
+        offline_note(ui, p, state, s);
+        ui.add_space(8.0);
+    }
     let mut list = entries(sessions, state.status_scope.as_deref(), &state.status_search);
     // All by default; muted contacts can be left out, or shown alone (#101).
     let muted_count = list.iter().filter(|e| e.muted()).count();
@@ -424,6 +431,26 @@ fn poster_list(ui: &mut Ui, p: &Palette, state: &mut State, sessions: &[SessionV
         });
     }
     commands
+}
+
+/// Says that `s` is not connected, so its statuses are not shown, with a
+/// way to the device list where it can be connected again.
+fn offline_note(ui: &mut Ui, p: &Palette, state: &mut State, s: &SessionView) {
+    let connecting = matches!(s.status, Status::Starting | Status::Reconnecting);
+    egui::Frame::new().fill(if connecting { p.raised } else { p.red_soft }).corner_radius(R_LG).inner_margin(Margin::same(12)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.spacing_mut().item_spacing.y = 6.0;
+        if connecting {
+            ui.label(rich(&crate::trf!("{} is connecting…", "{} sedang menyambung…", s.name), 13.0, Weight::SemiBold, p.text));
+            ui.label(rich(tr("Its statuses show once it is connected.", "Statusnya tampil setelah tersambung."), 12.0, Weight::Regular, p.muted));
+        } else {
+            ui.label(rich(&crate::trf!("{} is not connected", "{} tidak terhubung", s.name), 13.0, Weight::SemiBold, p.red_text));
+            ui.label(rich(tr("Its statuses are not shown. Check the device list.", "Statusnya tidak ditampilkan. Cek daftar perangkat."), 12.0, Weight::Regular, p.text));
+            if widgets::button(ui, Some("smartphone"), tr("Open devices", "Buka perangkat"), widgets::Kind::Secondary).clicked() {
+                state.devices_requested = true;
+            }
+        }
+    });
 }
 
 /// Right-click on a poster: mute or unmute their status updates (#101).

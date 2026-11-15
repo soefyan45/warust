@@ -251,6 +251,9 @@ pub struct State {
     pub focus_composer: bool,
     /// "Tautkan nomor" was clicked in the Inbox's device panel.
     pub add_number_requested: bool,
+    /// "Buka perangkat" was clicked on the Status page's note about a number
+    /// that is not connected.
+    pub devices_requested: bool,
     /// Ringkasan "Pesan terbaru": 0 = belum dibalas, 1 = semua.
     pub summary_tab: usize,
     /// Webhook & API: 0 = REST API, 1 = Webhook, 2 = Pemicu.
@@ -668,7 +671,7 @@ impl App {
     fn side_items(&self) -> ([SideItem; 5], [SideItem; 2]) {
         let shown = |n: usize| (n > 0).then(|| n.to_string());
         let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).map(|c| c.unread).sum();
-        let unseen: usize = self.sessions.iter().map(|s| screens::status::unseen_posters(&s.book)).sum();
+        let unseen: usize = self.sessions.iter().filter(|s| s.status == Status::Connected).map(|s| screens::status::unseen_posters(&s.book)).sum();
         let api_on = matches!(self.api, backend::ApiState::Listening(_)).then(|| "API".to_owned());
         (
             [
@@ -1897,7 +1900,7 @@ impl eframe::App for App {
         if compact {
             compact::title_bar(ui);
             let unread: u32 = self.sessions.iter().flat_map(|s| s.book.chats.iter()).map(|c| c.unread).sum();
-            let unseen: usize = self.sessions.iter().map(|s| screens::status::unseen_posters(&s.book)).sum();
+            let unseen: usize = self.sessions.iter().filter(|s| s.status == Status::Connected).map(|s| screens::status::unseen_posters(&s.book)).sum();
             // An open chat or status takes the whole window, like the phone.
             let immersive = match self.screen {
                 Screen::Inbox => self.state.chat_selected.is_some(),
@@ -2026,6 +2029,9 @@ impl eframe::App for App {
         }
         if std::mem::take(&mut self.state.add_number_requested) {
             self.add_number();
+        }
+        if std::mem::take(&mut self.state.devices_requested) {
+            self.screen = Screen::Nomor;
         }
         match summary_action {
             Some(screens::ringkasan::Action::Nomor(a)) => action = Some(a),
