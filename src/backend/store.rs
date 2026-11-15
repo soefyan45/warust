@@ -398,9 +398,12 @@ impl Book {
     /// Contact name or group subject, else the person's own push name.
     pub fn name_of(&self, jid: &str) -> Option<&str> {
         let jid = self.normalize(jid);
+        // A name that shows nothing counts as none (#168).
+        let shown = |n: &&String| !blank_name(n);
         self.names
             .get(&jid)
-            .or_else(|| self.push_names.get(&jid))
+            .filter(shown)
+            .or_else(|| self.push_names.get(&jid).filter(shown))
             .map(String::as_str)
     }
 
@@ -526,7 +529,8 @@ impl Book {
                 }
             }
             Some("push") => {
-                if let (Some(jid), Some(name)) = (text("jid"), text("name")) {
+                // A push name that shows nothing is no name (#168).
+                if let (Some(jid), Some(name)) = (text("jid"), text("name").filter(|n| !blank_name(n))) {
                     self.push_names.insert(self.normalize(&jid), name);
                 }
             }
@@ -797,6 +801,12 @@ impl Book {
             _ => {}
         }
     }
+}
+
+/// Whether `name` shows nothing: only whitespace and invisible format
+/// characters such as a left-to-right mark or a zero-width space (#168).
+pub fn blank_name(name: &str) -> bool {
+    name.chars().all(|c| c.is_whitespace() || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}' | '\u{180E}' | '\u{3164}' | '\u{115F}' | '\u{1160}'))
 }
 
 /// Short, masked form of a JID for small labels; never a full number.
@@ -1292,6 +1302,21 @@ mod tests {
         assert_eq!(book(&records).chats[0].unread, 1);
         records.push(read_to_record(c, &["a".to_owned(), "c".to_owned()]));
         assert_eq!(book(&records).chats[0].unread, 0);
+    }
+
+    #[test]
+    fn an_invisible_name_is_no_name() {
+        let b = book(&[
+            push_record("9@s.whatsapp.net", "\u{200e}"),
+            msg_record("9@s.whatsapp.net", "m", false, "9@s.whatsapp.net", "Iya benar", 1, &Delivery::Received, false),
+            name_record("7@s.whatsapp.net", " \u{200b} "),
+            push_record("7@s.whatsapp.net", "Budi"),
+            push_record("8@s.whatsapp.net", "\u{200f}Ani"),
+        ]);
+        assert_eq!(b.name_of("9@s.whatsapp.net"), None, "falls back to the number");
+        assert_eq!(b.name_of("7@s.whatsapp.net"), Some("Budi"), "a blank contact name gives way to the push name");
+        assert_eq!(b.name_of("8@s.whatsapp.net"), Some("\u{200f}Ani"), "a real name keeps its mark");
+        assert!(blank_name("\u{200e}") && blank_name(" ") && !blank_name("A"));
     }
 
     #[test]
