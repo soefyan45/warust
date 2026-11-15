@@ -518,11 +518,12 @@ fn stage_view(ui: &mut Ui, p: &Palette, state: &mut State, e: &Entry, next: Opti
         _ => std::time::Duration::ZERO,
     };
     let paused = state.status_paused || typing;
-    // Held, not paused, while the photo or video is still on its way (#167).
+    // Held, not paused, until the photo or video has loaded (#167); a failed
+    // one waits for a retry or the arrows rather than running out unseen.
     let loading = post.media.as_ref().is_some_and(|m| {
         (m.kind == "image" || m.kind == "video")
             && match &m.file {
-                None => m.downloadable() && !matches!(downloads.get(&post.id), Some(Some(_))),
+                None => m.downloadable(),
                 Some(_) => m.kind == "video" && movie::available() && movie::status(&post.id).is_none_or(|s| s.loading),
             }
     });
