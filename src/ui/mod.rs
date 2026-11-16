@@ -126,6 +126,10 @@ pub struct State {
     /// JID of the open chat.
     pub chat_selected: Option<String>,
     pub composer: String,
+    /// The chat (session id, JID) whose text `composer` holds (#176).
+    pub composer_for: Option<(String, String)>,
+    /// Unsent text of the other chats, by session id and JID (#176).
+    pub drafts: std::collections::HashMap<(String, String), String>,
     /// The chat told "sedang mengetik" (session id, JID) and when it was last
     /// told; the composer text as last seen, and when it last changed.
     pub typing: Option<(String, String, std::time::Instant)>,
