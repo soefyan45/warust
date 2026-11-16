@@ -147,6 +147,8 @@ pub fn show(
     let info = state.groups_now.get(&crate::backend::Typing::key(&session.id, &chat.jid)).cloned();
     let webhook = super::webhook_label(state, &session.id);
     let mut open_member = None;
+    // A photo, video or file picked in the panel's gallery (#185).
+    let mut picked = None;
     let mut chat_ui = None;
     let column = ui.available_rect_before_wrap();
     let mint = theme::mint();
@@ -191,9 +193,12 @@ pub fn show(
                     });
                     ui.add_space(8.0);
                 }
-                contact_panel(ui, &p, &book, chat, avatars, &webhook, info.as_ref())
+                contact_panel(ui, &p, &book, chat, avatars, &webhook, info.as_ref(), &mut picked)
             })
             .inner;
+        if let Some(click) = picked.take() {
+            on_message_event(MsgEvent::Media(click), state, session, chat, &mut commands);
+        }
         if close {
             state.contact_page = false;
             // Mint's panel has one switch: closed is closed, beside the chat too.
@@ -4893,16 +4898,202 @@ fn open_photo(ctx: &egui::Context, state: &mut State, sessions: &[SessionView], 
 
 /// The contact panel's content, scrolling: the contact, or a group with its
 /// members (#91). Returns the member whose chat was asked for.
-fn contact_panel(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars, webhook: &str, info: Option<&crate::backend::GroupInfo>) -> Option<String> {
+#[allow(clippy::too_many_arguments)]
+fn contact_panel(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars, webhook: &str, info: Option<&crate::backend::GroupInfo>, picked: &mut Option<MediaClick>) -> Option<String> {
     let mut open = None;
     ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
         contact(ui, p, book, chat, avatars, webhook);
+        ui.add_space(20.0);
+        *picked = gallery_section(ui, p, chat);
         if chat.is_group() {
             ui.add_space(20.0);
             open = group_details(ui, p, book, chat, avatars, info);
         }
     });
     open
+}
+
+/// What a chat's gallery lists (#185), newest first: photos and videos,
+/// web links in the text, and documents.
+struct Gallery<'a> {
+    media: Vec<&'a ChatMsg>,
+    links: Vec<(&'a ChatMsg, String)>,
+    docs: Vec<&'a ChatMsg>,
+}
+
+fn gallery(chat: &Chat) -> Gallery<'_> {
+    let mut found = Gallery { media: Vec::new(), links: Vec::new(), docs: Vec::new() };
+    for m in chat.messages.iter().rev().filter(|m| !m.deleted) {
+        match m.media.as_ref().map(|media| media.kind.as_str()) {
+            Some("image" | "video") => found.media.push(m),
+            Some("document") => found.docs.push(m),
+            _ => {}
+        }
+        for (_, url) in markup::links(&m.text) {
+            found.links.push((m, url));
+        }
+    }
+    found
+}
+
+/// How many of each the gallery shows before "Show all".
+const GALLERY_MEDIA: usize = 12;
+const GALLERY_LIST: usize = 8;
+
+/// "Media, links and docs" (#185): three tabs over what the chat carries. A
+/// photo, video or document is opened (or downloaded) like from its bubble;
+/// a link opens in the browser.
+fn gallery_section(ui: &mut Ui, p: &Palette, chat: &Chat) -> Option<MediaClick> {
+    let found = gallery(chat);
+    let mut picked = None;
+    ui.vertical(|ui| {
+        ui.spacing_mut().item_spacing.y = 10.0;
+        widgets::section_label(ui, tr("Media, links and docs", "Media, tautan, dan dokumen"));
+        let tab_id = ui.make_persistent_id(("gallery_tab", &chat.jid));
+        let mut tab: usize = ui.data(|d| d.get_temp(tab_id)).unwrap_or(0);
+        let labels = [
+            format!("{} {}", tr("Media", "Media"), found.media.len()),
+            format!("{} {}", tr("Links", "Tautan"), found.links.len()),
+            format!("{} {}", tr("Docs", "Dokumen"), found.docs.len()),
+        ];
+        widgets::tabs(ui, &labels.iter().map(String::as_str).collect::<Vec<_>>(), &mut tab);
+        ui.data_mut(|d| d.insert_temp(tab_id, tab));
+        let all_id = ui.make_persistent_id(("gallery_all", &chat.jid, tab));
+        let all: bool = ui.data(|d| d.get_temp(all_id)).unwrap_or(false);
+        let (count, limit, empty) = match tab {
+            0 => (found.media.len(), GALLERY_MEDIA, tr("No photos or videos yet", "Belum ada foto atau video")),
+            1 => (found.links.len(), GALLERY_LIST, tr("No links yet", "Belum ada tautan")),
+            _ => (found.docs.len(), GALLERY_LIST, tr("No documents yet", "Belum ada dokumen")),
+        };
+        if count == 0 {
+            ui.label(rich(empty, 12.0, Weight::Regular, p.muted));
+            return;
+        }
+        let shown = if all { count } else { count.min(limit) };
+        match tab {
+            0 => picked = gallery_grid(ui, p, &found.media[..shown]),
+            1 => gallery_links(ui, p, &found.links[..shown]),
+            _ => picked = gallery_docs(ui, p, &found.docs[..shown]),
+        }
+        if count > limit {
+            let label = if all { tr("Show less", "Tampilkan lebih sedikit").to_owned() } else { crate::trf!("Show all ({count})", "Tampilkan semua ({count})") };
+            if ui.add(egui::Button::new(rich(&label, 12.5, Weight::Medium, p.primary)).frame(false)).clicked() {
+                ui.data_mut(|d| d.insert_temp(all_id, !all));
+            }
+        }
+    });
+    picked
+}
+
+/// What a click on a photo, video or document in the gallery does: the same
+/// as on its bubble, without playing in place.
+fn gallery_click(m: &ChatMsg, media: &Media) -> Option<MediaClick> {
+    let Some(file) = &media.file else { return Some(MediaClick::Download(m.id.clone())) };
+    let pdf = file.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("pdf"));
+    if pdf {
+        return Some(MediaClick::OpenPdf(file.clone(), media_title(media)));
+    }
+    // A long video goes to the system player, as from the bubble.
+    if media.kind == "video" && media.seconds.is_some_and(|s| s as f32 > movie::MAX_SECONDS) {
+        open_file(file);
+        return None;
+    }
+    Some(MediaClick::Preview(file.clone(), media_title(media)))
+}
+
+/// Photos and videos as square tiles, three to a row.
+fn gallery_grid(ui: &mut Ui, p: &Palette, items: &[&ChatMsg]) -> Option<MediaClick> {
+    const GAP: f32 = 6.0;
+    let mut picked = None;
+    let width = ui.available_width();
+    let side = ((width - GAP * 2.0) / 3.0).floor();
+    let rows = items.len().div_ceil(3);
+    let (area, _) = ui.allocate_exact_size(vec2(width, rows as f32 * (side + GAP) - GAP), Sense::hover());
+    for (i, m) in items.iter().enumerate() {
+        let Some(media) = m.media.as_ref() else { continue };
+        let tile = Rect::from_min_size(area.min + vec2((i % 3) as f32 * (side + GAP), (i / 3) as f32 * (side + GAP)), vec2(side, side));
+        let response = ui.interact(tile, ui.scope_id().with(("gallery_tile", &m.id)), Sense::click());
+        ui.painter().rect_filled(tile, R_MD, p.raised);
+        let video = media.kind == "video";
+        // A video shows its still; a photo its own file once it is here.
+        let picture = if video { media.thumb.clone() } else { media.file.clone().or_else(|| media.thumb.clone()) };
+        let veiled = crate::ui::privacy::blur_chat() && !response.hovered();
+        match picture.and_then(|path| widgets::picture_uri(ui.ctx(), &path)).filter(|_| !veiled) {
+            Some(uri) => {
+                let image = egui::Image::from_uri(uri);
+                // Cover the square: the middle of the picture, its short side across.
+                let size = image.load_and_calc_size(ui, vec2(f32::INFINITY, f32::INFINITY)).unwrap_or(vec2(side, side));
+                let shown = if size.x > size.y { vec2(size.y / size.x.max(1.0), 1.0) } else { vec2(1.0, size.x / size.y.max(1.0)) };
+                image.uv(Rect::from_center_size(pos2(0.5, 0.5), shown)).corner_radius(R_MD).paint_at(ui, tile);
+            }
+            None => icons::paint(ui, Rect::from_center_size(tile.center(), vec2(22.0, 22.0)), if veiled { "eye-off" } else if video { "video" } else { "image" }, 22.0, p.muted),
+        }
+        if video {
+            ui.painter().circle_filled(tile.center(), 16.0, Color32::from_black_alpha(150));
+            icons::paint(ui, Rect::from_center_size(tile.center(), vec2(16.0, 16.0)), "play", 16.0, Color32::WHITE);
+        }
+        if media.file.is_none() {
+            let corner = Rect::from_min_size(tile.right_bottom() - vec2(24.0, 24.0), vec2(20.0, 20.0));
+            ui.painter().circle_filled(corner.center(), 10.0, Color32::from_black_alpha(150));
+            icons::paint(ui, corner.shrink(4.0), "download", 12.0, Color32::WHITE);
+        }
+        if response.hovered() {
+            ui.painter().rect_stroke(tile, R_MD, Stroke::new(2.0, p.primary), StrokeKind::Inside);
+        }
+        let hint = format!("{} · {}", media_title(media), time::day_label(m.ts));
+        if response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
+            picked = gallery_click(m, media);
+        }
+    }
+    picked
+}
+
+/// One gallery row: an icon tile, a line of text and a muted line under it.
+fn gallery_row(ui: &mut Ui, p: &Palette, id: (&str, &str), icon: &str, title: &str, under: &str) -> egui::Response {
+    let (row, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
+    let response = ui.interact(row, ui.scope_id().with(id), Sense::click());
+    if response.hovered() {
+        ui.painter().rect_filled(row, R_MD, p.raised);
+    }
+    let tile = Rect::from_min_size(pos2(row.left() + 4.0, row.center().y - 16.0), vec2(32.0, 32.0));
+    ui.painter().rect_filled(tile, R_MD, p.accent_soft);
+    icons::paint(ui, tile.shrink(8.0), icon, 16.0, p.accent_text);
+    let left = tile.right() + 10.0;
+    widgets::paint_text(ui, Rect::from_min_max(pos2(left, row.top() + 4.0), pos2(row.right() - 6.0, row.center().y)), title, fonts::ui(13.0, Weight::Medium), p.text, Align::Min);
+    widgets::paint_text(ui, Rect::from_min_max(pos2(left, row.center().y + 1.0), pos2(row.right() - 6.0, row.bottom() - 4.0)), under, fonts::ui(11.5, Weight::Regular), p.muted, Align::Min);
+    response.on_hover_cursor(CursorIcon::PointingHand)
+}
+
+/// Links, each opened in the browser on a click.
+fn gallery_links(ui: &mut Ui, p: &Palette, items: &[(&ChatMsg, String)]) {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    for (i, (m, url)) in items.iter().enumerate() {
+        let shown = url.trim_start_matches("https://").trim_start_matches("http://");
+        let key = format!("{}#{i}", m.id);
+        if gallery_row(ui, p, ("gallery_link", &key), "link", shown, &time::day_label(m.ts)).on_hover_text(url).clicked() {
+            crate::platform::open_url(url);
+        }
+    }
+}
+
+/// Documents with their size and day.
+fn gallery_docs(ui: &mut Ui, p: &Palette, items: &[&ChatMsg]) -> Option<MediaClick> {
+    ui.spacing_mut().item_spacing.y = 2.0;
+    let mut picked = None;
+    for m in items {
+        let Some(media) = m.media.as_ref() else { continue };
+        let size = media.size.map(|b| if b >= 1024 * 1024 { format!("{:.1} MB", b as f64 / 1024.0 / 1024.0) } else { format!("{} KB", b.div_ceil(1024)) });
+        let day = time::day_label(m.ts);
+        let under = match (size, media.file.is_some()) {
+            (Some(size), true) => format!("{size} · {day}"),
+            (Some(size), false) => crate::trf!("{size} · {day} · not downloaded", "{size} · {day} · belum diunduh"),
+            (None, _) => day,
+        };
+        if gallery_row(ui, p, ("gallery_doc", &m.id), "file-text", &media_title(media), &under).clicked() {
+            picked = gallery_click(m, media);
+        }
+    }
+    picked
 }
 
 /// A group's description, who made it and when, and its members with owners
@@ -5503,10 +5694,14 @@ fn compact_chat(
         let info = state.groups_now.get(&crate::backend::Typing::key(&session.id, &chat.jid)).cloned();
         let webhook = super::webhook_label(state, &session.id);
         let back = ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
+        let mut picked = None;
         let open = CentralPanel::default()
             .frame(Frame::NONE.fill(p.panel).inner_margin(Margin::symmetric(16, 12)))
-            .show(ui, |ui| contact_panel(ui, &p, book, chat, avatars, &webhook, info.as_ref()))
+            .show(ui, |ui| contact_panel(ui, &p, book, chat, avatars, &webhook, info.as_ref(), &mut picked))
             .inner;
+        if let Some(click) = picked {
+            on_message_event(MsgEvent::Media(click), state, session, chat, &mut commands);
+        }
         if back {
             state.contact_page = false;
         }
@@ -5994,6 +6189,66 @@ mod picture_box_tests {
         let _ = std::fs::remove_file(&file);
         // 90x190 is tall: narrower, then capped like any tall picture.
         assert_eq!(size, vec2(PICTURE_MIN_W, PICTURE_MAX_H));
+    }
+}
+
+#[cfg(test)]
+mod gallery_tests {
+    use super::*;
+
+    fn msg(id: &str, text: &str, kind: Option<&str>, deleted: bool) -> ChatMsg {
+        let media = kind.map(|kind| Media { kind: kind.to_owned(), name: None, size: None, width: None, height: None, thumb: None, file: None, seconds: None, waveform: Vec::new(), voice: false, raw: whatsapp_rust::serde_json::Value::Null });
+        ChatMsg {
+            id: id.to_owned(),
+            from_me: false,
+            sender: "628111@s.whatsapp.net".to_owned(),
+            text: text.to_owned(),
+            ts: 10,
+            status: Delivery::Received,
+            media,
+            quote: None,
+            mentions: Vec::new(),
+            mentions_me: false,
+            forwarded: false,
+            deleted,
+            edited: false,
+        }
+    }
+
+    #[test]
+    fn the_gallery_sorts_a_chat_into_media_links_and_docs_newest_first() {
+        let messages = vec![
+            msg("a", "[Gambar]", Some("image"), false),
+            msg("b", "lihat https://warust.dev dan https://example.com/x", None, false),
+            msg("c", "[Dokumen] nota.pdf", Some("document"), false),
+            msg("d", "[Video] https://youtu.be/1", Some("video"), false),
+            msg("e", "[Stiker]", Some("sticker"), false),
+            msg("f", "[Pesan suara]", Some("audio"), false),
+            msg("g", "https://gone.example", Some("image"), true),
+        ];
+        let chat = Chat { jid: "628111@s.whatsapp.net".to_owned(), unread: 0, messages, done_at: None, archived: false, pins: Vec::new(), muted_until: None, pinned_at: None };
+        let found = gallery(&chat);
+        let ids = |list: &[&ChatMsg]| list.iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&found.media), ["d", "a"]);
+        assert_eq!(ids(&found.docs), ["c"]);
+        // A caption's link counts too; a deleted message's does not.
+        let links: Vec<(String, String)> = found.links.iter().map(|(m, url)| (m.id.clone(), url.clone())).collect();
+        assert_eq!(links.len(), 3);
+        assert_eq!(links[0].0, "d");
+        assert!(links[1..].iter().all(|(id, _)| id == "b"));
+        assert!(links.iter().any(|(_, url)| url.contains("warust.dev")));
+    }
+
+    #[test]
+    fn a_gallery_item_not_here_yet_is_downloaded() {
+        let m = msg("a", "[Gambar]", Some("image"), false);
+        assert!(matches!(gallery_click(&m, m.media.as_ref().unwrap()), Some(MediaClick::Download(id)) if id == "a"));
+        let mut doc = msg("c", "[Dokumen]", Some("document"), false);
+        doc.media.as_mut().unwrap().file = Some(PathBuf::from("/m/Nota.PDF"));
+        assert!(matches!(gallery_click(&doc, doc.media.as_ref().unwrap()), Some(MediaClick::OpenPdf(..))));
+        let mut photo = msg("p", "[Gambar]", Some("image"), false);
+        photo.media.as_mut().unwrap().file = Some(PathBuf::from("/m/p.jpg"));
+        assert!(matches!(gallery_click(&photo, photo.media.as_ref().unwrap()), Some(MediaClick::Preview(..))));
     }
 }
 
