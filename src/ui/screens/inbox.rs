@@ -498,6 +498,47 @@ fn members_due(state: &State, session: &str, chat: &str, now: std::time::Instant
         .is_none_or(|at| now.saturating_duration_since(*at) >= MEMBERS_RETRY)
 }
 
+/// The composer moved to another chat (#176): its text stays with the chat
+/// it was typed in, and the new chat's own draft comes back. Not a change of
+/// text for the typing indicator.
+fn swap_draft(state: &mut State, session: &str, chat: &str) {
+    let here = (session.to_owned(), chat.to_owned());
+    if state.composer_for.as_ref() == Some(&here) {
+        return;
+    }
+    let text = std::mem::take(&mut state.composer);
+    if let Some(left) = state.composer_for.take()
+        && !text.trim().is_empty()
+    {
+        state.drafts.insert(left, text);
+    }
+    state.composer = state.drafts.remove(&here).unwrap_or_default();
+    state.typing_seen_text = state.composer.clone();
+    state.composer_for = Some(here);
+}
+
+/// The unsent text of a chat that is not open (#176).
+fn draft_of<'a>(state: &'a State, session: &str, chat: &str) -> Option<&'a str> {
+    let open = state.inbox_session.as_deref() == Some(session) && state.chat_selected.as_deref() == Some(chat);
+    if open {
+        return None;
+    }
+    let key = (session.to_owned(), chat.to_owned());
+    let text = if state.composer_for.as_ref() == Some(&key) { Some(state.composer.as_str()) } else { state.drafts.get(&key).map(String::as_str) };
+    text.filter(|t| !t.trim().is_empty())
+}
+
+/// What a chat row says in place of its last message: the contact typing,
+/// else our draft (#176).
+enum Aside {
+    Typing(String),
+    Draft(String),
+}
+
+fn aside(state: &State, session: &str, book: &Book, chat: &Chat) -> Option<Aside> {
+    typing_label(state, session, book, chat).map(Aside::Typing).or_else(|| draft_of(state, session, &chat.jid).map(|t| Aside::Draft(t.replace('\n', " "))))
+}
+
 /// Typing indicators for the chat on screen (`open`: session id, JID): starts
 /// when the composer text changes, repeats while typing goes on, and stops
 /// after a pause, when the text is cleared or sent, or when the chat is left.
@@ -968,7 +1009,7 @@ fn chat_list(
                         && state.chat_selected.as_deref() == Some(chat.jid.as_str());
                     let title = super::chat_title(&s.book, chat);
                     let via_number = via(chat).then_some(*s);
-                    let row = chat_row(ui, p, &s.book, rect, &title, chat, picture, selected, &s.id, via_number, typing_label(state, &s.id, &s.book, chat).as_deref());
+                    let row = chat_row(ui, p, &s.book, rect, &title, chat, picture, selected, &s.id, via_number, aside(state, &s.id, &s.book, chat).as_ref());
                     chat_menu(&row, s, chat, &mut commands);
                     if row.clicked() {
                         open_chat(state, &s.id, &chat.jid, Some(chat));
@@ -1312,7 +1353,7 @@ fn chat_row(
     selected: bool,
     session: &str,
     via: Option<&SessionView>,
-    typing: Option<&str>,
+    aside: Option<&Aside>,
 ) -> egui::Response {
     // The same contact can chat with several numbers, so the id holds both.
     let resp = ui.interact(row, ui.scope_id().with(("chat_row", session, &chat.jid)), Sense::click());
@@ -1352,7 +1393,7 @@ fn chat_row(
     let bell_w = if muted { 22.0 } else { 0.0 };
     let reserve = badges + bell_w + if pinned { 22.0 } else { 0.0 };
     let preview_rect = Rect::from_min_max(bottom.min, pos2(right - reserve, bottom.bottom()));
-    paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, typing, resp.hovered());
+    paint_preview(ui, p, book, preview_rect, chat, 13.0, p.muted, aside, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 18.0, bottom.center().y - 8.0), vec2(16.0, 16.0));
         icons::paint(ui, bell, "bell-off", 15.0, p.amber);
@@ -1468,16 +1509,29 @@ fn preview_veiled(blur: bool, hovered: bool) -> bool {
 
 /// The last message in a chat row; ours start with their tick, like WhatsApp.
 #[allow(clippy::too_many_arguments)]
-fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, size: f32, color: Color32, typing: Option<&str>, hovered: bool) {
+#[allow(clippy::too_many_arguments)]
+fn paint_preview(ui: &Ui, p: &Palette, book: &Book, rect: Rect, chat: &Chat, size: f32, color: Color32, aside: Option<&Aside>, hovered: bool) {
     // Anti-peek: a bar of the same width for every chat, so nothing is read
     // off it. Like a bubble, it reads while the cursor is on its row.
     if preview_veiled(crate::ui::privacy::blur_previews(), hovered) {
         crate::ui::privacy::frost_line(&ui.painter().with_clip_rect(rect), rect, 0.72, color.gamma_multiply(0.35));
         return;
     }
-    if let Some(typing) = typing {
-        widgets::paint_text(ui, rect, typing, fonts::ui(size, Weight::Medium), typing_color(p), Align::Min);
-        return;
+    match aside {
+        Some(Aside::Typing(typing)) => {
+            widgets::paint_text(ui, rect, typing, fonts::ui(size, Weight::Medium), typing_color(p), Align::Min);
+            return;
+        }
+        // "Draft:" in the typing colour, then the unsent text (#176).
+        Some(Aside::Draft(text)) => {
+            let label = ui.painter().layout_no_wrap(tr("Draft:", "Draf:").to_owned(), fonts::ui(size, Weight::SemiBold), typing_color(p));
+            let width = label.size().x;
+            ui.painter().galley(pos2(rect.left(), rect.center().y - label.size().y / 2.0), label, typing_color(p));
+            let rest = Rect::from_min_max(pos2(rect.left() + width + 4.0, rect.top()), rect.max);
+            widgets::paint_text(ui, rest, text, fonts::ui(size, Weight::Regular), color, Align::Min);
+            return;
+        }
+        None => {}
     }
     let Some(m) = chat.messages.last() else {
         return;
@@ -4322,6 +4376,7 @@ fn composer(
     several: bool,
     compact: bool,
 ) -> Option<Outgoing> {
+    swap_draft(state, &session.id, chat);
     let connected = session.status == Status::Connected;
     let id = ui.make_persistent_id("composer_text");
     let opened = take_open_focus(ui, state);
@@ -5194,7 +5249,7 @@ fn compact_list(ui: &mut Ui, state: &mut State, sessions: &[SessionView], avatar
                         }
                         let picture = avatars.get(&chat.jid).and_then(|p| p.as_deref());
                         let title = super::chat_title(&s.book, chat);
-                        let row = compact_row(ui, &p, &s.book, rect, &title, chat, picture, &s.id, via.then_some(*s), typing_label(state, &s.id, &s.book, chat).as_deref());
+                        let row = compact_row(ui, &p, &s.book, rect, &title, chat, picture, &s.id, via.then_some(*s), aside(state, &s.id, &s.book, chat).as_ref());
                         chat_menu(&row, s, chat, &mut commands);
                         if row.clicked() {
                             open_chat(state, &s.id, &chat.jid, Some(chat));
@@ -5269,7 +5324,7 @@ fn scope_chip(ui: &mut Ui, p: &Palette, label: &str, active: bool) -> egui::Resp
 /// A chat row of the phone list: round avatar, name, time, preview, unread
 /// badge, and "ke CS Utama · 4410" when every number is combined.
 #[allow(clippy::too_many_arguments)]
-fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: &Chat, picture: Option<&Path>, session: &str, via: Option<&SessionView>, typing: Option<&str>) -> egui::Response {
+fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: &Chat, picture: Option<&Path>, session: &str, via: Option<&SessionView>, aside: Option<&Aside>) -> egui::Response {
     use crate::ui::compact::{self as phone, PAD};
     let resp = ui.interact(row, ui.scope_id().with(("m_chat_row", session, &chat.jid)), Sense::click());
     let picture = picture.filter(|_| !crate::ui::privacy::hide_names());
@@ -5298,7 +5353,7 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     let bell_w = if muted { 24.0 } else { 0.0 };
     let reserve = badges + bell_w + if pinned { 24.0 } else { 0.0 };
     let line = Rect::from_min_max(pos2(left, row.top() + 35.0), pos2(right - reserve, row.top() + 56.0));
-    paint_preview(ui, p, book, line, chat, 14.0, p.text_2, typing, resp.hovered());
+    paint_preview(ui, p, book, line, chat, 14.0, p.text_2, aside, resp.hovered());
     if muted {
         let bell = Rect::from_min_size(pos2(right - badges - 20.0, line.center().y - 9.0), vec2(18.0, 18.0));
         icons::paint(ui, bell, "bell-off", 17.0, p.amber);
@@ -5963,5 +6018,35 @@ mod msg_search_tests {
         assert_eq!(marked, vec!["alamat"]);
         let total: usize = job.sections.iter().map(|s| s.byte_range.end.0 - s.byte_range.start.0).sum();
         assert_eq!(total, job.text.len());
+    }
+}
+
+#[cfg(test)]
+mod draft_tests {
+    use super::*;
+
+    #[test]
+    fn a_draft_stays_with_its_chat() {
+        let mut state = State::default();
+        swap_draft(&mut state, "s1", "a");
+        state.composer = "hello a".to_owned();
+        // Another chat opens empty; the text waits with the first.
+        swap_draft(&mut state, "s1", "b");
+        assert_eq!(state.composer, "");
+        state.inbox_session = Some("s1".to_owned());
+        state.chat_selected = Some("b".to_owned());
+        assert_eq!(draft_of(&state, "s1", "a"), Some("hello a"));
+        assert_eq!(draft_of(&state, "s1", "b"), None);
+        // Back to the first: its text again, and not a change to type about.
+        swap_draft(&mut state, "s1", "a");
+        assert_eq!(state.composer, "hello a");
+        assert_eq!(state.typing_seen_text, "hello a");
+        // The same contact on another number has its own draft.
+        swap_draft(&mut state, "s2", "a");
+        assert_eq!(state.composer, "");
+        // Blank text is no draft.
+        state.composer = "  ".to_owned();
+        swap_draft(&mut state, "s1", "b");
+        assert!(!state.drafts.contains_key(&("s2".to_owned(), "a".to_owned())));
     }
 }
