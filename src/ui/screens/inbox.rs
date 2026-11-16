@@ -2781,6 +2781,19 @@ fn retry_link(ui: &Ui, p: &Palette, right_top: egui::Pos2, msg_id: &str, why: &s
     response.clicked()
 }
 
+/// The chat's photos that are here to show, oldest first, each with its
+/// title: what the preview's arrow keys go through (#184).
+fn photo_album(chat: &Chat) -> Vec<(PathBuf, String)> {
+    chat.messages
+        .iter()
+        .filter(|m| !m.deleted)
+        .filter_map(|m| m.media.as_ref())
+        .filter(|media| media.kind == "image")
+        .filter_map(|media| Some((media.file.clone()?, media_title(media))))
+        .filter(|(file, _)| crate::ui::movie_view::look_of(file) == crate::ui::movie_view::Look::Photo)
+        .collect()
+}
+
 /// Turns a message event into commands or UI state; shared by the wide and
 /// compact layouts.
 fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, chat: &Chat, commands: &mut Vec<Command>) {
@@ -2788,7 +2801,15 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::Stream(msg_id)) => commands.push(Command::Stream { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
-        MsgEvent::Media(MediaClick::Preview(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
+        MsgEvent::Media(MediaClick::Preview(file, title)) => {
+            // A photo opens with the chat's other photos an arrow key away (#184).
+            let album = photo_album(chat);
+            let at = album.iter().position(|(f, _)| *f == file);
+            state.video_view = Some(match at.and_then(|at| crate::ui::movie_view::Viewer::in_album(album, at)) {
+                Some(viewer) => viewer,
+                None => crate::ui::movie_view::Viewer::new(file, title),
+            });
+        }
         MsgEvent::Phone(number) => {
             commands.push(Command::CheckNumber { id: session.id.clone(), number: number.clone() });
             state.number_ask = Some((session.id.clone(), number));
@@ -5994,6 +6015,47 @@ mod picture_box_tests {
         let _ = std::fs::remove_file(&file);
         // 90x190 is tall: narrower, then capped like any tall picture.
         assert_eq!(size, vec2(PICTURE_MIN_W, PICTURE_MAX_H));
+    }
+}
+
+#[cfg(test)]
+mod photo_album_tests {
+    use super::*;
+
+    fn media(kind: &str, file: Option<&str>) -> Media {
+        Media { kind: kind.to_owned(), name: None, size: None, width: None, height: None, thumb: None, file: file.map(PathBuf::from), seconds: None, waveform: Vec::new(), voice: false, raw: whatsapp_rust::serde_json::Value::Null }
+    }
+
+    #[test]
+    fn the_album_is_the_chats_photos_that_are_here() {
+        let msg = |id: &str, media: Option<Media>, deleted: bool| ChatMsg {
+            id: id.to_owned(),
+            from_me: false,
+            sender: "628111@s.whatsapp.net".to_owned(),
+            text: "[Gambar]".to_owned(),
+            ts: 10,
+            status: Delivery::Received,
+            media,
+            quote: None,
+            mentions: Vec::new(),
+            mentions_me: false,
+            forwarded: false,
+            deleted,
+            edited: false,
+        };
+        let messages = vec![
+            msg("a", Some(media("image", Some("/m/a.jpg"))), false),
+            msg("b", None, false),
+            msg("c", Some(media("image", None)), false),
+            msg("d", Some(media("video", Some("/m/d.mp4"))), false),
+            msg("e", Some(media("sticker", Some("/m/e.webp"))), false),
+            msg("f", Some(media("image", Some("/m/f.jpg"))), true),
+            msg("g", Some(media("image", Some("/m/g.png"))), false),
+        ];
+        let chat = Chat { jid: "628111@s.whatsapp.net".to_owned(), unread: 0, messages, done_at: None, archived: false, pins: Vec::new(), muted_until: None, pinned_at: None };
+        let files: Vec<PathBuf> = photo_album(&chat).into_iter().map(|(f, _)| f).collect();
+        // Not downloaded, a video, a sticker and a deleted one stay out.
+        assert_eq!(files, vec![PathBuf::from("/m/a.jpg"), PathBuf::from("/m/g.png")]);
     }
 }
 
