@@ -25,7 +25,7 @@ const ICONS: &[(&str, &[u8])] = icons![
     "pin", "trash", "chevron-up", "eye-off", "shield",
     "phone", "phone-incoming", "phone-missed", "phone-off", "mic-off", "volume-2", "volume-x", "minimize-2",
     "video-off", "monitor-up", "file-spreadsheet", "file-archive", "pencil", "camera", "contact", "phone-outgoing", "bell-off", "minus", "users",
-    "briefcase", "store", "headset", "user", "star",
+    "briefcase", "store", "headset", "user", "star", "link",
 ];
 
 fn white_svgs() -> &'static HashMap<&'static str, Bytes> {
@@ -49,6 +49,12 @@ fn image(name: &str, size: f32, color: Color32) -> Image<'static> {
     Image::from_bytes(format!("bytes://icon/{name}.svg"), bytes)
         .fit_to_exact_size(Vec2::splat(size))
         .tint(color)
+}
+
+/// An icon by this name is embedded; any other name panics when drawn.
+#[cfg(test)]
+pub fn known(name: &str) -> bool {
+    ICONS.iter().any(|(n, _)| *n == name)
 }
 
 /// Adds an icon as a widget in the current layout.

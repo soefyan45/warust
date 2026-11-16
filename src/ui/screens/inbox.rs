@@ -6240,6 +6240,14 @@ mod gallery_tests {
     }
 
     #[test]
+    fn the_gallery_draws_only_icons_that_are_embedded() {
+        // An unknown icon panics when drawn, which closed the app (#185).
+        for name in ["link", "file-text", "download", "play", "video", "image", "eye-off"] {
+            assert!(crate::ui::icons::known(name), "icon {name} is not embedded");
+        }
+    }
+
+    #[test]
     fn a_gallery_item_not_here_yet_is_downloaded() {
         let m = msg("a", "[Gambar]", Some("image"), false);
         assert!(matches!(gallery_click(&m, m.media.as_ref().unwrap()), Some(MediaClick::Download(id)) if id == "a"));
