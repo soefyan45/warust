@@ -3425,10 +3425,6 @@ fn messages(
                                     });
                                     ui.ctx().request_repaint();
                                 }
-                                // It covers the bubble here, so it carries the bubble's menu.
-                                if !m.deleted {
-                                    hit.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
-                                }
                             }
                             at.y += boxed.height() + 8.0;
                         }
