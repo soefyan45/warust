@@ -724,8 +724,10 @@ fn body(message: &wa::Message) -> Option<String> {
     if base.sticker_message.as_option().is_some() {
         return Some("[Stiker]".to_owned());
     }
-    if base.location_message.as_option().is_some() {
-        return Some("[Lokasi]".to_owned());
+    // With the place's name when it has one (#191), for the chat list.
+    if let Some(m) = base.location_message.as_option() {
+        let name = m.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        return Some(name.map_or_else(|| "[Lokasi]".to_owned(), |n| format!("[Lokasi] {n}")));
     }
     if let Some(card) = base.contact_message.as_option() {
         let name = card.display_name.as_deref().map(str::trim).filter(|n| !n.is_empty());

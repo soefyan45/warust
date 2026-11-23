@@ -92,7 +92,7 @@ impl ChatMsg {
     /// Media with a file that can go on as forwarded (#6 stage 2): not a call
     /// line; `downloaded` tells whether the file is here yet.
     pub fn forwardable_media(&self) -> Option<bool> {
-        let media = self.media.as_ref().filter(|m| !self.deleted && m.kind != "call")?;
+        let media = self.media.as_ref().filter(|m| !self.deleted && m.kind != "call" && m.kind != "location")?;
         Some(media.file.as_ref().is_some_and(|f| f.is_file()))
     }
 
@@ -152,6 +152,14 @@ impl Media {
                 || text("mime").is_some_and(|m| m.contains("opus") || m.starts_with("audio/ogg")),
             raw: raw.clone(),
         })
+    }
+
+    /// A shared place (#191): its latitude and longitude.
+    pub fn place(&self) -> Option<(f64, f64)> {
+        if self.kind != "location" {
+            return None;
+        }
+        Some((self.raw.get("lat")?.as_f64()?, self.raw.get("lng")?.as_f64()?))
     }
 
     /// Whether it can be downloaded from WhatsApp's servers.
@@ -1413,6 +1421,18 @@ mod tests {
         ]);
         assert_eq!(b.chats[0].messages.len(), 1);
         assert_eq!(b.chats[0].messages[0].status, Delivery::Read);
+    }
+
+    #[test]
+    fn a_location_is_a_place_not_a_file_to_forward() {
+        let raw = whatsapp_rust::serde_json::json!({ "k": "location", "lat": -0.5071, "lng": 101.4478, "name": "Ci Cafe Corner" });
+        let media = Media::parse(&raw).expect("parsed");
+        assert_eq!(media.place(), Some((-0.5071, 101.4478)));
+        assert!(!media.downloadable());
+        let record = with_media(msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "[Lokasi] Ci Cafe Corner", 1, &Delivery::Received, false), Some(raw));
+        let m = &book(&[record]).chats[0].messages[0];
+        assert_eq!(m.forwardable_media(), None);
+        assert!(!m.forwardable());
     }
 
     #[test]
