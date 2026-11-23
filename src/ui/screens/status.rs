@@ -70,7 +70,7 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
                 }
                 None => {
                     if let Some(uri) = picture(post).and_then(|source| widgets::picture_uri(ui.ctx(), &source)) {
-                        egui::Image::from_uri(uri).corner_radius(R_LG).fit_to_exact_size(card.size()).paint_at(ui, card);
+                        egui::Image::from_uri(uri).texture_options(widgets::SHRUNK).corner_radius(R_LG).fit_to_exact_size(card.size()).paint_at(ui, card);
                     }
                 }
             }
@@ -90,7 +90,7 @@ fn paint_post(ui: &mut Ui, p: &Palette, card: Rect, post: &StatusPost, session: 
                     };
                     let fit_w = card.width().min(card.height() / aspect);
                     let shown = Rect::from_center_size(card.center(), vec2(fit_w, fit_w * aspect));
-                    egui::Image::from_uri(uri).corner_radius(R_LG).fit_to_exact_size(shown.size()).paint_at(ui, shown);
+                    egui::Image::from_uri(uri).texture_options(widgets::SHRUNK).corner_radius(R_LG).fit_to_exact_size(shown.size()).paint_at(ui, shown);
                 }
             }
             let state_label = if media.file.is_some() {

@@ -78,10 +78,12 @@ pub fn show(
     if state.chat_selected.is_none() && std::env::var("WARUST_CHAT").as_deref() == Ok("first") {
         state.chat_selected = book.chats.first().map(|c| c.jid.clone());
     }
+    let blank = fresh_chat(state, &session.id, &book.chats);
     let selected = state
         .chat_selected
         .as_ref()
-        .and_then(|jid| book.chats.iter().find(|c| &c.jid == jid));
+        .and_then(|jid| book.chats.iter().find(|c| &c.jid == jid))
+        .or(blank.as_ref());
 
     let several = sessions.len() > 1;
     let forest = theme::template().top_nav();
@@ -2118,6 +2120,7 @@ fn paint_page_top(ui: &Ui, rect: Rect, picture: &Path, aspect: f32) {
     let Some(uri) = widgets::picture_uri(ui.ctx(), picture) else { return };
     let shown = (rect.height() / (rect.width() * aspect)).min(1.0);
     egui::Image::from_uri(uri)
+        .texture_options(widgets::SHRUNK)
         .uv(Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, shown)))
         .corner_radius(egui::CornerRadius { nw: R_MD, ne: R_MD, sw: 0, se: 0 })
         .fit_to_exact_size(rect.size())
@@ -2167,7 +2170,7 @@ fn paint_media(
             if let Some(uri) = widgets::picture_uri(ui.ctx(), source) {
                 // Cropped to the box, never stretched (#126).
                 let uv = widgets::picture_size(source).map_or(Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), |px| cover_uv(px, rect.size()));
-                egui::Image::from_uri(uri).uv(uv).corner_radius(R_MD).fit_to_exact_size(rect.size()).paint_at(ui, rect);
+                egui::Image::from_uri(uri).texture_options(widgets::SHRUNK).uv(uv).corner_radius(R_MD).fit_to_exact_size(rect.size()).paint_at(ui, rect);
             } else {
                 ui.painter().rect_filled(rect, R_MD, p.border);
             }
@@ -2195,7 +2198,7 @@ fn paint_media(
         MediaBox::Sticker(file) => {
             let uri = file.as_ref().and_then(|f| widgets::picture_uri(ui.ctx(), f));
             if let Some(uri) = uri {
-                egui::Image::from_uri(uri).fit_to_exact_size(rect.size()).paint_at(ui, rect);
+                egui::Image::from_uri(uri).texture_options(widgets::SHRUNK).fit_to_exact_size(rect.size()).paint_at(ui, rect);
             } else {
                 ui.painter().rect(rect, R_LG, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
                 let icon = Rect::from_center_size(rect.center() - vec2(0.0, 12.0), vec2(28.0, 28.0));
@@ -2382,6 +2385,23 @@ fn phone_display(number: &str) -> String {
     }
 }
 
+/// The empty chat of a number opened from the number dialog that has no chat
+/// yet (#162), while it is the open chat and until a message records it.
+fn fresh_chat(state: &State, session: &str, chats: &[Chat]) -> Option<Chat> {
+    let (id, jid) = state.fresh_chat.as_ref()?;
+    let open = id == session && state.inbox_session.as_deref() == Some(session) && state.chat_selected.as_ref() == Some(jid);
+    (open && !chats.iter().any(|c| &c.jid == jid)).then(|| Chat {
+        jid: jid.clone(),
+        unread: 0,
+        messages: Vec::new(),
+        done_at: None,
+        archived: false,
+        pins: Vec::new(),
+        muted_until: None,
+        pinned_at: None,
+    })
+}
+
 /// A phone number clicked in a message (#162): whether it uses WhatsApp,
 /// then "Chat on WhatsApp" (on the same linked number) or "Copy number".
 fn number_dialog(ctx: &egui::Context, state: &mut State, session: &SessionView) {
@@ -2425,6 +2445,9 @@ fn number_dialog(ctx: &egui::Context, state: &mut State, session: &SessionView) 
         });
     if let Some(jid) = open {
         let existing = session.book.chats.iter().find(|c| c.jid == jid);
+        if existing.is_none() {
+            state.fresh_chat = Some((session.id.clone(), jid.clone()));
+        }
         open_chat(state, &session.id, &jid, existing);
         close = true;
     }
@@ -2804,6 +2827,19 @@ fn retry_link(ui: &Ui, p: &Palette, right_top: egui::Pos2, msg_id: &str, why: &s
     response.clicked()
 }
 
+/// The chat's photos that are here to show, oldest first, each with its
+/// title: what the preview's arrow keys go through (#184).
+fn photo_album(chat: &Chat) -> Vec<(PathBuf, String)> {
+    chat.messages
+        .iter()
+        .filter(|m| !m.deleted)
+        .filter_map(|m| m.media.as_ref())
+        .filter(|media| media.kind == "image")
+        .filter_map(|media| Some((media.file.clone()?, media_title(media))))
+        .filter(|(file, _)| crate::ui::movie_view::look_of(file) == crate::ui::movie_view::Look::Photo)
+        .collect()
+}
+
 /// Turns a message event into commands or UI state; shared by the wide and
 /// compact layouts.
 fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, chat: &Chat, commands: &mut Vec<Command>) {
@@ -2811,7 +2847,15 @@ fn on_message_event(event: MsgEvent, state: &mut State, session: &SessionView, c
         MsgEvent::Media(MediaClick::Download(msg_id)) => commands.push(Command::Download { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::Stream(msg_id)) => commands.push(Command::Stream { id: session.id.clone(), msg_id }),
         MsgEvent::Media(MediaClick::OpenPdf(file, title)) => state.pdf_view = Some(pdf::Viewer::new(file, title)),
-        MsgEvent::Media(MediaClick::Preview(file, title)) => state.video_view = Some(crate::ui::movie_view::Viewer::new(file, title)),
+        MsgEvent::Media(MediaClick::Preview(file, title)) => {
+            // A photo opens with the chat's other photos an arrow key away (#184).
+            let album = photo_album(chat);
+            let at = album.iter().position(|(f, _)| *f == file);
+            state.video_view = Some(match at.and_then(|at| crate::ui::movie_view::Viewer::in_album(album, at)) {
+                Some(viewer) => viewer,
+                None => crate::ui::movie_view::Viewer::new(file, title),
+            });
+        }
         MsgEvent::Phone(number) => {
             commands.push(Command::CheckNumber { id: session.id.clone(), number: number.clone() });
             state.number_ask = Some((session.id.clone(), number));
@@ -3366,7 +3410,9 @@ fn messages(
                         let mut action = None;
                         // A deleted message has nothing left to reply to, copy, forward or pin.
                         if !m.deleted {
-                            bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
+                            // A right-click anywhere on the bubble, also on what takes clicks of its own
+                            // above it (a photo, a voice note, the text), opens the menu (#182).
+                            bubble.container_context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
                             // The same menu from a ⋯ beside the bubble, for a plain click (#3).
                             if let Some(picked) = more_button(ui, &p, rect, m).and_then(|btn| {
                                 let mut picked = None;
@@ -3428,10 +3474,6 @@ fn messages(
                                     });
                                     ui.ctx().request_repaint();
                                 }
-                                // It covers the bubble here, so it carries the bubble's menu.
-                                if !m.deleted {
-                                    hit.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
-                                }
                             }
                             at.y += boxed.height() + 8.0;
                         }
@@ -3470,7 +3512,6 @@ fn messages(
                                     }
                                 }
                             }
-                            label.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
                             at.y += height + 4.0;
                         }
                         // "Salin" copies the whole caption; egui does not expose the label selection, Cmd/Ctrl+C copies a partial one.
@@ -3898,7 +3939,7 @@ fn attachment_chip(ui: &mut Ui, p: &Palette, attachment: &mut Option<PathBuf>) -
             // A picture (a pasted screenshot, say) shows what will be sent.
             if picture && size.is_some() && let Some(uri) = widgets::picture_uri(ui.ctx(), path) {
                 ui.add_space(4.0);
-                ui.add(egui::Image::from_uri(uri).max_size(vec2(260.0, 160.0)).corner_radius(R_MD));
+                ui.add(egui::Image::from_uri(uri).texture_options(widgets::SHRUNK).max_size(vec2(260.0, 160.0)).corner_radius(R_MD));
                 ui.add_space(2.0);
             }
             ui.horizontal(|ui| {
@@ -5309,11 +5350,16 @@ pub fn compact(
             FIRST.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    let open = state
-        .inbox_session
-        .as_ref()
-        .and_then(|id| sessions.iter().find(|s| &s.id == id))
-        .and_then(|s| state.chat_selected.as_ref().and_then(|jid| s.book.chats.iter().find(|c| &c.jid == jid)).map(|c| (s, c)));
+    let session = state.inbox_session.as_ref().and_then(|id| sessions.iter().find(|s| &s.id == id));
+    let blank = session.and_then(|s| fresh_chat(state, &s.id, &s.book.chats));
+    let open = session.and_then(|s| {
+        state
+            .chat_selected
+            .as_ref()
+            .and_then(|jid| s.book.chats.iter().find(|c| &c.jid == jid))
+            .or(blank.as_ref())
+            .map(|c| (s, c))
+    });
     let mut commands = match open {
         Some((session, chat)) => compact_chat(ui, state, session, chat, sessions.len() > 1, avatars, downloads, auto_stickers),
         None => {
@@ -6052,6 +6098,22 @@ mod open_chat_tests {
     }
 
     #[test]
+    fn a_number_with_no_chat_opens_an_empty_one_until_it_is_recorded() {
+        let mut state = State::default();
+        let jid = "6281315790775@s.whatsapp.net";
+        state.fresh_chat = Some(("s1".to_owned(), jid.to_owned()));
+        open_chat(&mut state, "s1", jid, None);
+        let blank = fresh_chat(&state, "s1", &[]).expect("an empty chat to show");
+        assert_eq!(blank.jid, jid);
+        assert!(blank.messages.is_empty());
+        // Not on another number, and gone once the chat is recorded or left.
+        assert!(fresh_chat(&state, "s2", &[]).is_none());
+        assert!(fresh_chat(&state, "s1", std::slice::from_ref(&blank)).is_none());
+        open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
+        assert!(fresh_chat(&state, "s1", &[]).is_none());
+    }
+
+    #[test]
     fn a_chat_opens_on_the_conversation_not_the_details_page() {
         let mut state = State::default();
         // The panel beside the chat is on by default; its page is not.
@@ -6294,6 +6356,47 @@ mod gallery_tests {
         let mut photo = msg("p", "[Gambar]", Some("image"), false);
         photo.media.as_mut().unwrap().file = Some(PathBuf::from("/m/p.jpg"));
         assert!(matches!(gallery_click(&photo, photo.media.as_ref().unwrap()), Some(MediaClick::Preview(..))));
+    }
+}
+
+#[cfg(test)]
+mod photo_album_tests {
+    use super::*;
+
+    fn media(kind: &str, file: Option<&str>) -> Media {
+        Media { kind: kind.to_owned(), name: None, size: None, width: None, height: None, thumb: None, file: file.map(PathBuf::from), seconds: None, waveform: Vec::new(), voice: false, raw: whatsapp_rust::serde_json::Value::Null }
+    }
+
+    #[test]
+    fn the_album_is_the_chats_photos_that_are_here() {
+        let msg = |id: &str, media: Option<Media>, deleted: bool| ChatMsg {
+            id: id.to_owned(),
+            from_me: false,
+            sender: "628111@s.whatsapp.net".to_owned(),
+            text: "[Gambar]".to_owned(),
+            ts: 10,
+            status: Delivery::Received,
+            media,
+            quote: None,
+            mentions: Vec::new(),
+            mentions_me: false,
+            forwarded: false,
+            deleted,
+            edited: false,
+        };
+        let messages = vec![
+            msg("a", Some(media("image", Some("/m/a.jpg"))), false),
+            msg("b", None, false),
+            msg("c", Some(media("image", None)), false),
+            msg("d", Some(media("video", Some("/m/d.mp4"))), false),
+            msg("e", Some(media("sticker", Some("/m/e.webp"))), false),
+            msg("f", Some(media("image", Some("/m/f.jpg"))), true),
+            msg("g", Some(media("image", Some("/m/g.png"))), false),
+        ];
+        let chat = Chat { jid: "628111@s.whatsapp.net".to_owned(), unread: 0, messages, done_at: None, archived: false, pins: Vec::new(), muted_until: None, pinned_at: None };
+        let files: Vec<PathBuf> = photo_album(&chat).into_iter().map(|(f, _)| f).collect();
+        // Not downloaded, a video, a sticker and a deleted one stay out.
+        assert_eq!(files, vec![PathBuf::from("/m/a.jpg"), PathBuf::from("/m/g.png")]);
     }
 }
 

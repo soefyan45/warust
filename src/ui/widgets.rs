@@ -531,6 +531,11 @@ fn picture_key(path: &Path) -> String {
 }
 
 /// Hands a picture file to egui's image loader once; later frames use the URI.
+/// For pictures drawn smaller than their pixels (#188): mipmapped, so the
+/// GPU averages what it shrinks instead of skipping pixels, and small text
+/// in a photo stays smooth instead of turning jagged and blurry.
+pub const SHRUNK: egui::TextureOptions = egui::TextureOptions { mipmap_mode: Some(egui::TextureFilter::Linear), ..egui::TextureOptions::LINEAR };
+
 pub fn picture_uri(ctx: &egui::Context, path: &Path) -> Option<String> {
     let uri = picture_key(path);
     let mut loaded = loaded_pictures().lock().ok()?;
