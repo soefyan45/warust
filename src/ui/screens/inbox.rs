@@ -2588,6 +2588,24 @@ fn search_query(state: &State, session: &str, chat: &str) -> Option<String> {
         .filter(|q| !q.is_empty())
 }
 
+/// Where a click on a quote box asked the drawn thread to start, so the
+/// quoted message is drawn even when it is older than the usual window.
+fn quote_window_id(chat: &str) -> egui::Id {
+    egui::Id::unique("quote_jump_window").with(chat)
+}
+
+/// Where in `chat` the message `quote` points at is, for a click on the quote
+/// box. `None` for a status, and for a message that is not in this chat (gone
+/// from the history, not loaded yet, or a private reply to a group message).
+fn quoted_index(book: &Book, chat: &Chat, quote: &crate::backend::store::Quote) -> Option<usize> {
+    if quote.status {
+        return None;
+    }
+    // A reply queued before its target was sent still names the local id.
+    let real = book.aliases.get(&quote.id).unwrap_or(&quote.id);
+    chat.messages.iter().position(|m| m.id == *real || m.id == quote.id)
+}
+
 fn search_window_id(chat: &str) -> egui::Id {
     egui::Id::unique("msg_search_window").with(chat)
 }
@@ -3103,6 +3121,10 @@ fn messages(
             start = start.min(index.saturating_sub(10));
         }
     }
+    // So is a quoted message that a click on its quote box jumped to.
+    if let Some(index) = ui.data(|d| d.get_temp::<usize>(quote_window_id(&chat.jid))) {
+        start = start.min(index.saturating_sub(10));
+    }
     let shown: &[ChatMsg] = &chat.messages[start..];
     let mut clicked = None;
     let now = time::now();
@@ -3395,6 +3417,21 @@ fn messages(
                                 crate::ui::privacy::frost_galley(&painter, boxed.min + vec2(10.0, 5.0), &quote, frost);
                             } else {
                                 painter.galley(boxed.min + vec2(10.0, 5.0), quote, p.muted);
+                            }
+                            // A click goes to the quoted message, which then flashes.
+                            if let Some(index) = m.quote.as_ref().and_then(|q| quoted_index(book, chat, q)) {
+                                let hit = ui.interact(boxed, ui.scope_id().with(("quote_jump", &m.id)), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+                                if hit.clicked() {
+                                    ui.data_mut(|d| {
+                                        d.insert_temp(quote_window_id(&chat.jid), index);
+                                        d.insert_temp(jump_id(), chat.messages[index].id.clone());
+                                    });
+                                    ui.ctx().request_repaint();
+                                }
+                                // It covers the bubble here, so it carries the bubble's menu.
+                                if !m.deleted {
+                                    hit.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
+                                }
                             }
                             at.y += boxed.height() + 8.0;
                         }
@@ -6257,6 +6294,43 @@ mod gallery_tests {
         let mut photo = msg("p", "[Gambar]", Some("image"), false);
         photo.media.as_mut().unwrap().file = Some(PathBuf::from("/m/p.jpg"));
         assert!(matches!(gallery_click(&photo, photo.media.as_ref().unwrap()), Some(MediaClick::Preview(..))));
+    }
+}
+
+#[cfg(test)]
+mod quote_jump_tests {
+    use super::*;
+    use crate::backend::store::Quote;
+
+    #[test]
+    fn a_quote_box_leads_to_the_message_it_quotes() {
+        let msg = |id: &str| ChatMsg {
+            id: id.to_owned(),
+            from_me: false,
+            sender: "628111@s.whatsapp.net".to_owned(),
+            text: "x".to_owned(),
+            ts: 10,
+            status: Delivery::Received,
+            media: None,
+            quote: None,
+            mentions: Vec::new(),
+            mentions_me: false,
+            forwarded: false,
+            deleted: false,
+            edited: false,
+        };
+        let chat = Chat { jid: "628111@s.whatsapp.net".to_owned(), unread: 0, messages: vec![msg("A1"), msg("A2"), msg("A3")], done_at: None, archived: false, pins: Vec::new(), muted_until: None, pinned_at: None };
+        let mut book = Book::default();
+        let quote = |id: &str, status: bool| Quote { id: id.to_owned(), text: "x".to_owned(), status };
+        assert_eq!(quoted_index(&book, &chat, &quote("A2", false)), Some(1));
+        assert_eq!(quoted_index(&book, &chat, &quote("A1", false)), Some(0));
+        // Not in this chat: nothing to go to.
+        assert_eq!(quoted_index(&book, &chat, &quote("GONE", false)), None);
+        // A status has the id of a post, never of a message here.
+        assert_eq!(quoted_index(&book, &chat, &quote("A2", true)), None);
+        // A reply queued on a message that was itself still queued names its local id.
+        book.aliases.insert("local-7".to_owned(), "A3".to_owned());
+        assert_eq!(quoted_index(&book, &chat, &quote("local-7", false)), Some(2));
     }
 }
 
