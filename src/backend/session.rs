@@ -740,6 +740,24 @@ fn mentions_of(message: &wa::Message) -> Vec<String> {
     message.context_info().map(|c| c.mentioned_jid.clone()).unwrap_or_default()
 }
 
+/// The message a reply quotes, from the same `ContextInfo`: its id and what
+/// it shows. `None` for a message that quotes nothing we can show.
+fn quote_of(message: &wa::Message) -> Option<store::Quote> {
+    let context = message.context_info()?;
+    let id = context.stanza_id.clone().filter(|id| !id.is_empty())?;
+    let text = body(context.quoted_message.as_option()?)?;
+    let status = context.remote_jid.as_deref() == Some(store::STATUS_CHAT);
+    Some(store::Quote { id, text, status })
+}
+
+/// The msg record with what `message` quotes, when it is a reply.
+fn with_quote_of(record: Value, message: &wa::Message) -> Value {
+    match quote_of(message) {
+        Some(quote) => store::with_quote(record, &quote),
+        None => record,
+    }
+}
+
 /// User part of a JID, without device and server: `123:5@lid` -> `123`.
 fn user_part(jid: &str) -> &str {
     let user = jid.split('@').next().unwrap_or(jid);
@@ -1020,6 +1038,7 @@ fn on_message(
     let mentioned = mentions_me(source.is_group, source.is_from_me, &mentions, &own_users(&ctx.client));
     let record = store::with_mentions(record, &mentions, mentioned);
     let record = store::with_forwarded(record, ctx.message.is_forwarded());
+    let record = with_quote_of(record, &ctx.message);
     records.push(store::with_media(record, media));
     state.record(id, chats, &records);
     if !source.is_from_me {
@@ -1356,6 +1375,7 @@ fn history_records(compressed: &[u8], media_dir: &Path, own: &[String], now: i64
             let record = store::with_mentions(record, &mentions, history_mentions_me(chat.ends_with("@g.us"), from_me, &mentions, own, ts, now));
             let record = store::with_media(record, media::describe(message, media_dir, msg_id));
             let record = store::with_forwarded(record, message.is_forwarded());
+            let record = with_quote_of(record, message);
             let (background, color) = status_colors(message);
             records.push(store::with_colors(record, background, color));
         }
@@ -1727,6 +1747,47 @@ pub fn mask_phone(jid: &str) -> String {
 mod tests {
     use super::{Body, HISTORY_MENTION_WINDOW, ReplyQuote, history_mentions_me, mask_phone, mentions_me, queued_body, reply_body, vcard};
     use crate::backend::store::{self, Delivery, Quote, Store};
+
+    /// A reply to message `id`, which was `quoted`, in chat or status `remote`.
+    fn reply_to(id: &str, quoted: super::wa::Message, remote: Option<&str>) -> super::wa::Message {
+        use whatsapp_rust::wacore::proto_helpers::MessageBuilderExt;
+        let mut context = super::wa::ContextInfo::default();
+        context.stanza_id = Some(id.to_owned());
+        context.remote_jid = remote.map(str::to_owned);
+        context.quoted_message = super::MessageField::some(quoted);
+        super::wa::Message::text_with_context("oke", context)
+    }
+
+    #[test]
+    fn a_reply_from_someone_keeps_what_it_quotes() {
+        use super::wa;
+        use whatsapp_rust::wacore::proto_helpers::MessageBuilderExt;
+        // Text: the quote box shows the quoted text.
+        let quote = super::quote_of(&reply_to("A1", wa::Message::text("kapan kirim?"), None)).expect("a quote");
+        assert_eq!((quote.id.as_str(), quote.text.as_str(), quote.status), ("A1", "kapan kirim?", false));
+        // A photo: its label and caption.
+        let mut photo = wa::Message::default();
+        let mut image = wa::message::ImageMessage::default();
+        image.caption = Some("nota".to_owned());
+        photo.image_message = super::MessageField::some(image);
+        assert_eq!(super::quote_of(&reply_to("A2", photo, None)).expect("a quote").text, "[Gambar] nota");
+        // A comment on a status says so.
+        assert!(super::quote_of(&reply_to("ST1", wa::Message::text("promo"), Some(store::STATUS_CHAT))).expect("a quote").status);
+        // No quote: a plain message, a context without the quoted message, an empty id.
+        assert!(super::quote_of(&wa::Message::text("halo")).is_none());
+        let mut bare = wa::ContextInfo::default();
+        bare.stanza_id = Some("A3".to_owned());
+        assert!(super::quote_of(&wa::Message::text_with_context("halo", bare)).is_none());
+        assert!(super::quote_of(&reply_to("", wa::Message::text("x"), None)).is_none());
+        // The record carries it, so the bubble draws the box.
+        let chat = "628111@s.whatsapp.net";
+        let record = store::msg_record(chat, "B1", false, chat, "oke", 100, &Delivery::Received, true);
+        let record = super::with_quote_of(record, &reply_to("A1", wa::Message::text("kapan kirim?"), None));
+        assert_eq!(record["q"]["id"], "A1");
+        assert_eq!(record["q"]["text"], "kapan kirim?");
+        let plain = store::msg_record(chat, "B2", false, chat, "halo", 101, &Delivery::Received, true);
+        assert!(super::with_quote_of(plain, &wa::Message::text("halo")).get("q").is_none());
+    }
 
     #[test]
     fn forwarding_sends_text_again_or_the_downloaded_file() {
