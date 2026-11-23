@@ -3384,7 +3384,9 @@ fn messages(
                         let mut action = None;
                         // A deleted message has nothing left to reply to, copy, forward or pin.
                         if !m.deleted {
-                            bubble.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
+                            // A right-click anywhere on the bubble, also on what takes clicks of its own
+                            // above it (a photo, a voice note, the text), opens the menu (#182).
+                            bubble.container_context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
                             // The same menu from a ⋯ beside the bubble, for a plain click (#3).
                             if let Some(picked) = more_button(ui, &p, rect, m).and_then(|btn| {
                                 let mut picked = None;
@@ -3446,10 +3448,6 @@ fn messages(
                                     });
                                     ui.ctx().request_repaint();
                                 }
-                                // It covers the bubble here, so it carries the bubble's menu.
-                                if !m.deleted {
-                                    hit.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
-                                }
                             }
                             at.y += boxed.height() + 8.0;
                         }
@@ -3488,7 +3486,6 @@ fn messages(
                                     }
                                 }
                             }
-                            label.context_menu(|ui| action = message_menu(ui, m, chat.is_pinned(&m.id, now), group));
                             at.y += height + 4.0;
                         }
                         // "Salin" copies the whole caption; egui does not expose the label selection, Cmd/Ctrl+C copies a partial one.
