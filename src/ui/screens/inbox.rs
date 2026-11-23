@@ -2113,6 +2113,7 @@ fn paint_page_top(ui: &Ui, rect: Rect, picture: &Path, aspect: f32) {
     let Some(uri) = widgets::picture_uri(ui.ctx(), picture) else { return };
     let shown = (rect.height() / (rect.width() * aspect)).min(1.0);
     egui::Image::from_uri(uri)
+        .texture_options(widgets::SHRUNK)
         .uv(Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, shown)))
         .corner_radius(egui::CornerRadius { nw: R_MD, ne: R_MD, sw: 0, se: 0 })
         .fit_to_exact_size(rect.size())
@@ -2162,7 +2163,7 @@ fn paint_media(
             if let Some(uri) = widgets::picture_uri(ui.ctx(), source) {
                 // Cropped to the box, never stretched (#126).
                 let uv = widgets::picture_size(source).map_or(Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), |px| cover_uv(px, rect.size()));
-                egui::Image::from_uri(uri).uv(uv).corner_radius(R_MD).fit_to_exact_size(rect.size()).paint_at(ui, rect);
+                egui::Image::from_uri(uri).texture_options(widgets::SHRUNK).uv(uv).corner_radius(R_MD).fit_to_exact_size(rect.size()).paint_at(ui, rect);
             } else {
                 ui.painter().rect_filled(rect, R_MD, p.border);
             }
@@ -2190,7 +2191,7 @@ fn paint_media(
         MediaBox::Sticker(file) => {
             let uri = file.as_ref().and_then(|f| widgets::picture_uri(ui.ctx(), f));
             if let Some(uri) = uri {
-                egui::Image::from_uri(uri).fit_to_exact_size(rect.size()).paint_at(ui, rect);
+                egui::Image::from_uri(uri).texture_options(widgets::SHRUNK).fit_to_exact_size(rect.size()).paint_at(ui, rect);
             } else {
                 ui.painter().rect(rect, R_LG, p.raised, Stroke::new(1.0, p.border), StrokeKind::Inside);
                 let icon = Rect::from_center_size(rect.center() - vec2(0.0, 12.0), vec2(28.0, 28.0));
@@ -3856,7 +3857,7 @@ fn attachment_chip(ui: &mut Ui, p: &Palette, attachment: &mut Option<PathBuf>) -
             // A picture (a pasted screenshot, say) shows what will be sent.
             if picture && size.is_some() && let Some(uri) = widgets::picture_uri(ui.ctx(), path) {
                 ui.add_space(4.0);
-                ui.add(egui::Image::from_uri(uri).max_size(vec2(260.0, 160.0)).corner_radius(R_MD));
+                ui.add(egui::Image::from_uri(uri).texture_options(widgets::SHRUNK).max_size(vec2(260.0, 160.0)).corner_radius(R_MD));
                 ui.add_space(2.0);
             }
             ui.horizontal(|ui| {
