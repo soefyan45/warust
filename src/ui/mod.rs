@@ -171,6 +171,9 @@ pub struct State {
     pub number_checks: std::sync::Arc<std::collections::HashMap<String, backend::NumberCheck>>,
     /// The phone number dialog: the number it was clicked in and the digits.
     pub number_ask: Option<(String, String)>,
+    /// A number opened from that dialog with no chat yet (number id, jid):
+    /// shown as an empty chat until the first message records it.
+    pub fresh_chat: Option<(String, String)>,
     pub full_avatars: std::sync::Arc<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
     /// "Teruskan ke…" dialog for a message of the open chat.
     pub forward: Option<forward::Dialog>,

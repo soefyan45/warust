@@ -78,10 +78,12 @@ pub fn show(
     if state.chat_selected.is_none() && std::env::var("WARUST_CHAT").as_deref() == Ok("first") {
         state.chat_selected = book.chats.first().map(|c| c.jid.clone());
     }
+    let blank = fresh_chat(state, &session.id, &book.chats);
     let selected = state
         .chat_selected
         .as_ref()
-        .and_then(|jid| book.chats.iter().find(|c| &c.jid == jid));
+        .and_then(|jid| book.chats.iter().find(|c| &c.jid == jid))
+        .or(blank.as_ref());
 
     let several = sessions.len() > 1;
     let forest = theme::template().top_nav();
@@ -2378,6 +2380,23 @@ fn phone_display(number: &str) -> String {
     }
 }
 
+/// The empty chat of a number opened from the number dialog that has no chat
+/// yet (#162), while it is the open chat and until a message records it.
+fn fresh_chat(state: &State, session: &str, chats: &[Chat]) -> Option<Chat> {
+    let (id, jid) = state.fresh_chat.as_ref()?;
+    let open = id == session && state.inbox_session.as_deref() == Some(session) && state.chat_selected.as_ref() == Some(jid);
+    (open && !chats.iter().any(|c| &c.jid == jid)).then(|| Chat {
+        jid: jid.clone(),
+        unread: 0,
+        messages: Vec::new(),
+        done_at: None,
+        archived: false,
+        pins: Vec::new(),
+        muted_until: None,
+        pinned_at: None,
+    })
+}
+
 /// A phone number clicked in a message (#162): whether it uses WhatsApp,
 /// then "Chat on WhatsApp" (on the same linked number) or "Copy number".
 fn number_dialog(ctx: &egui::Context, state: &mut State, session: &SessionView) {
@@ -2421,6 +2440,9 @@ fn number_dialog(ctx: &egui::Context, state: &mut State, session: &SessionView) 
         });
     if let Some(jid) = open {
         let existing = session.book.chats.iter().find(|c| c.jid == jid);
+        if existing.is_none() {
+            state.fresh_chat = Some((session.id.clone(), jid.clone()));
+        }
         open_chat(state, &session.id, &jid, existing);
         close = true;
     }
@@ -5119,11 +5141,16 @@ pub fn compact(
             FIRST.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
-    let open = state
-        .inbox_session
-        .as_ref()
-        .and_then(|id| sessions.iter().find(|s| &s.id == id))
-        .and_then(|s| state.chat_selected.as_ref().and_then(|jid| s.book.chats.iter().find(|c| &c.jid == jid)).map(|c| (s, c)));
+    let session = state.inbox_session.as_ref().and_then(|id| sessions.iter().find(|s| &s.id == id));
+    let blank = session.and_then(|s| fresh_chat(state, &s.id, &s.book.chats));
+    let open = session.and_then(|s| {
+        state
+            .chat_selected
+            .as_ref()
+            .and_then(|jid| s.book.chats.iter().find(|c| &c.jid == jid))
+            .or(blank.as_ref())
+            .map(|c| (s, c))
+    });
     let mut commands = match open {
         Some((session, chat)) => compact_chat(ui, state, session, chat, sessions.len() > 1, avatars, downloads, auto_stickers),
         None => {
@@ -5855,6 +5882,22 @@ mod open_chat_tests {
         open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
         assert!(state.focus_composer);
         assert_eq!(state.chat_selected.as_deref(), Some("628111@s.whatsapp.net"));
+    }
+
+    #[test]
+    fn a_number_with_no_chat_opens_an_empty_one_until_it_is_recorded() {
+        let mut state = State::default();
+        let jid = "6281315790775@s.whatsapp.net";
+        state.fresh_chat = Some(("s1".to_owned(), jid.to_owned()));
+        open_chat(&mut state, "s1", jid, None);
+        let blank = fresh_chat(&state, "s1", &[]).expect("an empty chat to show");
+        assert_eq!(blank.jid, jid);
+        assert!(blank.messages.is_empty());
+        // Not on another number, and gone once the chat is recorded or left.
+        assert!(fresh_chat(&state, "s2", &[]).is_none());
+        assert!(fresh_chat(&state, "s1", std::slice::from_ref(&blank)).is_none());
+        open_chat(&mut state, "s1", "628111@s.whatsapp.net", None);
+        assert!(fresh_chat(&state, "s1", &[]).is_none());
     }
 
     #[test]
