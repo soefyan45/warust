@@ -346,6 +346,9 @@ pub struct Book {
     lid_to_pn: HashMap<String, String>,
     /// Queued id → the id WhatsApp gave the message once sent.
     pub aliases: HashMap<String, String>,
+    /// Business accounts' verified names and their level (`high` for an
+    /// official account), by normalized JID (#195).
+    biz: HashMap<String, (String, Option<String>)>,
     /// Status updates, oldest first; kept apart from the chats.
     pub statuses: Vec<StatusPost>,
     /// Archived chats (normalized JIDs), also those without messages yet, so
@@ -409,8 +412,19 @@ impl Book {
         self.names
             .get(&jid)
             .filter(shown)
+            .or_else(|| self.biz.get(&jid).map(|(name, _)| name).filter(shown))
             .or_else(|| self.push_names.get(&jid).filter(shown))
             .map(String::as_str)
+    }
+
+    /// A business account's verified name and level, as last recorded (#195).
+    pub fn biz_of(&self, jid: &str) -> Option<(&str, Option<&str>)> {
+        self.biz.get(&self.normalize(jid)).map(|(name, level)| (name.as_str(), level.as_deref()))
+    }
+
+    /// An official business account: verified at level `high` (#195).
+    pub fn official(&self, jid: &str) -> bool {
+        self.biz_of(jid).is_some_and(|(_, level)| level == Some("high"))
     }
 
     /// `text` with each `@<user part>` of `mentions` shown as `@<name>`. A
@@ -540,6 +554,15 @@ impl Book {
             Some("unname") => {
                 if let Some(chat) = text("chat") {
                     self.names.remove(&self.normalize(&chat));
+                }
+            }
+            // A business account's verified name; a record without a level
+            // (from the history) keeps the one known (#195).
+            Some("biz") => {
+                if let (Some(jid), Some(name)) = (text("jid"), text("name").filter(|n| !blank_name(n))) {
+                    let jid = self.normalize(&jid);
+                    let level = text("lvl").or_else(|| self.biz.get(&jid).and_then(|(_, level)| level.clone()));
+                    self.biz.insert(jid, (name, level));
                 }
             }
             Some("push") => {
@@ -1002,6 +1025,15 @@ pub fn chat_pin_record(chat: &str, at: Option<i64>) -> Value {
     json!({ "t": "chatpin", "chat": chat, "v": at })
 }
 
+/// A business account's verified name and, from a live message, its level (#195).
+pub fn biz_record(jid: &str, name: &str, level: Option<&str>) -> Value {
+    let mut record = json!({ "t": "biz", "jid": jid, "name": name });
+    if let Some(level) = level {
+        record["lvl"] = json!(level);
+    }
+    record
+}
+
 pub fn push_record(jid: &str, name: &str) -> Value {
     json!({ "t": "push", "jid": jid, "name": name })
 }
@@ -1131,6 +1163,20 @@ mod tests {
         let b = reopen(&[archive_record(lid, true), lid_record(lid, pn), msg]);
         assert_eq!(b.chats.len(), 1);
         assert!(b.chats[0].archived);
+    }
+
+    #[test]
+    fn a_business_shows_its_verified_name_and_official_level() {
+        let jid = "628110000088@s.whatsapp.net";
+        let b = reopen(&[push_record(jid, "push"), biz_record(jid, "Biznet", Some("high"))]);
+        assert_eq!(b.name_of(jid), Some("Biznet"), "the verified name before the push name");
+        assert!(b.official(jid));
+        // A history record without a level keeps the level known.
+        let b = reopen(&[biz_record(jid, "Biznet", Some("high")), biz_record(jid, "Biznet Networks", None)]);
+        assert_eq!((b.name_of(jid), b.official(jid)), (Some("Biznet Networks"), true));
+        // A contact saved on the phone still wins; a low level is no badge.
+        let b = reopen(&[biz_record(jid, "Biznet", Some("low")), name_record(jid, "ISP kantor")]);
+        assert_eq!((b.name_of(jid), b.official(jid)), (Some("ISP kantor"), false));
     }
 
     #[test]

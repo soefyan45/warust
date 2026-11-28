@@ -121,6 +121,37 @@ pub fn paint_text(ui: &Ui, rect: Rect, text: &str, font: FontId, color: Color32,
         .galley(pos2(x, rect.center().y - size.y / 2.0), galley, color);
 }
 
+/// The green of WhatsApp's official business check (#195).
+const OFFICIAL: Color32 = Color32::from_rgb(0x1D, 0xAA, 0x61);
+
+/// The check badge of an official business account, centred on `center`.
+pub fn paint_official(ui: &Ui, center: egui::Pos2, size: f32) {
+    ui.painter().circle_filled(center, size / 2.0, OFFICIAL);
+    let mark = size * 0.7;
+    icons::paint(ui, Rect::from_center_size(center, egui::vec2(mark, mark)), "check", mark, Color32::WHITE);
+}
+
+/// The badge as a widget, after a title in a row of widgets.
+pub fn official_badge(ui: &mut Ui, size: f32) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    paint_official(ui, rect.center(), size);
+    response.on_hover_text(crate::i18n::tr("Official business account", "Akun bisnis resmi"))
+}
+
+/// A chat title like `paint_text`, followed by the official badge when
+/// `official`; the title gives up room for it.
+pub fn paint_title(ui: &Ui, rect: Rect, title: &str, font: FontId, color: Color32, official: bool) {
+    if !official {
+        paint_text(ui, rect, title, font, color, Align::Min);
+        return;
+    }
+    const BADGE: f32 = 15.0;
+    let wide = ui.painter().layout_no_wrap(title.to_owned(), font.clone(), color).size().x;
+    let width = wide.min((rect.width() - BADGE - 4.0).max(1.0));
+    paint_text(ui, Rect::from_min_size(rect.min, egui::vec2(width, rect.height())), title, font, color, Align::Min);
+    paint_official(ui, pos2(rect.left() + width + 4.0 + BADGE / 2.0, rect.center().y), BADGE);
+}
+
 /// Splits a row into column rects. `None` widths share the space left.
 pub fn columns(rect: Rect, widths: &[Option<f32>], gap: f32) -> Vec<Rect> {
     let fixed: f32 = widths.iter().flatten().sum();

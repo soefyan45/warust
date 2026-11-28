@@ -269,6 +269,9 @@ pub fn show(
                             ui.spacing_mut().item_spacing.y = 1.0;
                             ui.horizontal(|ui| {
                                 let name = ui.add(egui::Label::new(rich(&title, 14.0, Weight::SemiBold, p.text)).truncate().sense(Sense::click()));
+                                if book.official(&chat.jid) {
+                                    widgets::official_badge(ui, 15.0);
+                                }
                                 if name.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
                                     info_clicked = true;
                                 }
@@ -310,6 +313,9 @@ pub fn show(
                     let name = ui
                         .allocate_ui(vec2(room, 24.0), |ui| ui.add(egui::Label::new(rich(&super::chat_title(&book, chat), 14.0, Weight::SemiBold, p.text)).truncate().sense(Sense::click())))
                         .inner;
+                    if book.official(&chat.jid) {
+                        widgets::official_badge(ui, 15.0);
+                    }
                     if name.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
                         info_clicked = true;
                     }
@@ -1385,7 +1391,7 @@ fn chat_row(
     ui.painter()
         .galley(pos2(right - time_w, top.center().y - time_galley.size().y / 2.0), time_galley, p.muted);
     let name = Rect::from_min_max(top.min, pos2(right - time_w - 8.0, top.bottom()));
-    widgets::paint_text(ui, name, title, fonts::ui(14.0, Weight::SemiBold), p.text, Align::Min);
+    widgets::paint_title(ui, name, title, fonts::ui(14.0, Weight::SemiBold), p.text, book.official(&chat.jid));
     let at = chat.mention_pending();
     let badges = if chat.unread > 0 { 30.0 } else { 0.0 } + if at { 26.0 } else { 0.0 };
     // Muted here or on the phone: a struck bell before the badges (#87), in
@@ -5068,7 +5074,12 @@ fn contact(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars
             widgets::paint_avatar(ui, face, &initials, picture, false);
             photo_target(ui, face, None, &chat.jid, &title, picture);
             ui.add_space(6.0);
-            ui.add(egui::Label::new(rich(&title, 17.0, Weight::SemiBold, p.text)).truncate());
+            ui.horizontal(|ui| {
+                ui.add(egui::Label::new(rich(&title, 17.0, Weight::SemiBold, p.text)).truncate());
+                if book.official(&chat.jid) {
+                    widgets::official_badge(ui, 16.0);
+                }
+            });
             ui.label(rich_mono(&super::chat_subtitle(chat), 12.0, p.muted));
         });
     } else {
@@ -5081,7 +5092,12 @@ fn contact(ui: &mut Ui, p: &Palette, book: &Book, chat: &Chat, avatars: &Avatars
         photo_target(ui, face, None, &chat.jid, &title, picture);
         ui.vertical(|ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
-            ui.label(rich(&title, 16.0, Weight::SemiBold, p.text));
+            ui.horizontal(|ui| {
+                ui.label(rich(&title, 16.0, Weight::SemiBold, p.text));
+                if book.official(&chat.jid) {
+                    widgets::official_badge(ui, 15.0);
+                }
+            });
             ui.label(rich_mono(&super::chat_subtitle(chat), 12.0, p.muted));
         });
     });
@@ -5427,7 +5443,7 @@ fn compact_row(ui: &Ui, p: &Palette, book: &Book, row: Rect, title: &str, chat: 
     let when_w = when.size().x;
     ui.painter().galley(pos2(right - when_w, row.top() + 16.0), when, p.muted);
     let name = Rect::from_min_max(pos2(left, row.top() + 12.0), pos2(right - when_w - 8.0, row.top() + 34.0));
-    widgets::paint_text(ui, name, title, fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
+    widgets::paint_title(ui, name, title, fonts::ui(16.0, Weight::SemiBold), p.text, book.official(&chat.jid));
     let at = chat.mention_pending();
     let unread_w = if chat.unread > 9 { 28.0 } else { 20.0 };
     let badges = if chat.unread > 0 { unread_w + 12.0 } else { 0.0 } + if at { 28.0 } else { 0.0 };
@@ -5525,7 +5541,7 @@ fn compact_chat(
                         info_clicked = true;
                     }
                     let top = Rect::from_min_max(text.min, pos2(text.right(), text.top() + 22.0));
-                    widgets::paint_text(ui, top, &title, fonts::ui(16.0, Weight::SemiBold), p.text, Align::Min);
+                    widgets::paint_title(ui, top, &title, fonts::ui(16.0, Weight::SemiBold), p.text, book.official(&chat.jid));
                     let bottom = Rect::from_min_max(pos2(text.left(), text.top() + 23.0), text.max);
                     if several {
                         let color = if theme::template().top_nav() { p.accent_text } else { p.text_2 };
