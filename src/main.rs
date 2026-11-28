@@ -9,9 +9,18 @@ mod i18n;
 mod platform;
 mod tray;
 mod ui;
+mod walink;
 
 fn main() -> eframe::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // Started for a "Chat on WhatsApp" link (#193): the warust already
+    // running takes it, else this one opens it once its window is up.
+    if let Some((arg, link)) = std::env::args().skip(1).find_map(|a| walink::parse(&a).map(|l| (a, l))) {
+        if walink::hand_over(&arg) {
+            return Ok(());
+        }
+        walink::push(link);
+    }
     // Dev aid: WARUST_SIZE=390x844 opens the window at that size.
     let size = std::env::var("WARUST_SIZE")
         .ok()
@@ -50,7 +59,12 @@ fn main() -> eframe::Result<()> {
     let result = eframe::run_native(
         "warust",
         options,
-        Box::new(|cc| Ok(Box::new(ui::App::new(cc)))),
+        Box::new(|cc| {
+            // Links from later starts wake the app, also from the tray.
+            let ctx = cc.egui_ctx.clone();
+            walink::listen(move || ctx.request_repaint());
+            Ok(Box::new(ui::App::new(cc)))
+        }),
     );
     // An update installed while running starts warust again (#93).
     backend::update::after_exit();
