@@ -724,8 +724,10 @@ fn body(message: &wa::Message) -> Option<String> {
     if base.sticker_message.as_option().is_some() {
         return Some("[Stiker]".to_owned());
     }
-    if base.location_message.as_option().is_some() {
-        return Some("[Lokasi]".to_owned());
+    // With the place's name when it has one (#191), for the chat list.
+    if let Some(m) = base.location_message.as_option() {
+        let name = m.name.as_deref().map(str::trim).filter(|n| !n.is_empty());
+        return Some(name.map_or_else(|| "[Lokasi]".to_owned(), |n| format!("[Lokasi] {n}")));
     }
     if let Some(card) = base.contact_message.as_option() {
         let name = card.display_name.as_deref().map(str::trim).filter(|n| !n.is_empty());
@@ -840,7 +842,10 @@ fn sync_mutes_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client:
     let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
     tokio::spawn(async move {
         match client.resync_app_state_collection(whatsapp_rust::WAPatchName::RegularHigh).await {
-            Ok(_) => state.record(&id, &chats, &[store::mutes_synced_record(), store::status_mutes_synced_record()]),
+            Ok(report) if synced(&id, "mutes", &report, whatsapp_rust::WAPatchName::RegularHigh) => {
+                state.record(&id, &chats, &[store::mutes_synced_record(), store::status_mutes_synced_record()])
+            }
+            Ok(_) => {}
             Err(e) => log::warn!("session {id}: reading mutes from the phone failed: {e}"),
         }
     });
@@ -856,10 +861,24 @@ fn sync_contacts_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, clie
     let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
     tokio::spawn(async move {
         match client.resync_app_state_collection(whatsapp_rust::WAPatchName::CriticalUnblockLow).await {
-            Ok(_) => state.record(&id, &chats, &[store::contacts_synced_record()]),
+            Ok(report) if synced(&id, "contacts", &report, whatsapp_rust::WAPatchName::CriticalUnblockLow) => {
+                state.record(&id, &chats, &[store::contacts_synced_record()])
+            }
+            Ok(_) => {}
             Err(e) => log::warn!("session {id}: reading contacts from the phone failed: {e}"),
         }
     });
+}
+
+/// Whether a resync really read collection `name` (#169). `Ok` alone does
+/// not say so: right after linking, before the phone sent the keys, the
+/// report lists it as one to try again, and the mark must wait for that.
+fn synced(id: &str, what: &str, report: &whatsapp_rust::AppStateResyncReport, name: whatsapp_rust::WAPatchName) -> bool {
+    let done = report.synced.contains(&name);
+    if !done {
+        log::warn!("session {id}: {what} not read from the phone yet ({report:?}); trying again on the next connect");
+    }
+    done
 }
 
 /// Reads the phone's chat pins once, like the mutes: a number linked
@@ -872,7 +891,10 @@ fn sync_pins_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: 
     let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
     tokio::spawn(async move {
         match client.resync_app_state_collection(whatsapp_rust::WAPatchName::RegularLow).await {
-            Ok(_) => state.record(&id, &chats, &[store::pins_synced_record()]),
+            Ok(report) if synced(&id, "chat pins", &report, whatsapp_rust::WAPatchName::RegularLow) => {
+                state.record(&id, &chats, &[store::pins_synced_record()])
+            }
+            Ok(_) => {}
             Err(e) => log::warn!("session {id}: reading chat pins from the phone failed: {e}"),
         }
     });

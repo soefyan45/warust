@@ -42,12 +42,34 @@ pub struct Viewer {
     scroll: egui::Vec2,
     /// A text document's content, read once.
     text: Option<String>,
+    /// The chat's photos, oldest first, when it was opened from one: the
+    /// arrow keys go through them (#184). `at` is the one on screen.
+    album: Vec<(PathBuf, String)>,
+    at: usize,
 }
 
 impl Viewer {
     pub fn new(file: PathBuf, title: String) -> Self {
         let look = look_of(&file);
-        Self { id: file.to_string_lossy().into_owned(), file, title, look, zoom: 1.0, laid: 1.0, scroll: egui::Vec2::ZERO, text: None }
+        Self { id: file.to_string_lossy().into_owned(), file, title, look, zoom: 1.0, laid: 1.0, scroll: egui::Vec2::ZERO, text: None, album: Vec::new(), at: 0 }
+    }
+
+    /// Photo `at` of `album` (a chat's photos, oldest first), with the
+    /// others a left or right arrow away.
+    pub fn in_album(album: Vec<(PathBuf, String)>, at: usize) -> Option<Self> {
+        let (file, title) = album.get(at)?.clone();
+        let mut viewer = Self::new(file, title);
+        viewer.album = album;
+        viewer.at = at;
+        Some(viewer)
+    }
+
+    /// Moves `step` photos along the album (−1 older, +1 newer), stopping at
+    /// either end; the new photo starts fitted.
+    fn step(&mut self, step: isize) {
+        let Some(at) = self.at.checked_add_signed(step).filter(|&at| at < self.album.len()) else { return };
+        let (file, title) = self.album[at].clone();
+        *self = Self { album: std::mem::take(&mut self.album), at, ..Self::new(file, title) };
     }
 }
 
@@ -101,6 +123,15 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
         }
         viewer.text = Some(text);
     }
+    // Left and right go through the chat's photos (#184).
+    if viewer.album.len() > 1 {
+        let (left, right) = ctx.input_mut(|i| (i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft), i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)));
+        if left {
+            viewer.step(-1);
+        } else if right {
+            viewer.step(1);
+        }
+    }
     let mut close = false;
     // Fits a phone-sized window too: a 12 px margin there, 40 px elsewhere.
     let margin = if screen.width() < 700.0 { 24.0 } else { 80.0 };
@@ -124,6 +155,10 @@ pub fn show(ctx: &egui::Context, open: &mut Option<Viewer>) {
                     icons::show(ui, icon, 16.0, p.text_2);
                     ui.add_space(6.0);
                     ui.add(egui::Label::new(rich(&viewer.title, 14.0, Weight::SemiBold, p.text)).truncate());
+                    if viewer.album.len() > 1 {
+                        ui.add_space(8.0);
+                        ui.label(widgets::rich_mono(&format!("{} / {}", viewer.at + 1, viewer.album.len()), 12.0, p.muted));
+                    }
                 },
                 |ui| {
                     close = widgets::icon_button(ui, "x", 28.0, false).on_hover_text(tr("Close (Esc)", "Tutup (Esc)")).clicked();
@@ -209,6 +244,7 @@ fn photo(ui: &mut egui::Ui, viewer: &mut Viewer) {
                     egui::Image::from_uri(uri).fit_to_exact_size(shown).paint_at(ui, Rect::from_center_size(content.center(), shown));
                 });
                 viewer.scroll = out.state.clamped_offset();
+                arrows(ui, area, viewer);
             }
             _ => {
                 let (rect, _) = ui.allocate_exact_size(stage, Sense::hover());
@@ -230,6 +266,34 @@ fn photo(ui: &mut egui::Ui, viewer: &mut Viewer) {
             viewer.zoom = (viewer.zoom * 1.25).min(PHOTO_ZOOM.1);
         }
     });
+}
+
+/// Round ‹ and › buttons on the stage's sides, when there is a photo that
+/// way; a click goes there as the arrow keys do.
+fn arrows(ui: &mut egui::Ui, stage: Rect, viewer: &mut Viewer) {
+    if viewer.album.len() < 2 {
+        return;
+    }
+    let mut step = 0;
+    for (icon, dir, x, there, hint) in [
+        ("chevron-left", -1, stage.left() + 30.0, viewer.at > 0, tr("Previous photo (←)", "Foto sebelumnya (←)")),
+        ("chevron-right", 1, stage.right() - 30.0, viewer.at + 1 < viewer.album.len(), tr("Next photo (→)", "Foto berikutnya (→)")),
+    ] {
+        if !there {
+            continue;
+        }
+        let button = Rect::from_center_size(pos2(x, stage.center().y), vec2(40.0, 40.0));
+        let response = ui.interact(button, ui.scope_id().with(("album_arrow", dir)), Sense::click());
+        let fill = if response.hovered() { Color32::from_black_alpha(200) } else { Color32::from_black_alpha(130) };
+        ui.painter().circle_filled(button.center(), 20.0, fill);
+        icons::paint(ui, Rect::from_center_size(button.center(), vec2(20.0, 20.0)), icon, 20.0, Color32::WHITE);
+        if response.on_hover_cursor(CursorIcon::PointingHand).on_hover_text(hint).clicked() {
+            step = dir;
+        }
+    }
+    if step != 0 {
+        viewer.step(step);
+    }
 }
 
 /// A video on its stage, or a sound's card; play/pause, the seek bar with
@@ -324,6 +388,25 @@ fn info(ui: &mut egui::Ui, p: &theme::Palette, viewer: &Viewer, icon: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_arrows_go_through_the_album_and_stop_at_its_ends() {
+        let album: Vec<(PathBuf, String)> = ["a.jpg", "b.jpg", "c.jpg"].iter().map(|f| (PathBuf::from(f), f.to_string())).collect();
+        assert!(Viewer::in_album(album.clone(), 3).is_none());
+        let mut viewer = Viewer::in_album(album, 1).expect("in the album");
+        assert_eq!(viewer.file, PathBuf::from("b.jpg"));
+        viewer.zoom = 3.0;
+        viewer.step(1);
+        assert_eq!((viewer.file.clone(), viewer.at, viewer.zoom), (PathBuf::from("c.jpg"), 2, 1.0));
+        // The newest is the last one: no further.
+        viewer.step(1);
+        assert_eq!(viewer.at, 2);
+        viewer.step(-1);
+        viewer.step(-1);
+        assert_eq!((viewer.file.clone(), viewer.title.as_str(), viewer.album.len()), (PathBuf::from("a.jpg"), "a.jpg", 3));
+        viewer.step(-1);
+        assert_eq!(viewer.at, 0);
+    }
 
     #[test]
     fn files_get_the_right_preview() {

@@ -92,7 +92,7 @@ impl ChatMsg {
     /// Media with a file that can go on as forwarded (#6 stage 2): not a call
     /// line; `downloaded` tells whether the file is here yet.
     pub fn forwardable_media(&self) -> Option<bool> {
-        let media = self.media.as_ref().filter(|m| !self.deleted && m.kind != "call")?;
+        let media = self.media.as_ref().filter(|m| !self.deleted && m.kind != "call" && m.kind != "location")?;
         Some(media.file.as_ref().is_some_and(|f| f.is_file()))
     }
 
@@ -152,6 +152,14 @@ impl Media {
                 || text("mime").is_some_and(|m| m.contains("opus") || m.starts_with("audio/ogg")),
             raw: raw.clone(),
         })
+    }
+
+    /// A shared place (#191): its latitude and longitude.
+    pub fn place(&self) -> Option<(f64, f64)> {
+        if self.kind != "location" {
+            return None;
+        }
+        Some((self.raw.get("lat")?.as_f64()?, self.raw.get("lng")?.as_f64()?))
     }
 
     /// Whether it can be downloaded from WhatsApp's servers.
@@ -766,10 +774,12 @@ impl Book {
                     }
                 }
             }
-            Some("mutesync") => self.mutes_synced = true,
-            Some("smutesync") => self.status_mutes_synced = true,
-            Some("csync") => self.contacts_synced = true,
-            Some("pinsync") => self.pins_synced = true,
+            // Only marks written once the collection really synced count
+            // (#169); older ones were written even when it had not.
+            Some("mutesync") if synced_mark(record) => self.mutes_synced = true,
+            Some("smutesync") if synced_mark(record) => self.status_mutes_synced = true,
+            Some("csync") if synced_mark(record) => self.contacts_synced = true,
+            Some("pinsync") if synced_mark(record) => self.pins_synced = true,
             Some("chatpin") => {
                 // `v` is when it was pinned; none (or null) unpins it.
                 if let Some(chat) = text("chat") {
@@ -1041,14 +1051,22 @@ pub fn unname_record(chat: &str) -> Value {
     json!({ "t": "unname", "chat": chat })
 }
 
+/// The version of a "read in full" mark that counts (#169): a mark without
+/// it was written when the read had not really happened, so it is read again.
+const SYNCED_MARK: u64 = 2;
+
+fn synced_mark(record: &Value) -> bool {
+    record.get("v").and_then(Value::as_u64).is_some_and(|v| v >= SYNCED_MARK)
+}
+
 /// The phone's saved contacts were read in full (#115).
 pub fn contacts_synced_record() -> Value {
-    json!({ "t": "csync" })
+    json!({ "t": "csync", "v": SYNCED_MARK })
 }
 
 /// The phone's chat pins were read in full.
 pub fn pins_synced_record() -> Value {
-    json!({ "t": "pinsync" })
+    json!({ "t": "pinsync", "v": SYNCED_MARK })
 }
 
 /// A chat pinned on the phone at `at` (Unix seconds), or (with `None`)
@@ -1110,12 +1128,12 @@ pub fn seen_record(chat: &str) -> Value {
 /// Archives a chat, or (with `false`) takes it out of the archive.
 /// The phone's mutes were read in full.
 pub fn mutes_synced_record() -> Value {
-    json!({ "t": "mutesync" })
+    json!({ "t": "mutesync", "v": SYNCED_MARK })
 }
 
 /// The phone's status mutes were read in full (#101).
 pub fn status_mutes_synced_record() -> Value {
-    json!({ "t": "smutesync" })
+    json!({ "t": "smutesync", "v": SYNCED_MARK })
 }
 
 /// `jid`'s status updates muted, or unmuted again.
@@ -1211,6 +1229,15 @@ mod tests {
         // A LID chat alone takes the number as its JID.
         let b = reopen(&[msg(lid, "b", 2, true), lid_record(lid, pn)]);
         assert_eq!((b.chats.len(), b.chats[0].jid.as_str()), (1, pn));
+    }
+
+    #[test]
+    fn an_old_synced_mark_does_not_count() {
+        let old = |t: &str| json!({ "t": t });
+        let b = reopen(&[old("pinsync"), old("mutesync"), old("smutesync"), old("csync")]);
+        assert!(!b.pins_synced && !b.mutes_synced && !b.status_mutes_synced && !b.contacts_synced, "read again (#169)");
+        let b = reopen(&[pins_synced_record(), mutes_synced_record(), status_mutes_synced_record(), contacts_synced_record()]);
+        assert!(b.pins_synced && b.mutes_synced && b.status_mutes_synced && b.contacts_synced);
     }
 
     #[test]
@@ -1493,6 +1520,18 @@ mod tests {
         ]);
         assert_eq!(b.chats[0].messages.len(), 1);
         assert_eq!(b.chats[0].messages[0].status, Delivery::Read);
+    }
+
+    #[test]
+    fn a_location_is_a_place_not_a_file_to_forward() {
+        let raw = whatsapp_rust::serde_json::json!({ "k": "location", "lat": -0.5071, "lng": 101.4478, "name": "Ci Cafe Corner" });
+        let media = Media::parse(&raw).expect("parsed");
+        assert_eq!(media.place(), Some((-0.5071, 101.4478)));
+        assert!(!media.downloadable());
+        let record = with_media(msg_record("1@s.whatsapp.net", "x", false, "1@s.whatsapp.net", "[Lokasi] Ci Cafe Corner", 1, &Delivery::Received, false), Some(raw));
+        let m = &book(&[record]).chats[0].messages[0];
+        assert_eq!(m.forwardable_media(), None);
+        assert!(!m.forwardable());
     }
 
     #[test]
