@@ -1602,6 +1602,8 @@ enum MediaBox {
     Voice(f32),
     /// A call's line (Pego `FM/Call/LogBubble`): missed, declined, or how long.
     Call,
+    /// A shared place (#191): the map picture that came with it, if any.
+    Location(Option<PathBuf>),
 }
 
 /// What a click on media asks for.
@@ -1631,6 +1633,7 @@ impl MediaBox {
             MediaBox::Document { .. } => vec2(CARD.x, PREVIEW_HEIGHT + CARD.y),
             MediaBox::Voice(width) => vec2(*width, VOICE_HEIGHT),
             MediaBox::Call => vec2(250.0, 84.0),
+            MediaBox::Location(_) => vec2(CARD.x, MAP_HEIGHT + CARD.y),
         }
     }
 }
@@ -1638,6 +1641,9 @@ impl MediaBox {
 fn media_box(media: &Media, wrap: f32) -> MediaBox {
     if media.kind == "sticker" {
         return MediaBox::Sticker(media.file.clone());
+    }
+    if media.place().is_some() {
+        return MediaBox::Location(media.thumb.clone());
     }
     if media.kind == "call" {
         return MediaBox::Call;
@@ -1842,6 +1848,57 @@ fn paint_call_log(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media) 
     icons::paint(ui, Rect::from_center_size(start + vec2(7.0, 0.0), vec2(14.0, 14.0)), if video { "video" } else { "phone" }, 14.0, fg);
     ui.painter().galley(pos2(start.x + 22.0, start.y - text.size().y / 2.0), text, fg);
     response.on_hover_cursor(CursorIcon::PointingHand).clicked().then_some(MediaClick::Call(video))
+}
+
+/// The map picture's height on a location card (#191).
+const MAP_HEIGHT: f32 = 130.0;
+
+/// Where a place opens: Google Maps in the browser (#191).
+fn maps_url(lat: f64, lng: f64) -> String {
+    format!("https://www.google.com/maps?q={lat},{lng}")
+}
+
+/// A shared place (#191): the map picture with a pin, then its name and
+/// address (or the coordinates); a click opens it in Google Maps.
+fn paint_location(ui: &Ui, p: &Palette, rect: Rect, m: &ChatMsg, media: &Media, thumb: Option<&Path>) {
+    let Some((lat, lng)) = media.place() else { return };
+    let map = Rect::from_min_size(rect.min, vec2(rect.width(), MAP_HEIGHT));
+    let card = Rect::from_min_max(pos2(rect.left(), map.bottom()), rect.max);
+    let response = ui.interact(rect, ui.scope_id().with(("location", &m.id)), Sense::click());
+    let top = egui::CornerRadius { nw: R_MD, ne: R_MD, sw: 0, se: 0 };
+    match thumb.and_then(|t| widgets::picture_uri(ui.ctx(), t).map(|uri| (t, uri))) {
+        Some((thumb, uri)) => {
+            let uv = widgets::picture_size(thumb).map_or(Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), |px| cover_uv(px, map.size()));
+            egui::Image::from_uri(uri).texture_options(widgets::SHRUNK).uv(uv).corner_radius(top).fit_to_exact_size(map.size()).paint_at(ui, map);
+        }
+        None => {
+            ui.painter().rect_filled(map, top, p.raised);
+        }
+    }
+    // The pin's tip sits on the middle of the map.
+    let tip = map.center() + vec2(0.0, 12.0);
+    let head = tip - vec2(0.0, 20.0);
+    ui.painter().add(egui::Shape::convex_polygon(vec![head + vec2(-8.0, 3.5), head + vec2(8.0, 3.5), tip], p.red, Stroke::NONE));
+    ui.painter().circle_filled(head, 9.0, p.red);
+    ui.painter().circle_filled(head, 3.5, Color32::WHITE);
+    let (fg, sub) = if own_look(m) { (p.on_primary, p.on_primary_muted) } else { (p.text, p.muted) };
+    let back = if own_look(m) { p.on_primary_muted.gamma_multiply(0.25) } else { p.panel };
+    ui.painter().rect_filled(card, egui::CornerRadius { nw: 0, ne: 0, sw: R_MD, se: R_MD }, back);
+    let text = |key: &str| media.raw.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|t| !t.is_empty());
+    let coordinates = format!("{lat:.5}, {lng:.5}");
+    let (title, detail) = match (text("name"), text("addr")) {
+        (Some(name), address) => (name, address.unwrap_or(&coordinates)),
+        (None, Some(address)) => (address, coordinates.as_str()),
+        (None, None) => (tr("Location", "Lokasi"), coordinates.as_str()),
+    };
+    let inner = card.shrink2(vec2(12.0, 8.0));
+    let line = |top: f32, bottom: f32| Rect::from_min_max(pos2(inner.left(), top), pos2(inner.right(), bottom));
+    widgets::paint_text(ui, line(inner.top(), inner.top() + 19.0), title, fonts::ui(13.5, Weight::SemiBold), fg, Align::Min);
+    widgets::paint_text(ui, line(inner.top() + 19.0, inner.bottom()), detail, fonts::ui(12.0, Weight::Regular), sub, Align::Min);
+    let response = response.on_hover_text(tr("Open in Google Maps", "Buka di Google Maps")).on_hover_cursor(CursorIcon::PointingHand);
+    if response.clicked() {
+        crate::platform::open_url(&maps_url(lat, lng));
+    }
 }
 
 const VOICE_HEIGHT: f32 = 46.0;
@@ -2138,6 +2195,10 @@ fn paint_media(
     if matches!(shown, MediaBox::Call) {
         return paint_call_log(ui, p, rect, m, media);
     }
+    if let MediaBox::Location(thumb) = shown {
+        paint_location(ui, p, rect, m, media, thumb.as_deref());
+        return None;
+    }
     let state = media_action(m, media, downloads);
     // A video plays in its bubble (#167), from its file or the stream cache;
     // one too long for that, or without ffmpeg, opens as before.
@@ -2215,6 +2276,7 @@ fn paint_media(
         }
         MediaBox::Voice(_) => unreachable!("drawn by paint_voice above"),
         MediaBox::Call => unreachable!("drawn by paint_call_log above"),
+        MediaBox::Location(_) => unreachable!("drawn by paint_location above"),
         MediaBox::Document { pdf: file, thumb } => {
             let preview = Rect::from_min_size(rect.min, vec2(rect.width(), PREVIEW_HEIGHT));
             let card = Rect::from_min_max(pos2(rect.left(), preview.bottom()), rect.max);
@@ -5900,6 +5962,23 @@ mod member_color_tests {
         let distinct: std::collections::HashSet<_> =
             (0..40).map(|n| member_color(&format!("62812{n:04}@s.whatsapp.net"), true)).collect();
         assert!(distinct.len() >= 8, "members spread over the palette: {}", distinct.len());
+    }
+}
+
+#[cfg(test)]
+mod location_tests {
+    use super::*;
+
+    #[test]
+    fn a_place_opens_at_its_spot_in_google_maps() {
+        assert_eq!(maps_url(-0.5071, 101.4478), "https://www.google.com/maps?q=-0.5071,101.4478");
+        let place = media("location");
+        assert!(matches!(media_box(&place, 300.0), MediaBox::Location(None)));
+    }
+
+    fn media(kind: &str) -> Media {
+        let raw = whatsapp_rust::serde_json::json!({ "k": kind, "lat": -0.5071, "lng": 101.4478 });
+        Media { kind: kind.to_owned(), name: None, size: None, width: None, height: None, thumb: None, file: None, seconds: None, waveform: Vec::new(), voice: false, raw }
     }
 }
 

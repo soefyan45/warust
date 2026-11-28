@@ -431,6 +431,9 @@ macro_rules! found {
 /// plain text. Writes the inline thumbnail (when there is one) to `dir`.
 pub fn describe(message: &wa::Message, dir: &Path, msg_id: &str) -> Option<Value> {
     let base = message.get_base_message();
+    if let Some(record) = describe_location(base, dir, msg_id) {
+        return Some(record);
+    }
     let found = if let Some(m) = base.image_message.as_option() {
         Found { thumbnail: m.jpeg_thumbnail.clone(), width: m.width, height: m.height, ..found!(m, "image") }
     } else if let Some(m) = base.video_message.as_option() {
@@ -444,14 +447,7 @@ pub fn describe(message: &wa::Message, dir: &Path, msg_id: &str) -> Option<Value
     } else {
         return None;
     };
-    let thumb = found.thumbnail.as_ref().filter(|t| !t.is_empty()).and_then(|bytes| {
-        let path = dir.join(format!("{}.thumb.jpg", stem(msg_id)));
-        if !path.exists() {
-            std::fs::create_dir_all(dir).ok()?;
-            std::fs::write(&path, bytes).ok()?;
-        }
-        Some(path.to_string_lossy().into_owned())
-    });
+    let thumb = save_thumbnail(found.thumbnail.as_deref(), dir, msg_id);
     let download = match (&found.direct_path, &found.media_key, &found.enc, &found.sha) {
         (Some(path), Some(key), Some(enc), Some(sha)) => {
             json!({ "p": path, "key": hex(key), "enc": hex(enc), "sha": hex(sha) })
@@ -477,6 +473,34 @@ pub fn describe(message: &wa::Message, dir: &Path, msg_id: &str) -> Option<Value
         }
     }
     Some(record)
+}
+
+/// Writes a message's inline thumbnail to `dir` once; its path, if any.
+fn save_thumbnail(bytes: Option<&[u8]>, dir: &Path, msg_id: &str) -> Option<String> {
+    let bytes = bytes.filter(|b| !b.is_empty())?;
+    let path = dir.join(format!("{}.thumb.jpg", stem(msg_id)));
+    if !path.exists() {
+        std::fs::create_dir_all(dir).ok()?;
+        std::fs::write(&path, bytes).ok()?;
+    }
+    Some(path.to_string_lossy().into_owned())
+}
+
+/// A shared place (#191) as media of kind `location`: where it is, its name
+/// and address, and the map picture WhatsApp sends with it. Nothing to
+/// download. `None` without coordinates. Live locations (a stream of
+/// updates) are left out, as before.
+fn describe_location(base: &wa::Message, dir: &Path, msg_id: &str) -> Option<Value> {
+    let m = base.location_message.as_option()?;
+    let text = |t: &Option<String>| t.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
+    Some(json!({
+        "k": "location",
+        "lat": m.degrees_latitude?,
+        "lng": m.degrees_longitude?,
+        "name": text(&m.name),
+        "addr": text(&m.address),
+        "thumb": save_thumbnail(m.jpeg_thumbnail.as_deref(), dir, msg_id),
+    }))
 }
 
 /// Uploads a recorded voice note and wraps it as a push-to-talk message, with
@@ -592,6 +616,33 @@ pub async fn download(client: &Client, media: &Value, dir: &Path, msg_id: &str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_location_keeps_where_it_is_and_its_map() {
+        let dir = std::env::temp_dir().join(format!("warust-location-{}", std::process::id()));
+        let mut place = wa::message::LocationMessage::default();
+        place.degrees_latitude = Some(-0.5071);
+        place.degrees_longitude = Some(101.4478);
+        place.name = Some(" Ci Cafe Corner ".to_owned());
+        place.address = Some(String::new());
+        place.jpeg_thumbnail = Some(vec![0xFF, 0xD8, 0xFF]);
+        let mut message = wa::Message::default();
+        message.location_message = MessageField::some(place);
+        let record = describe(&message, &dir, "LOC1").expect("a location record");
+        assert_eq!(record["k"], "location");
+        assert_eq!(record["lat"], -0.5071);
+        assert_eq!(record["lng"], 101.4478);
+        assert_eq!(record["name"], "Ci Cafe Corner");
+        assert!(record["addr"].is_null());
+        assert!(record.get("dl").is_none());
+        let thumb = record["thumb"].as_str().expect("the map picture is kept");
+        assert_eq!(std::fs::read(thumb).ok(), Some(vec![0xFF, 0xD8, 0xFF]));
+        // Without coordinates there is nothing to show on a map.
+        let mut message = wa::Message::default();
+        message.location_message = MessageField::some(wa::message::LocationMessage::default());
+        assert!(describe(&message, &dir, "LOC2").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn labels_match_received_media() {
