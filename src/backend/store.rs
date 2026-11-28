@@ -508,6 +508,57 @@ impl Book {
         self.chats.sort_by_key(|c| std::cmp::Reverse(c.last_ts()));
     }
 
+    /// Every LID in the book (#192): 1:1 chats, senders, mentions and status
+    /// posters, each once, whether or not a number is known for it.
+    pub fn lids(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let chats = self.chats.iter().flat_map(|c| {
+            std::iter::once(c.jid.as_str()).chain(c.messages.iter().flat_map(|m| std::iter::once(m.sender.as_str()).chain(m.mentions.iter().map(String::as_str))))
+        });
+        chats
+            .chain(self.statuses.iter().map(|s| s.sender.as_str()))
+            .map(bare)
+            .filter(|jid| jid.ends_with("@lid") && seen.insert(jid.clone()))
+            .collect()
+    }
+
+    /// A LID mapping learned after messages came under the LID (#192): that
+    /// chat joins the number's, with its messages (each once), unread count
+    /// and names, so one person is one chat.
+    fn merge_lid_chat(&mut self, lid: &str, pn: &str) {
+        for names in [&mut self.names, &mut self.push_names] {
+            if let Some(name) = names.remove(lid) {
+                names.entry(pn.to_owned()).or_insert(name);
+            }
+        }
+        let Some(at) = self.chats.iter().position(|c| c.jid == lid) else { return };
+        let mut old = self.chats.remove(at);
+        let Some(chat) = self.chats.iter_mut().find(|c| c.jid == pn) else {
+            old.jid = pn.to_owned();
+            old.archived |= self.archived.contains(pn);
+            old.muted_until = old.muted_until.or_else(|| self.muted.get(pn).copied());
+            old.pinned_at = old.pinned_at.or_else(|| self.pinned.get(pn).copied());
+            self.chats.push(old);
+            return;
+        };
+        for message in old.messages {
+            if !chat.messages.iter().any(|m| m.id == message.id) {
+                let at = chat.messages.partition_point(|m| m.ts <= message.ts);
+                chat.messages.insert(at, message);
+            }
+        }
+        chat.unread += old.unread;
+        chat.archived |= old.archived;
+        chat.done_at = chat.done_at.max(old.done_at);
+        chat.muted_until = chat.muted_until.or(old.muted_until);
+        chat.pinned_at = chat.pinned_at.or(old.pinned_at);
+        for pin in old.pins {
+            if !chat.pins.iter().any(|p| p.id == pin.id) {
+                chat.pins.push(pin);
+            }
+        }
+    }
+
     fn apply(&mut self, record: &Value) {
         let text = |key: &str| record.get(key).and_then(Value::as_str).map(str::to_owned);
         match record.get("t").and_then(Value::as_str) {
@@ -528,6 +579,10 @@ impl Book {
                             c.pinned_at = Some(at);
                         }
                     }
+                    if let Some(until) = self.muted.remove(&lid) {
+                        self.muted.entry(pn.clone()).or_insert(until);
+                    }
+                    self.merge_lid_chat(&lid, &pn);
                     self.lid_to_pn.insert(lid, pn);
                 }
             }
@@ -1131,6 +1186,31 @@ mod tests {
         let b = reopen(&[archive_record(lid, true), lid_record(lid, pn), msg]);
         assert_eq!(b.chats.len(), 1);
         assert!(b.chats[0].archived);
+    }
+
+    #[test]
+    fn a_lid_chat_joins_the_number_once_the_mapping_is_known() {
+        let (lid, pn) = ("105845224431711@lid", "628130000001@s.whatsapp.net");
+        let msg = |chat: &str, id: &str, ts: i64, unread: bool| msg_record(chat, id, false, chat, "x", ts, &Delivery::Received, unread);
+        let b = reopen(&[
+            msg(pn, "a", 1, false),
+            push_record(lid, "Buk Mega"),
+            msg(lid, "b", 2, true),
+            msg(lid, "c", 3, true),
+            lid_record(lid, pn),
+            // The same message again, now under the number: kept once.
+            msg(pn, "c", 3, true),
+        ]);
+        assert_eq!(b.chats.len(), 1, "one person, one chat");
+        let chat = &b.chats[0];
+        assert_eq!(chat.jid, pn);
+        assert_eq!(chat.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["a", "b", "c"]);
+        assert_eq!(chat.unread, 2);
+        assert_eq!(b.name_of(pn), Some("Buk Mega"));
+        assert_eq!(b.name_of(lid), Some("Buk Mega"));
+        // A LID chat alone takes the number as its JID.
+        let b = reopen(&[msg(lid, "b", 2, true), lid_record(lid, pn)]);
+        assert_eq!((b.chats.len(), b.chats[0].jid.as_str()), (1, pn));
     }
 
     #[test]

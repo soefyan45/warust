@@ -24,7 +24,7 @@ use whatsapp_rust::wacore::types::presence::{ChatActivity, PresenceStatus, Recei
 use super::media;
 use crate::i18n::tr;
 use super::registry::Registry;
-use super::store::{self, Delivery, Store};
+use super::store::{self, Book, Delivery, Store};
 use super::{Status, Updater};
 
 /// What WhatsApp is told this device is, for the phone's Linked devices list.
@@ -878,6 +878,60 @@ fn sync_pins_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: 
     });
 }
 
+/// The LID ↔ number pairs whatsapp-rust already knows (from pairing, usync
+/// and messages) for `lids` the book still shows as LIDs (#192), recorded so
+/// their chats, senders and mentions show the person's name.
+fn learn_lids(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: Arc<Client>, lids: Vec<String>) {
+    if lids.is_empty() {
+        return;
+    }
+    let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
+    tokio::spawn(async move {
+        let mut records = Vec::new();
+        for lid in lids {
+            let Ok(jid) = lid.parse::<whatsapp_rust::prelude::Jid>() else { continue };
+            match client.get_lid_pn_entry(&jid).await {
+                Ok(Some(entry)) => records.push(store::lid_record(&lid, &format!("{}@s.whatsapp.net", entry.phone_number))),
+                Ok(None) => {}
+                Err(e) => log::debug!("session {id}: no number for a LID: {e}"),
+            }
+        }
+        state.record(&id, &chats, &records);
+    });
+}
+
+/// This account's LID ↔ number pair and its push name (#192), when the book
+/// does not have them yet.
+fn own_records(book: Option<&Book>, client: &Client) -> Vec<Value> {
+    let Some(pn) = client.pn().map(|jid| store::bare(&jid.to_string())) else { return Vec::new() };
+    let mut records = Vec::new();
+    if let Some(lid) = client.lid().map(|jid| store::bare(&jid.to_string())) {
+        if book.is_none_or(|b| b.normalize(&lid) != pn) {
+            records.push(store::lid_record(&lid, &pn));
+        }
+    }
+    let name = client.push_name();
+    let name = name.trim();
+    if !store::blank_name(name) && book.is_none_or(|b| b.name_of(&pn) != Some(name)) {
+        records.push(store::push_record(&pn, name));
+    }
+    records
+}
+
+/// The LIDs of a message (its 1:1 chat, sender and mentions) that `book`
+/// does not know a number for yet (#192).
+fn unknown_lids<'a>(book: Option<&Book>, jids: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for jid in jids {
+        let jid = store::bare(jid);
+        let known = book.is_some_and(|b| b.normalize(&jid) != jid);
+        if jid.ends_with("@lid") && !known && !out.contains(&jid) {
+            out.push(jid);
+        }
+    }
+    out
+}
+
 /// A contact saved on the phone (#115): the LID ↔ number pair it carries
 /// first, then its name under every JID it goes by, so the chat finds it
 /// whichever one it uses.
@@ -1041,6 +1095,9 @@ fn on_message(
     let record = with_quote_of(record, &ctx.message);
     records.push(store::with_media(record, media));
     state.record(id, chats, &records);
+    let sender = source.sender.to_string();
+    let lids = unknown_lids(state.book(id).as_deref(), [chat.as_str(), sender.as_str()].into_iter().chain(mentions.iter().map(String::as_str)));
+    learn_lids(state, id, chats, ctx.client.clone(), lids);
     if !source.is_from_me {
         state.emit(id, "message.received", json!({
             "id": msg_id,
@@ -1130,6 +1187,14 @@ async fn on_event(
             sync_mutes_once(state, id, chats, client.clone());
             sync_contacts_once(state, id, chats, client.clone());
             sync_pins_once(state, id, chats, client.clone());
+            // Our own LID and push name (#192), so a mention of this account
+            // shows our name; then every LID still shown as a LID.
+            let book = state.book(id);
+            state.record(id, chats, &own_records(book.as_deref(), client));
+            let book = state.book(id);
+            let lids = book.as_deref().map(Book::lids).unwrap_or_default();
+            let lids = unknown_lids(book.as_deref(), lids.iter().map(String::as_str));
+            learn_lids(state, id, chats, client.clone(), lids);
             let phone = client.pn().map(|jid| mask_phone(&jid.to_string()));
             let own_number = client.pn().map(|jid| store::bare(&jid.to_string()).split('@').next().unwrap_or_default().to_owned());
             let own_lid = client.lid().map(|jid| user_part(&jid.to_string()).to_owned());
