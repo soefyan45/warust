@@ -878,6 +878,41 @@ fn sync_pins_once(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: 
     });
 }
 
+/// Asks WhatsApp for the verified business name of 1:1 chats that show only
+/// a number (#195): a business that sends no push name gets its name before
+/// its next message. Its level (the official badge) comes with a message.
+fn fetch_business_names(state: &Updater, id: &str, chats: &Arc<Mutex<Store>>, client: Arc<Client>) {
+    let Some(book) = state.book(id) else { return };
+    let unnamed: Vec<whatsapp_rust::prelude::Jid> = book
+        .chats
+        .iter()
+        .filter(|c| c.jid.ends_with("@s.whatsapp.net") && book.name_of(&c.jid).is_none())
+        .take(200)
+        .filter_map(|c| c.jid.parse().ok())
+        .collect();
+    if unnamed.is_empty() {
+        return;
+    }
+    let (state, id, chats) = (state.clone(), id.to_owned(), chats.clone());
+    tokio::spawn(async move {
+        let mut records = Vec::new();
+        for batch in unnamed.chunks(50) {
+            match client.contacts().get_user_info(batch).await {
+                Ok(found) => {
+                    for (jid, info) in found {
+                        let name = info.verified_name.as_ref().and_then(|v| v.name.as_deref()).map(str::trim).filter(|n| !store::blank_name(n));
+                        if let Some(name) = name {
+                            records.push(store::biz_record(&store::bare(&jid.to_string()), name, None));
+                        }
+                    }
+                }
+                Err(e) => log::warn!("session {id}: asking for business names failed: {e}"),
+            }
+        }
+        state.record(&id, &chats, &records);
+    });
+}
+
 /// A contact saved on the phone (#115): the LID ↔ number pair it carries
 /// first, then its name under every JID it goes by, so the chat finds it
 /// whichever one it uses.
@@ -1012,6 +1047,14 @@ fn on_message(
     if !source.is_from_me && !push_name.is_empty() {
         records.push(store::push_record(&store::bare(&source.sender.to_string()), &push_name));
     }
+    // A business account's verified name and level (#195), when it changed.
+    let verified = ctx.info.verified_name.as_ref().and_then(|v| v.name.as_deref()).map(str::trim).filter(|n| !store::blank_name(n));
+    if let (false, Some(name)) = (source.is_from_me, verified) {
+        let (jid, level) = (store::bare(&source.sender.to_string()), ctx.info.verified_level.as_deref());
+        if state.book(id).is_none_or(|b| b.biz_of(&jid) != Some((name, level))) {
+            records.push(store::biz_record(&jid, name, level));
+        }
+    }
     if source.is_group && state.book(id).is_some_and(|b| b.name_of(&chat).is_none()) {
         let first_time = asked.lock().map(|mut a| a.insert(chat.clone())).unwrap_or(false);
         if first_time {
@@ -1130,6 +1173,7 @@ async fn on_event(
             sync_mutes_once(state, id, chats, client.clone());
             sync_contacts_once(state, id, chats, client.clone());
             sync_pins_once(state, id, chats, client.clone());
+            fetch_business_names(state, id, chats, client.clone());
             let phone = client.pn().map(|jid| mask_phone(&jid.to_string()));
             let own_number = client.pn().map(|jid| store::bare(&jid.to_string()).split('@').next().unwrap_or_default().to_owned());
             let own_lid = client.lid().map(|jid| user_part(&jid.to_string()).to_owned());
@@ -1356,6 +1400,7 @@ fn history_records(compressed: &[u8], media_dir: &Path, own: &[String], now: i64
         if let Some(at) = conversation.pinned.filter(|&at| at > 0) {
             records.push(store::chat_pin_record(&chat, Some(i64::from(at))));
         }
+        let mut businesses: HashSet<String> = HashSet::new();
         for entry in &conversation.messages {
             let Some(info) = entry.message.as_option() else { continue };
             let Some(key) = info.key.as_option() else { continue };
@@ -1378,6 +1423,12 @@ fn history_records(compressed: &[u8], media_dir: &Path, own: &[String], now: i64
             let record = with_quote_of(record, message);
             let (background, color) = status_colors(message);
             records.push(store::with_colors(record, background, color));
+            // A business account's verified name (#195); its level comes live.
+            if let (false, Some(name)) = (from_me, info.verified_biz_name.as_deref().map(str::trim).filter(|n| !store::blank_name(n)))
+                && businesses.insert(store::bare(&sender))
+            {
+                records.push(store::biz_record(&store::bare(&sender), name, None));
+            }
         }
     }
     Ok(records)
