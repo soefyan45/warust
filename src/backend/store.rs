@@ -711,10 +711,12 @@ impl Book {
                     }
                 }
             }
-            Some("mutesync") => self.mutes_synced = true,
-            Some("smutesync") => self.status_mutes_synced = true,
-            Some("csync") => self.contacts_synced = true,
-            Some("pinsync") => self.pins_synced = true,
+            // Only marks written once the collection really synced count
+            // (#169); older ones were written even when it had not.
+            Some("mutesync") if synced_mark(record) => self.mutes_synced = true,
+            Some("smutesync") if synced_mark(record) => self.status_mutes_synced = true,
+            Some("csync") if synced_mark(record) => self.contacts_synced = true,
+            Some("pinsync") if synced_mark(record) => self.pins_synced = true,
             Some("chatpin") => {
                 // `v` is when it was pinned; none (or null) unpins it.
                 if let Some(chat) = text("chat") {
@@ -986,14 +988,22 @@ pub fn unname_record(chat: &str) -> Value {
     json!({ "t": "unname", "chat": chat })
 }
 
+/// The version of a "read in full" mark that counts (#169): a mark without
+/// it was written when the read had not really happened, so it is read again.
+const SYNCED_MARK: u64 = 2;
+
+fn synced_mark(record: &Value) -> bool {
+    record.get("v").and_then(Value::as_u64).is_some_and(|v| v >= SYNCED_MARK)
+}
+
 /// The phone's saved contacts were read in full (#115).
 pub fn contacts_synced_record() -> Value {
-    json!({ "t": "csync" })
+    json!({ "t": "csync", "v": SYNCED_MARK })
 }
 
 /// The phone's chat pins were read in full.
 pub fn pins_synced_record() -> Value {
-    json!({ "t": "pinsync" })
+    json!({ "t": "pinsync", "v": SYNCED_MARK })
 }
 
 /// A chat pinned on the phone at `at` (Unix seconds), or (with `None`)
@@ -1055,12 +1065,12 @@ pub fn seen_record(chat: &str) -> Value {
 /// Archives a chat, or (with `false`) takes it out of the archive.
 /// The phone's mutes were read in full.
 pub fn mutes_synced_record() -> Value {
-    json!({ "t": "mutesync" })
+    json!({ "t": "mutesync", "v": SYNCED_MARK })
 }
 
 /// The phone's status mutes were read in full (#101).
 pub fn status_mutes_synced_record() -> Value {
-    json!({ "t": "smutesync" })
+    json!({ "t": "smutesync", "v": SYNCED_MARK })
 }
 
 /// `jid`'s status updates muted, or unmuted again.
@@ -1131,6 +1141,15 @@ mod tests {
         let b = reopen(&[archive_record(lid, true), lid_record(lid, pn), msg]);
         assert_eq!(b.chats.len(), 1);
         assert!(b.chats[0].archived);
+    }
+
+    #[test]
+    fn an_old_synced_mark_does_not_count() {
+        let old = |t: &str| json!({ "t": t });
+        let b = reopen(&[old("pinsync"), old("mutesync"), old("smutesync"), old("csync")]);
+        assert!(!b.pins_synced && !b.mutes_synced && !b.status_mutes_synced && !b.contacts_synced, "read again (#169)");
+        let b = reopen(&[pins_synced_record(), mutes_synced_record(), status_mutes_synced_record(), contacts_synced_record()]);
+        assert!(b.pins_synced && b.mutes_synced && b.status_mutes_synced && b.contacts_synced);
     }
 
     #[test]
