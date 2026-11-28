@@ -52,12 +52,48 @@ fn member_name(book: &Book, m: &Member) -> String {
         .unwrap_or_else(|| short_jid(m.phone.as_deref().unwrap_or(&m.jid)))
 }
 
+/// The picker row and pick that stand for everyone in the group (#194): no
+/// JID of its own, so it is never sent as `@<user part>`.
+pub const ALL: &str = "all";
+const ALL_PICK: &str = "@all";
+
+/// Whether `text` has `@all` as a word (any case): a message for everyone
+/// in the group (#194).
+pub fn mentions_all(text: &str) -> bool {
+    text.match_indices('@').any(|(at, _)| {
+        let before = text[..at].chars().next_back();
+        let rest = &text[at + 1..];
+        let word = rest.get(..ALL.len()).is_some_and(|w| w.eq_ignore_ascii_case(ALL));
+        let after = rest.get(ALL.len()..).and_then(|r| r.chars().next());
+        word && before.is_none_or(|c| !c.is_alphanumeric()) && after.is_none_or(|c| !c.is_alphanumeric())
+    })
+}
+
+/// The JIDs a group message mentions: the picked ones, and every member's
+/// when it says `@all` (#194), each once.
+pub fn with_everyone(text: &str, mut jids: Vec<String>, members: &[Member]) -> Vec<String> {
+    if mentions_all(text) {
+        for m in members {
+            if !jids.contains(&m.jid) {
+                jids.push(m.jid.clone());
+            }
+        }
+    }
+    jids
+}
+
 /// Members whose name or number contains `query` (case-insensitive), at most
-/// `MAX_ROWS`, in the group's order.
+/// `MAX_ROWS`, in the group's order; `@all` first when the query fits it.
 pub fn candidates(book: &Book, members: &[Member], query: &str) -> Vec<Candidate> {
     let q = query.to_lowercase();
-    members
-        .iter()
+    let everyone = (!members.is_empty() && ["all", "semua", "everyone"].iter().any(|w| w.starts_with(&q))).then(|| Candidate {
+        name: ALL.to_owned(),
+        number: tr("Everyone", "Semua anggota").to_owned(),
+        jid: ALL_PICK.to_owned(),
+    });
+    everyone
+        .into_iter()
+        .chain(members.iter()
         .filter_map(|m| {
             let name = member_name(book, m);
             let shown = m.phone.as_deref().unwrap_or(&m.jid);
@@ -66,7 +102,7 @@ pub fn candidates(book: &Book, members: &[Member], query: &str) -> Vec<Candidate
                 || user_part(shown).contains(&q)
                 || user_part(&m.jid).contains(&q);
             hit.then(|| Candidate { name, number: short_jid(shown), jid: m.jid.clone() })
-        })
+        }))
         .take(MAX_ROWS)
         .collect()
 }
@@ -95,6 +131,9 @@ pub fn insert_pick(text: &str, at: usize, cursor_char: usize, name: &str) -> Opt
 /// JIDs (each once). A name only counts as a whole word, so `@Ana` leaves
 /// `@Anabel` alone, and the longest name wins when one starts another.
 pub fn to_wire(text: &str, picks: &[(String, String)]) -> (String, Vec<String>) {
+    // `@all` stays as written: `with_everyone` adds its members (#194).
+    let picks: Vec<(String, String)> = picks.iter().filter(|(_, jid)| jid != ALL_PICK).cloned().collect();
+    let picks = picks.as_slice();
     if picks.is_empty() || !text.contains('@') {
         return (text.to_owned(), Vec::new());
     }
@@ -209,6 +248,19 @@ mod tests {
     }
 
     #[test]
+    fn at_all_is_a_word_of_its_own() {
+        assert!(mentions_all("@all rapat"));
+        assert!(mentions_all("tolong (@ALL) cek"));
+        assert!(mentions_all("halo @all"));
+        assert!(!mentions_all("@allan datang"));
+        assert!(!mentions_all("me@all.id"));
+        assert!(!mentions_all("halo semua"));
+        // The @all pick never becomes "@" on the wire.
+        let (text, jids) = to_wire("@all halo", &[pick("@all", "@all")]);
+        assert_eq!((text.as_str(), jids.len()), ("@all halo", 0));
+    }
+
+    #[test]
     fn query_after_at() {
         assert_eq!(active_query("halo @bu", 8), Some((5, "bu".to_owned())));
         assert_eq!(active_query("@", 1), Some((0, String::new())));
@@ -313,7 +365,12 @@ mod tests {
             Member { jid: "6281234@s.whatsapp.net".into(), phone: None },
             Member { jid: "5550001@lid".into(), phone: Some("6289876@s.whatsapp.net".into()) },
         ];
-        assert_eq!(candidates(&book, &members, "").len(), 2);
+        // @all heads the list while the query fits it (#194).
+        let all = candidates(&book, &members, "");
+        assert_eq!(all.len(), 3);
+        assert_eq!((all[0].name.as_str(), all[0].jid.as_str()), (ALL, "@all"));
+        assert_eq!(candidates(&book, &members, "sem")[0].name, ALL);
+        assert!(candidates(&book, &[], "").is_empty());
         let by_number = candidates(&book, &members, "9876");
         assert_eq!(by_number.len(), 1);
         assert_eq!(by_number[0].jid, "5550001@lid");

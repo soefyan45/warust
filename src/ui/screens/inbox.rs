@@ -4733,7 +4733,8 @@ fn composer(
     Some(match state.attachment.take() {
         Some(path) => Outgoing::File(path, message),
         None => {
-            let (text, mentions) = wire_text(chat.ends_with("@g.us"), &message, &picks);
+            let members = state.members_now.get(&crate::backend::Typing::key(&session.id, chat)).map(Vec::as_slice).unwrap_or_default();
+            let (text, mentions) = wire_text(chat.ends_with("@g.us"), &message, &picks, members);
             Outgoing::Text(text, mentions)
         }
     })
@@ -4741,9 +4742,12 @@ fn composer(
 
 /// The text to send and its mentioned JIDs. Only a group has mentions; a
 /// private chat sends the text as typed, whatever picks are left over.
-fn wire_text(group: bool, message: &str, picks: &[(String, String)]) -> (String, Vec<String>) {
+/// `@all` mentions every member (#194).
+fn wire_text(group: bool, message: &str, picks: &[(String, String)], members: &[crate::backend::Member]) -> (String, Vec<String>) {
     if group {
-        mention::to_wire(message, picks)
+        let (text, jids) = mention::to_wire(message, picks);
+        let jids = mention::with_everyone(&text, jids, members);
+        (text, jids)
     } else {
         (message.to_owned(), Vec::new())
     }
@@ -5804,12 +5808,25 @@ mod typing_tests {
     #[test]
     fn leftover_picks_do_not_leak_into_a_private_chat() {
         let picks = vec![("@Budi".to_owned(), "6281@s.whatsapp.net".to_owned())];
-        let (text, men) = wire_text(false, "halo @Budi", &picks);
+        let (text, men) = wire_text(false, "halo @Budi", &picks, &[]);
         assert_eq!(text, "halo @Budi");
         assert!(men.is_empty());
-        let (text, men) = wire_text(true, "halo @Budi", &picks);
+        let (text, men) = wire_text(true, "halo @Budi", &picks, &[]);
         assert_eq!(text, "halo @6281");
         assert_eq!(men, ["6281@s.whatsapp.net"]);
+    }
+
+    #[test]
+    fn at_all_mentions_every_member_and_stays_as_written() {
+        let member = |jid: &str| crate::backend::Member { jid: jid.to_owned(), phone: None };
+        let members = [member("6281@s.whatsapp.net"), member("77@lid")];
+        let picks = vec![("@all".to_owned(), "@all".to_owned()), ("@Budi".to_owned(), "6281@s.whatsapp.net".to_owned())];
+        let (text, men) = wire_text(true, "@all rapat jam 3 ya @Budi", &picks, &members);
+        assert_eq!(text, "@all rapat jam 3 ya @6281");
+        assert_eq!(men, ["6281@s.whatsapp.net", "77@lid"]);
+        // Typed without the picker too; not in a private chat.
+        assert_eq!(wire_text(true, "@All halo", &[], &members).1.len(), 2);
+        assert!(wire_text(false, "@all halo", &[], &members).1.is_empty());
     }
 
     #[test]
