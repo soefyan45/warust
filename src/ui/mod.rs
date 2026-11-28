@@ -174,6 +174,9 @@ pub struct State {
     /// A number opened from that dialog with no chat yet (number id, jid):
     /// shown as an empty chat until the first message records it.
     pub fresh_chat: Option<(String, String)>,
+    /// The text a "Chat on WhatsApp" link suggests (#193): the draft of the
+    /// chat the number dialog opens.
+    pub number_text: Option<String>,
     pub full_avatars: std::sync::Arc<std::collections::HashMap<String, Option<std::path::PathBuf>>>,
     /// "Teruskan ke…" dialog for a message of the open chat.
     pub forward: Option<forward::Dialog>,
@@ -588,6 +591,33 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
         ctx.request_repaint();
+    }
+
+    /// A "Chat on WhatsApp" link (#193): the window comes up on the Inbox and
+    /// the number dialog checks the number, on the main number when it is
+    /// connected, else the open or first connected one.
+    fn open_chat_link(&mut self, ctx: &egui::Context, link: crate::walink::ChatLink) {
+        self.show_window(ctx);
+        let snapshot = self.backend.snapshot();
+        let sessions = &snapshot.sessions;
+        let connected = |id: &str| sessions.iter().any(|s| s.id == id && s.status == Status::Connected);
+        let main = snapshot.settings.main_number.clone();
+        let Some(id) = main
+            .filter(|id| connected(id))
+            .or_else(|| self.state.inbox_session.clone().filter(|id| connected(id)))
+            .or_else(|| sessions.iter().find(|s| s.status == Status::Connected).map(|s| s.id.clone()))
+            .or_else(|| sessions.first().map(|s| s.id.clone()))
+        else {
+            return;
+        };
+        self.screen = Screen::Inbox;
+        if self.state.inbox_scope.as_deref().is_some_and(|scope| scope != id) {
+            self.state.inbox_scope = Some(id.clone());
+        }
+        self.state.inbox_session = Some(id.clone());
+        self.backend.send(Command::CheckNumber { id: id.clone(), number: link.number.clone() });
+        self.state.number_ask = Some((id, link.number));
+        self.state.number_text = link.text;
     }
 
     /// Ends the app for real: `logic` lets this close through.
@@ -1767,6 +1797,10 @@ impl eframe::App for App {
         }
         if let Some(chat) = chat {
             self.state.open_chat_requested = Some(chat);
+        }
+        // A "Chat on WhatsApp" link from a browser or a later start (#193).
+        if let Some(link) = crate::walink::take() {
+            self.open_chat_link(ctx, link);
         }
         if self.tray_asked.quit.swap(false, Ordering::Relaxed) {
             self.quit(ctx);

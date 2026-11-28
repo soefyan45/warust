@@ -2505,11 +2505,21 @@ fn number_dialog(ctx: &egui::Context, state: &mut State, session: &SessionView) 
         if existing.is_none() {
             state.fresh_chat = Some((session.id.clone(), jid.clone()));
         }
+        // The text a "Chat on WhatsApp" link suggests waits in the box (#193).
+        if let Some(text) = state.number_text.take() {
+            let key = (session.id.clone(), jid.clone());
+            if state.composer_for.as_ref() == Some(&key) {
+                state.composer = text;
+            } else {
+                state.drafts.insert(key, text);
+            }
+        }
         open_chat(state, &session.id, &jid, existing);
         close = true;
     }
     if close || modal.should_close() {
         state.number_ask = None;
+        state.number_text = None;
     }
 }
 
@@ -3564,7 +3574,11 @@ fn messages(
                                 label.ctx.set_cursor_icon(CursorIcon::PointingHand);
                                 if ui.input(|i| i.pointer.primary_clicked()) {
                                     match link {
-                                        Link::Url(url) => crate::platform::open_url(&url),
+                                        // A wa.me or WhatsApp chat link asks about its number here (#193).
+                                        Link::Url(url) => match crate::walink::parse(&url) {
+                                            Some(chat_link) => clicked = Some(MsgEvent::Phone(chat_link.number)),
+                                            None => crate::platform::open_url(&url),
+                                        },
                                         Link::Phone(number) => clicked = Some(MsgEvent::Phone(number)),
                                     }
                                 }
